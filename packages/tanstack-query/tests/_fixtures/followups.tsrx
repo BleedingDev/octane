@@ -85,26 +85,20 @@ function SequentialSuspenseReader(props: SequentialReaderProps) @{
 // rather than render its always-defined `data` as undefined.
 function GroupedSingularSuspenseReader(props: SequentialReaderProps) @{
 	const [a] = useSuspenseQueries({
-		queries: [
-			{ queryKey: ['susq-a'], queryFn: props.queryFnA, retry: false },
-		],
+		queries: [{ queryKey: ['susq-a'], queryFn: props.queryFnA, retry: false }],
 	});
 	const b = useSuspenseQuery({ queryKey: ['susq-b'], queryFn: props.queryFnB, retry: false });
-	<span id="sequential-data">{a.data + '/' + b.data.toUpperCase() as string}</span>
+	<span id="sequential-data">{(a.data + '/' + b.data.toUpperCase()) as string}</span>
 }
 
 function GroupedGroupedSuspenseReader(props: SequentialReaderProps) @{
 	const [a] = useSuspenseQueries({
-		queries: [
-			{ queryKey: ['susq-a'], queryFn: props.queryFnA, retry: false },
-		],
+		queries: [{ queryKey: ['susq-a'], queryFn: props.queryFnA, retry: false }],
 	});
 	const [b] = useSuspenseQueries({
-		queries: [
-			{ queryKey: ['susq-b'], queryFn: props.queryFnB, retry: false },
-		],
+		queries: [{ queryKey: ['susq-b'], queryFn: props.queryFnB, retry: false }],
 	});
-	<span id="sequential-data">{a.data + '/' + b.data.toUpperCase() as string}</span>
+	<span id="sequential-data">{(a.data + '/' + b.data.toUpperCase()) as string}</span>
 }
 
 const SEQUENTIAL_READERS = {
@@ -123,10 +117,12 @@ export function SuspenseQApp(props: { client: unknown; queryFn: () => Promise<st
 	</QueryClientProvider>
 }
 
-export function SequentialSuspenseQApp(props: SequentialReaderProps & {
-	client: unknown;
-	order?: SequentialSuspenseOrder;
-}) @{
+export function SequentialSuspenseQApp(
+	props: SequentialReaderProps & {
+		client: unknown;
+		order?: SequentialSuspenseOrder;
+	},
+) @{
 	const Reader = SEQUENTIAL_READERS[props.order ?? 'singular-singular'];
 	<QueryClientProvider client={props.client}>
 		@try {

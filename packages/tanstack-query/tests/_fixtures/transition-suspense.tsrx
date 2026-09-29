@@ -59,7 +59,9 @@ function GroupedReader(props: ReaderProps) @{
 			},
 		],
 	});
-	<span id="data" data-pending={isPending ? 'pending' : 'idle'}>{'data:' + q.data as string}</span>
+	<span id="data" data-pending={isPending ? 'pending' : 'idle'}>
+		{('data:' + q.data) as string}
+	</span>
 }
 
 export function TransitionSuspenseApp(props: AppProps) @{
