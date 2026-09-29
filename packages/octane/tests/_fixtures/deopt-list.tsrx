@@ -94,13 +94,19 @@ function CounterChild({ i }: { i: number }) {
 // row's own value, not the counter's final one.
 export function CounterJsxList() {
 	let n = -1;
-	return <ul>{['a', 'b', 'c'].map((x) => {
-		n++;
-		return <li key={x}>
-			<CounterChild i={n} />
-			<em data-n={String(n)}>{String(n)}</em>
-		</li>;
-	})}</ul>;
+	return (
+		<ul>
+			{['a', 'b', 'c'].map((x) => {
+				n++;
+				return (
+					<li key={x}>
+						<CounterChild i={n} />
+						<em data-n={String(n)}>{String(n)}</em>
+					</li>
+				);
+			})}
+		</ul>
+	);
 }
 
 // A `for` loop pushing JSX while it reassigns a local and a parameter.
@@ -128,13 +134,19 @@ export function CounterJsxListStateful() @{
 	let n = start;
 	const rows = ['a', 'b'].map((x) => {
 		n++;
-		return <li key={x}>
-			<button id={`seen-${x}`} onClick={() => setSeen(n)}>{String(n)}</button>
-		</li>;
+		return (
+			<li key={x}>
+				<button id={`seen-${x}`} onClick={() => setSeen(n)}>
+					{String(n)}
+				</button>
+			</li>
+		);
 	});
 	n = 100;
 	<div>
-		<button id="restart" onClick={() => setStart(start + 10)}>{'restart'}</button>
+		<button id="restart" onClick={() => setStart(start + 10)}>
+			{'restart'}
+		</button>
 		<p>{String(seen)}</p>
 		<ul>{rows}</ul>
 	</div>
