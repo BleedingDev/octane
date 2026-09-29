@@ -53,6 +53,28 @@ const SOURCES: Record<string, { source: string; client: string; server: string }
 		client: 'title=\\"a &amp;lt;b&amp;gt;\\">1 &gt; 0',
 		server: 'title="a &amp;lt;b&amp;gt;">${`1 &gt; 0`}',
 	},
+	// #1330: text is cleaned up and decoded once, from its text as written.
+	// `@tsrx/core` gives `value` decoded, and `@tsrx/oxc` gives it as written.
+	'a double-encoded reference in text': {
+		source: `export function App() @{\n\t<p>&amp;lt;b&amp;gt; &amp;amp;</p>\n}`,
+		client: '<p>&amp;lt;b&amp;gt; &amp;amp;</p>',
+		server: '<p>${`&amp;lt;b&amp;gt; &amp;amp;`}</p>',
+	},
+	'text that is only a reference': {
+		source: `export function App() @{\n\t<p>&nbsp;</p>\n}`,
+		client: '<p>\u00a0</p>',
+		server: '<p>${`\u00a0`}</p>',
+	},
+	'an encoded line break at the end of a line': {
+		source: `export function App() @{\n\t<p>a&#10;\n\t\tb</p>\n}`,
+		client: '<p>a\\n b</p>',
+		server: '<p>${`a\n b`}</p>',
+	},
+	'CRLF line breaks in text': {
+		source: 'export function App() @{\r\n\t<p>\r\n\t\ta &quot;b&quot;\r\n\t\tc\r\n\t</p>\r\n}',
+		client: '<p>a \\"b\\" c</p>',
+		server: '<p>${`a "b" c`}</p>',
+	},
 	// #1328, #1338: a comment between template texts renders like `{/* */}` in TSX.
 	'a line comment between template texts': {
 		source: `export function App() @{\n\t<p>\n\t\ta\n\t\t// note\n\t\tb\n\t</p>\n}`,

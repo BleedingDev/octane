@@ -23757,7 +23757,11 @@ function emitHeadServer(headNodes, ctx) {
 function normalizeAuthoredJsxLiterals(ast) {
 	return mapAst(ast, (node) => {
 		if (node.type === 'JSXText') {
-			const lines = node.value.split(/\r\n|\n|\r/);
+			// Clean up and decode the text as written, once. `@tsrx/core` gives
+			// `value` already decoded, as JSX parsers do, and `@tsrx/oxc` gives it
+			// as written; both give `raw` as written, without comments.
+			const written = typeof node.raw === 'string' ? node.raw : node.value;
+			const lines = written.split(/\r\n|\n|\r/);
 			let last = 0;
 			for (let i = 0; i < lines.length; i++) if (/[^ \t]/.test(lines[i])) last = i;
 			let value = '';
@@ -23768,7 +23772,7 @@ function normalizeAuthoredJsxLiterals(ast) {
 				if (line !== '') value += line + (i !== last ? ' ' : '');
 			}
 			if (value.includes('&')) value = decodeHTMLStrict(value);
-			return value === node.value ? node : { ...node, value, raw: value };
+			return value === node.value && value === node.raw ? node : { ...node, value, raw: value };
 		}
 		if (
 			node.type === 'JSXAttribute' &&

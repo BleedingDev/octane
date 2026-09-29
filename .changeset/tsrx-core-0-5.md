@@ -2,7 +2,7 @@
 'octane': patch
 ---
 
-Update the shared TSRX compiler dependencies to `@tsrx/core` 0.5.1 and
+Update the shared TSRX compiler dependencies to `@tsrx/core` 0.5.2 and
 `@tsrx/oxc` 0.17.0.
 
 The parser now gives template markup TSX's exact tree: the indentation between
@@ -23,10 +23,12 @@ The TSRX language changes in this release apply to `.tsrx` files:
   literal; compute any other expression into a local first.
 - Every compile error has a TypeScript (`TS…`) or TSRX (`TSRX…`) code.
 
-A JSX attribute string is decoded once, from its text as written. The browser
-compiler, and a Node compile that fell back to `@tsrx/core`'s parser, decoded
-`title="a &amp;lt;b&amp;gt;"` twice and rendered the title `a <b>` instead of
-`a &lt;b&gt;`.
+JSX text and attribute strings are cleaned up and decoded once, from the text as
+written. `@tsrx/core` now gives a `JSXText`'s `value` decoded, so the browser
+compiler, and a Node compile that fell back to `@tsrx/core`'s parser, would
+render `&amp;lt;` as `<` instead of `&lt;`; attribute strings already did.
+Layout checks read the text as written too, so text that is only `&nbsp;`
+still renders.
 
 Enum member initializers are now visible to the client-only server check and to
 universal renderers' `forbiddenGlobals` validation, so a client-only binding or a

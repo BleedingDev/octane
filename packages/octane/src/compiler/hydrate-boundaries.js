@@ -616,7 +616,8 @@ function isFunction(node) {
 
 function isRenderableChild(child) {
 	if (!child || child.type === 'JSXStyleElement') return false;
-	if (child.type === 'JSXText') return !/^\s*$/.test(child.value ?? '');
+	// JSX whitespace, read from the text as written: a decoded `&nbsp;` renders.
+	if (child.type === 'JSXText') return !/^[ \t\r\n]*$/.test(child.raw ?? child.value ?? '');
 	if (child.type === 'JSXExpressionContainer') {
 		return child.expression != null && child.expression.type !== 'JSXEmptyExpression';
 	}
