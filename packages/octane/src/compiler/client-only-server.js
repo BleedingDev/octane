@@ -562,8 +562,20 @@ export function assertNoLiveClientOnlyImports(
 		// smuggle a client-only binding into the server graph.
 		if (node.type === 'TSEnumDeclaration') {
 			if (node.declare !== true) {
-				for (const member of node.body?.members ?? [])
+				const members = node.body?.members ?? [];
+				const enumBindings = new Set();
+				if (node.id?.name) enumBindings.add(node.id.name);
+				for (const member of members) {
+					if (member.computed !== true && member.id?.type === 'Identifier') {
+						enumBindings.add(member.id.name);
+					}
+				}
+				scopes.push(enumBindings);
+				for (const member of members) {
+					if (member.computed === true) visit(member.id, member, 'id');
 					visit(member.initializer, member, 'initializer');
+				}
+				scopes.pop();
 			}
 			return;
 		}
@@ -744,6 +756,8 @@ function isReferenceIdentifier(node, parent, key) {
 		return parent.computed === true || parent.shorthand === true;
 	}
 	if (parent.type === 'MethodDefinition' && key === 'key' && !parent.computed) return false;
+	if (parent.type === 'TSEnumMember' && (key === 'key' || key === 'id') && !parent.computed)
+		return false;
 	if (parent.type === 'LabeledStatement' && key === 'label') return false;
 	if (
 		(parent.type === 'BreakStatement' || parent.type === 'ContinueStatement') &&
