@@ -212,7 +212,7 @@ function statements(fn) {
 }
 
 function isDirective(node) {
-	return node?.type === 'ExpressionStatement' && node.expression?.value === DIRECTIVE;
+	return node?.type === 'ExpressionStatement' && unwrap(node.expression)?.value === DIRECTIVE;
 }
 
 function attrName(attr) {
