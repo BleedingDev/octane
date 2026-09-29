@@ -7847,9 +7847,10 @@ function isSsrMarkerlessForItem(node) {
  * again. Its component call then adopts the host through the established
  * singleRoot path. Explicit keys, spread/children overrides, imported or
  * dynamic callees, and additional item statements cannot use that proof.
+ * `body` is forItemTemplateBody's output, which the client's single-root proof
+ * also reads, so a removed row-key attribute leaves both sides in agreement.
  */
-function canShareSsrComponentItemRange(node, ctx) {
-	const body = node?.body?.body || [];
+function canShareSsrComponentItemRange(body, ctx) {
 	if (body.length !== 1) return false;
 	const component = body[0];
 	if (
@@ -7933,6 +7934,13 @@ const HOST_MOUNT_SAFE_TAGS = new Set([
 	'ul',
 ]);
 
+// Attributes whose writes carry their own lifecycle or ordering keep a row on
+// forBlock. `style` is a deliberate, conservative member: its writers also run
+// hydration comparison, hidden-Activity display enforcement and transition
+// snapshots, none of which the direct mount was audited against. The cost is
+// confined to refilling an already-mounted, empty list with at least
+// FAST_HOST_LIST_MIN_ITEMS rows: the first mount and every update, including
+// each virtualized scroll, run through forBlock whichever helper is named.
 const HOST_MOUNT_UNSAFE_ATTRIBUTES = new Set([
 	'autofocus',
 	'checked',
@@ -14815,21 +14823,8 @@ function ssrEmitFor(node, ctx, name, inlinedSubs, parentNs, cssHash, componentNs
 		),
 		node,
 	);
-	let explicitKey = null;
 	let keyDeclaration = null;
-	const firstEl = (node.body.body || []).find(
-		(child) => child.type === 'Element' || child.type === 'JSXElement',
-	);
-	if (firstEl) {
-		const keyAttr = (firstEl.attributes || firstEl.openingElement?.attributes || []).find(
-			(attr) => (attr.name?.name || attr.name) === 'key',
-		);
-		if (keyAttr?.value != null) {
-			explicitKey =
-				keyAttr.value.type === 'JSXExpressionContainer' ? keyAttr.value.expression : keyAttr.value;
-		}
-	}
-	if (explicitKey === null) explicitKey = node.key || null;
+	const explicitKey = forRowKeyAttribute(node, ctx) ?? node.key ?? null;
 	if (explicitKey !== null) {
 		const keyParams = [itemId];
 		if (node.index) keyParams.push(node.index);
@@ -14865,7 +14860,7 @@ function ssrEmitFor(node, ctx, name, inlinedSubs, parentNs, cssHash, componentNs
 		node,
 	);
 	const sharedItemRange =
-		!bindingSite && (markerlessItem || canShareSsrComponentItemRange(node, ctx));
+		!bindingSite && (markerlessItem || canShareSsrComponentItemRange(itemBody, ctx));
 	const itemHtml =
 		sharedItemRange || bindingSite ? itemCall : ssrCall('ssrBlock', [itemCall], node);
 	let renderItem = itemNeedsIdentity
@@ -26203,10 +26198,17 @@ function planJsx(
 		// setter distinguish a fresh mount from a preserved suspended retry.
 		const constArgNode = (expr) =>
 			expr === 'null' ? b.literal(null) : expr === 'style-unset' ? b.id('__s') : b.id(expr);
-		const bagFieldValue = (f) => (f.constExpr !== null ? constArgNode(f.constExpr) : b.id(f.local));
+		const bagFieldValue = (f) =>
+			f.hostVar !== null
+				? b.id(f.hostVar)
+				: f.constExpr !== null
+					? constArgNode(f.constExpr)
+					: b.id(f.local);
 		const rootArg = () => (single ? b.id('_root') : b.literal(null));
 		if (bag.fields.length <= BAG_FACTORY_MAX) {
 			ctx.runtimeNeeded.add(`bag${bag.fields.length}`);
+			// The arity factory's object literal still declares every field, so an
+			// omitted trailing `undefined` seed keeps the same bag shape.
 			mountLines.push(
 				inheritOriginLoc(
 					b.stmt(
@@ -26217,7 +26219,9 @@ function planJsx(
 								`_$bag${bag.fields.length}`,
 								b.id('__s'),
 								rootArg(),
-								...bag.fields.map(bagFieldValue),
+								...optionalCallArgs(
+									...bag.fields.map((f) => (f.constExpr === 'undefined' ? null : bagFieldValue(f))),
+								),
 							),
 						),
 					),
@@ -26858,10 +26862,12 @@ function planJsx(
 								cc.valueExpr,
 								b.literal(cc.signalSite),
 								childAnchor ?? b.literal(null),
-								cc.anchorVar ? b.literal(true) : undefinedNode(),
-								undefinedNode(),
-								cc.coalesceRange ? b.literal(true) : undefinedNode(),
-								cc.onlyChildText ? b.literal(true) : undefinedNode(),
+								...optionalCallArgs(
+									cc.anchorVar ? b.literal(true) : null,
+									null,
+									cc.coalesceRange ? b.literal(true) : null,
+									cc.onlyChildText ? b.literal(true) : null,
+								),
 							),
 						),
 					),
@@ -27059,15 +27065,13 @@ function planJsx(
 			);
 			const memoAnchor = anchorNodeFor(cc, 'compAnchor');
 			const trailing = liteMemo
-				? [memoAnchor ?? undefinedNode(), b.literal(cc.invocationSite)]
-				: [
-						memoAnchor ?? undefinedNode(),
-						undefinedNode(),
-						cc.singleRoot ? b.literal(true) : undefinedNode(),
-						cc.inheritRange ? b.literal(true) : undefinedNode(),
-						undefinedNode(),
+				? optionalCallArgs(b.literal(cc.invocationSite), memoAnchor)
+				: optionalCallArgs(
 						b.literal(cc.invocationSite),
-					];
+						memoAnchor,
+						cc.singleRoot ? b.literal(true) : null,
+						cc.inheritRange ? b.literal(true) : null,
+					);
 			const witnessMiss = cc.autoMemoWitnesses.length
 				? witnessMissChain(cc.autoMemoWitnesses)
 				: null;
@@ -27108,7 +27112,7 @@ function planJsx(
 			continue;
 		}
 		// M3 inherit-range: the sole comp-call root of a `@{}` body — the slot
-		// BORROWS the enclosing block's marker range (10th positional arg), so it
+		// BORROWS the enclosing block's marker range (the `inherit` argument), so it
 		// mints nothing and the server skips the child's frame pair at the same
 		// site (ssrEmitComponent reads the same predicate). Supersedes lite (the
 		// borrow needs a real Block behind the slot) and singleRoot (the borrow
@@ -27119,7 +27123,6 @@ function planJsx(
 		if (cc.inheritRange) {
 			const componentHelper = cc.voidComponent ? '_$componentSlotVoid' : '_$componentSlot';
 			ctx.runtimeNeeded.add(cc.voidComponent ? 'componentSlotVoid' : 'componentSlot');
-			const inheritAnchor = anchorNodeFor(cc, 'compAnchor') ?? undefinedNode();
 			pushAfterStmt(
 				cc.id,
 				org,
@@ -27131,12 +27134,12 @@ function planJsx(
 						hostExpr(),
 						cc.compNode,
 						cc.propsExpr,
-						inheritAnchor,
-						undefinedNode(),
-						undefinedNode(),
-						b.literal(true),
-						undefinedNode(),
-						b.literal(cc.invocationSite),
+						...optionalCallArgs(
+							b.literal(cc.invocationSite),
+							anchorNodeFor(cc, 'compAnchor'),
+							null,
+							b.literal(true),
+						),
 					),
 				),
 			);
@@ -27163,8 +27166,7 @@ function planJsx(
 						hostExpr(),
 						cc.compNode,
 						cc.propsExpr,
-						liteAnchor ?? undefinedNode(),
-						b.literal(cc.invocationSite),
+						...optionalCallArgs(b.literal(cc.invocationSite), liteAnchor),
 					),
 				),
 			);
@@ -27177,14 +27179,14 @@ function planJsx(
 		// unmount move the slot DOM along with the block; an element host with
 		// no in-template anchor can safely append).
 		const compAnchor = anchorNodeFor(cc, 'compAnchor');
-		const trailing = [
-			compAnchor ?? undefinedNode(),
-			cc.keyExpr ?? undefinedNode(),
-			cc.singleRoot ? b.literal(true) : cc.maybeSingleRoot ? b.literal(2) : undefinedNode(),
-			undefinedNode(),
-			cc.keyExpr != null ? b.literal(true) : undefinedNode(),
+		const trailing = optionalCallArgs(
 			b.literal(cc.invocationSite),
-		];
+			compAnchor,
+			cc.singleRoot ? b.literal(true) : cc.maybeSingleRoot ? b.literal(2) : null,
+			null,
+			cc.keyExpr ?? null,
+			cc.keyExpr != null ? b.literal(true) : null,
+		);
 		let invocation = b.call(
 			componentHelper,
 			b.id('__s'),
@@ -27387,8 +27389,11 @@ const DEFERRABLE_MOUNT_KINDS = new Set([
 // field names are object properties, so unlike locals a minifier can never
 // shorten them; 1-char names are the shipped-bytes win. Each field is either
 // LOCAL-backed (the mount path assigns a pre-declared `_mN` local; the runtime
-// bag factory receives it positionally) or CONST-seeded (`null`/`undefined`
-// seeds pass straight to the factory — no local, no mount statement).
+// bag factory receives it positionally), CONST-seeded (`null`/`undefined`
+// seeds pass straight to the factory — no local, no mount statement), or
+// HOST-backed (a DOM host already held by the mount block's own `const _root` /
+// `const _elN`, which ensureVar declares before any binding mount and so before
+// the factory call: the factory reads that const directly, with no alias local).
 // Registration order = mount-write order = the factory's positional args =
 // the letter sequence, so `_$bagN(s, root, v0, v1, …)` builds `{a: v0, b: v1,
 // …}` with every field carrying its REAL mount value. `letter()` throws for a
@@ -27399,6 +27404,9 @@ const BAG_UC = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 // Highest shared-factory arity (bag0..bag16 in the runtime); bigger bags fall
 // back to `bagOf(__s, root, { … })` with an inline literal of real values.
 const BAG_FACTORY_MAX = 16;
+// Hosts the mount block declares as top-level consts. `__block.parentNode` is a
+// property read, so it keeps an ordinary local.
+const BAG_CONST_HOST = /^(?:_root|_el\d+)$/;
 function bagLetter(i) {
 	if (i < 26) return BAG_LC[i];
 	if (i < 52) return BAG_UC[i - 26];
@@ -27421,6 +27429,7 @@ function makeBag() {
 				name: bagLetter(i),
 				local: constExpr === undefined ? `_m${i}` : null,
 				constExpr: constExpr === undefined ? null : constExpr,
+				hostVar: null,
 			};
 			fields.push(r);
 			byKey.set(key, r);
@@ -27428,16 +27437,34 @@ function makeBag() {
 		return r;
 	};
 	return {
-		/** Mount-write target for `key` — the pre-declared local. */
-		local: (key) => reg(key, undefined).local,
-		/** Register one immutable DOM-host field; aliases reuse its first mount write. */
+		/**
+		 * Mount-time reference for `key` — the pre-declared local, or a host-backed
+		 * field's const (read-only: host() returned false, so nothing assigns it).
+		 */
+		local: (key) => {
+			const r = reg(key, undefined);
+			return r.hostVar ?? r.local;
+		},
+		/**
+		 * Register one immutable DOM-host field; aliases reuse its first mount write.
+		 * Returns true when the caller must emit `local(key) = host`.
+		 */
 		host: (key, host) => {
 			const existing = byHost.get(host);
 			if (existing !== undefined) {
 				byKey.set(key, existing);
 				return false;
 			}
-			byHost.set(host, reg(key, undefined));
+			// Only a field this call creates can be host-backed: a key already read
+			// through local() may have handed its `_mN` name to emitted code.
+			const fresh = !byKey.has(key);
+			const r = reg(key, undefined);
+			byHost.set(host, r);
+			if (fresh && BAG_CONST_HOST.test(host)) {
+				r.local = null;
+				r.hostVar = host;
+				return false;
+			}
 			return true;
 		},
 		/** Seed `key` with a constant expression (no local, no mount write). */
@@ -27474,6 +27501,19 @@ function tsrxExprNode(node, ctx, componentName, inlinedSubs, parentNs = 'html', 
 // cross-stamp origins between statements.
 const undefinedNode = () => b.id('undefined');
 const nullNode = () => b.literal(null);
+
+// Optional positional arguments of a runtime writer whose parameters default to
+// undefined. Pass `null` for an absent entry: trailing absent entries are
+// omitted and interior ones become explicit `undefined` placeholders. Only use
+// it for writers that never inspect `arguments.length` (bindSignalText does).
+// componentSlot, componentSlotVoid, and componentSlotLite order their tail after
+// `props` by how often a call site supplies it — (invocationSite, anchor,
+// singleRoot, inherit, key, hasKey) — so the common call keeps two of the six.
+function optionalCallArgs(...entries) {
+	let end = entries.length;
+	while (end > 0 && entries[end - 1] == null) end--;
+	return entries.slice(0, end).map((entry) => entry ?? undefinedNode());
+}
 
 // Reference a compiled mount local / host var by NAME. ensureVar hands back
 // `__block.parentNode` for bagless hosts — resolve the member chain; every
@@ -27694,22 +27734,22 @@ function directSignalBindingHelper(bind) {
 function directSignalBindingArgs(bind, host, previous, value = bind.expr, previousValue) {
 	const common = [b.id('__s'), previous, host];
 	if (bind.kind === 'text' || bind.kind === 'textOnlyChild') {
+		// (…, onlyChild, previousValue, seededText, bindingMarker). An ordinary
+		// update passes only its raw-value cache: seededText matters only before
+		// the first write. A binding-view marker stays on every call because
+		// presentation hydration can replay a retry through the update path.
 		return [
 			...common,
 			value,
 			b.literal(bind.signalSite, JSON.stringify(bind.signalSite)),
 			b.literal(bind.kind === 'textOnlyChild'),
-			...(previousValue !== undefined
-				? [
-						bind.seededText ? b.literal(1) : undefinedNode(),
-						bind.bindingMarker ? b.literal(bind.bindingMarker) : undefinedNode(),
-						previousValue,
-					]
-				: bind.bindingMarker
-					? [bind.seededText ? b.literal(1) : undefinedNode(), b.literal(bind.bindingMarker)]
-					: bind.seededText
-						? [b.literal(1)]
-						: []),
+			...optionalCallArgs(
+				previousValue ?? null,
+				bind.seededText && (previousValue === undefined || bind.bindingMarker)
+					? b.literal(1)
+					: null,
+				bind.bindingMarker ? b.literal(bind.bindingMarker) : null,
+			),
 		];
 	}
 	if (
@@ -32400,77 +32440,80 @@ function keyedSelectionDepIndex(itemName, keyBody, subStmts, runtimeDepNames, ct
 	return runtimeDepNames.indexOf(selected.name);
 }
 
-// The first root's legacy key already owns the entire row through keyFn.
-// Avoid a second descriptor boundary for that same key. Only consume a host
-// key when the row cannot change a collected key before a later child reads it.
-// Opaque rendering, spreads and duplicate keys retain the existing boundary.
-// Component keys and nested host keys retain their own reconciliation ranges.
+const isKeyAttribute = (attribute) => (attribute.name?.name || attribute.name) === 'key';
+
+// The legacy row-key spelling: a valued `key` attribute on the first element of
+// an @for body. It takes precedence over a header key, as in @tsrx/core's React
+// target. The reconciler reads row keys before the body runs, so the key can
+// read the item, the index and names outside the loop, but nothing the body
+// declares; hoisting such a key would throw a ReferenceError at runtime.
+function forRowKeyAttribute(node, ctx) {
+	const element = node.body.body.find((n) => n.type === 'Element' || n.type === 'JSXElement');
+	const attribute = (element?.attributes || element?.openingElement?.attributes || []).find(
+		isKeyAttribute,
+	);
+	// A valueless `<li key>` or a comment-only `key={}` carries no expression and
+	// falls through to the header key, the index, or the `x.id ?? x` default.
+	if (attribute?.value == null) return null;
+	const expression =
+		attribute.value.type === 'JSXExpressionContainer'
+			? attribute.value.expression
+			: attribute.value;
+	if (expression.type === 'JSXEmptyExpression') return null;
+	const bodyLocals = collectComponentLocals({ body: node.body.body });
+	if (bodyLocals.size === 0) return expression;
+	for (const name of collectFreeIdentifiers(expression, new Set())) {
+		if (!bodyLocals.has(name)) continue;
+		const l = attribute.loc && attribute.loc.start;
+		const at = l
+			? ` (${ctx.mapSourceName ? ctx.mapSourceName + ':' : ''}${l.line}:${l.column})`
+			: '';
+		throw new Error(
+			`The \`key\` attribute on this \`@for\` row reads \`${name}\`, which is declared inside the ` +
+				'loop body. Row keys are computed before the body runs, so they can only read the item, ' +
+				'its `index` binding, and names from outside the loop. Derive the key from the item in ' +
+				`the loop header instead: \`@for (const item of items; key …)\`.${at}`,
+		);
+	}
+	return expression;
+}
+
+// A `key` on the only output root of an @for body names the row, never a
+// separate element: a valued key is the row key above, and the root cannot
+// change identity inside a row that shares it. Leaving the key on the root
+// would give it a boundary that only repeats the row key: an intrinsic root
+// lowers to a keyed descriptor instead of the native template, and a component
+// root loses the row memo and its shared single-root range. Remove it so the
+// row compiles exactly as the header spelling does. Like a header key, the
+// reconciler reads it; an input that changes while rows render takes effect at
+// the next reconcile. Keyed elements below the root keep their own boundaries.
 function forItemTemplateBody(node, ctx) {
 	const body = node.body.body;
-	if (ctx._universalRuntimeUnit != null || body.length !== 1) return body;
-	const root = body[0];
-	if (!isPlainHostRoot(root) || isActivityLongForm(root, ctx) || isFragmentLongForm(root, ctx))
+	if (ctx._universalRuntimeUnit != null) return body;
+	let root = null;
+	for (const statement of body) {
+		if (!isJsxNode(statement)) continue;
+		if (root !== null) return body;
+		root = statement;
+	}
+	if (
+		(root?.type !== 'Element' && root?.type !== 'JSXElement') ||
+		(!isPlainHostRoot(root) && !isComponentTag(root)) ||
+		isActivityLongForm(root, ctx) ||
+		isFragmentLongForm(root, ctx)
+	)
 		return body;
 	const attrs = root.attributes || root.openingElement?.attributes || [];
-	let keyIndex = -1;
-	for (let i = 0; i < attrs.length; i++) {
-		const attr = attrs[i];
-		if (attr.type === 'SpreadAttribute' || attr.type === 'JSXSpreadAttribute') return body;
-		if (jsxAttrRawName(attr) !== 'key') continue;
-		if (keyIndex !== -1 || attr.value == null) return body;
-		keyIndex = i;
-	}
-	if (keyIndex === -1) return body;
-	const value = attrs[keyIndex].value;
-	const key = value.type === 'JSXExpressionContainer' ? value.expression : value;
-	if (!isDeferralSafeBundleArg(key)) return body;
-	// Destructuring must not invoke defaults, computed reads or an iterator.
-	if (!isAutoMemoPropsParam(node.left.declarations[0].id)) return body;
-	function stableHost(host) {
-		if (!isPlainHostRoot(host) || isActivityLongForm(host, ctx) || isFragmentLongForm(host, ctx))
-			return false;
-		const tag = host.id?.name ?? host.openingElement?.name?.name;
-		if (tag.includes('-') || tag === 'script') return false;
-		const attributes = host.attributes || host.openingElement?.attributes || [];
-		if (
-			attributes.some(
-				(attr) =>
-					attr.type === 'SpreadAttribute' ||
-					attr.type === 'JSXSpreadAttribute' ||
-					jsxAttrRawName(attr) === 'is' ||
-					jsxAttrRawName(attr) === 'children',
-			)
-		)
-			return false;
-		// Inspect values so deferred event/ref callbacks remain eligible.
-		const values = attributes.map((attr) => attr.value);
-		if (containsRenderCall(values) || containsAutoMemoUnsafeStructure(values)) return false;
-		for (const child of host.children || []) {
-			if (child.type === 'JSXText') continue;
-			if (child.type === 'Text' || child.type === 'JSXExpressionContainer') {
-				const expr = child.expression;
-				if (!expr || expr.type === 'JSXEmptyExpression') continue;
-				if (
-					!isKnownTextChildExpression(expr) ||
-					containsRenderCall([expr]) ||
-					containsAutoMemoUnsafeStructure([expr])
-				)
-					return false;
-			} else if (!stableHost(child)) return false;
-		}
-		return true;
-	}
-	if (!stableHost(root)) return body;
-	const kept = attrs.filter((_, index) => index !== keyIndex);
-	return [
-		root.openingElement
-			? {
-					...root,
-					...(root.attributes === undefined ? {} : { attributes: kept }),
-					openingElement: { ...root.openingElement, attributes: kept },
-				}
-			: { ...root, attributes: kept },
-	];
+	const kept = attrs.filter((attribute) => !isKeyAttribute(attribute));
+	if (kept.length === attrs.length) return body;
+	const unkeyed = root.openingElement
+		? {
+				...root,
+				...(root.attributes === undefined ? {} : { attributes: kept }),
+				openingElement: { ...root.openingElement, attributes: kept },
+			}
+		: { ...root, attributes: kept };
+	return body.map((statement) => (statement === root ? unkeyed : statement));
 }
 
 function makeForCall(node, ctx, inlinedSubs, parentNs = 'html', cssHash = null) {
@@ -32525,26 +32568,10 @@ function makeForCall(node, ctx, inlinedSubs, parentNs = 'html', cssHash = null) 
 		return inheritOriginLoc(b.arrow(params, keyExpr), keyExpr);
 	}
 
-	let keyFn = null;
 	// New TSRX surfaces `key` on the JSXForExpression itself (read via `node.key`
-	// below). Legacy / `<li key={…}>` attribute syntax is also accepted: scan the
-	// body for the first Element and pull its `key=` attr if any. Accept both
-	// the old `Element` IR and the raw new `JSXElement` shape that's reached
-	// here when the body wasn't routed through normalizeChildren.
-	const firstEl = node.body.body.find((n) => n.type === 'Element' || n.type === 'JSXElement');
-	if (firstEl) {
-		const keyAttr = (firstEl.attributes || firstEl.openingElement?.attributes || []).find(
-			(a) => (a.name?.name || a.name) === 'key',
-		);
-		// A valueless `<li key>` carries no expression — skip it (mirroring
-		// makeCompCall's null-value handling) and fall through to the header key /
-		// index / `x.id ?? x` default instead of crashing on `keyAttr.value.type`.
-		if (keyAttr && keyAttr.value != null) {
-			const inner =
-				keyAttr.value.type === 'JSXExpressionContainer' ? keyAttr.value.expression : keyAttr.value;
-			keyFn = mkKeyFn(inner);
-		}
-	}
+	// below). The legacy `<li key={…}>` attribute spelling takes precedence.
+	const attributeKey = forRowKeyAttribute(node, ctx);
+	let keyFn = attributeKey === null ? null : mkKeyFn(attributeKey);
 	if (!keyFn && node.key) {
 		keyFn = mkKeyFn(node.key);
 	}
