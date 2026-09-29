@@ -818,7 +818,10 @@ export function App() @{
 		);
 	});
 
-	it('respects a var hoisted within a nested template block', () => {
+	it('rejects a nested template var that redeclares hook state', () => {
+		// A `var` hoists out of a nested `@{ … }` block into the component, where it
+		// redeclares the hook state, so TSRX rejects the program as TypeScript does.
+		// The editor leaves that error to TypeScript and adds no locality diagnostic.
 		const source = `"use strong";
 import { useState } from 'octane';
 export function App(props) @{
@@ -828,7 +831,7 @@ export function App(props) @{
     <span>{count as string}</span>
   }</div>
 }`;
-		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
+		expect(() => compile(source, '/src/App.tsrx')).toThrow(SyntaxError);
 		expect(compileToVolarMappings(source, '/src/App.tsrx').diagnostics).toEqual([]);
 	});
 

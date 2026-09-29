@@ -7,6 +7,7 @@
  * replace without guessing from JSX ancestry.
  */
 import { parseModule } from '@tsrx/core';
+import { adoptTemplateShape } from './parser-template-shape.js';
 
 /**
  * Share renderer ownership across diagnostics for one adopted parser tree.
@@ -366,7 +367,7 @@ export function analyzeRendererBoundaries(
 	source,
 	{ ast: parsedAst = null, filename = 'unknown.tsrx', renderer, rendererBoundaries = {} } = {},
 ) {
-	const ast = parsedAst ?? parseModule(source, filename);
+	const ast = parsedAst ?? adoptTemplateShape(parseModule(source, filename));
 	const imports = collectImports(ast, rendererBoundaries);
 	const importNames = new Set([...imports.direct.keys(), ...imports.namespaces.keys()]);
 	const rendererId = typeof renderer === 'string' ? renderer : renderer?.id;

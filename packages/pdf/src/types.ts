@@ -103,7 +103,7 @@ export type HostProps<Value> = EventProps<Value> & {
 	children?: OctaneNode;
 	class?: ClassName;
 	className?: ClassName;
-	ref?: OctaneRef<unknown>;
+	ref?: OctaneRef<HTMLDivElement>;
 };
 
 export type DocumentProps = HostProps<PDFDocumentProxy | false | undefined> & {

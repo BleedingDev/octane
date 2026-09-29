@@ -45,3 +45,24 @@ export function MapDemo() @{
 		<MapKids kids={[<li>{'a'}</li>, <li>{'b'}</li>, <li>{'c'}</li>]} />
 	</div>
 }
+
+// Children.count over an element's multi-line children. The indentation
+// between them is layout whitespace, which is not a child in TSX.
+export function CountChildren(props) {
+	return createElement('output', {
+		'data-count': String(Children.count(props.el.props.children)),
+	});
+}
+
+export function LayoutWhitespaceDemo() @{
+	<div id="wrap">
+		<CountChildren
+			el={
+				<p>
+					<span>{'a'}</span>
+					<span>{'b'}</span>
+				</p>
+			}
+		/>
+	</div>
+}

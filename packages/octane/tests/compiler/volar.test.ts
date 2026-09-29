@@ -608,6 +608,61 @@ declare module '@fixture/object-intrinsics/jsx-runtime' {
 		}
 	});
 
+	it('keeps a template @ts-expect-error on the line before the child it is about', () => {
+		const source = `export function Line(props: { label: (value: number) => string }) @{
+	<p>
+		// @ts-expect-error the label takes a number
+		{props.label('one')}
+	</p>
+}
+
+export function Block(props: { label: (value: number) => string }) {
+	return (
+		<p>
+			{/* @ts-expect-error the label takes a number */}
+			{props.label('two')}
+		</p>
+	);
+}
+
+export function Unchecked(props: { label: (value: number) => string }) @{
+	<p>{props.label('three')}</p>
+}
+`;
+		const root = mkdtempSync(join(tmpdir(), 'octane-volar-expect-error-'));
+		try {
+			mkdirSync(join(root, 'node_modules'));
+			symlinkSync(
+				fileURLToPath(new URL('../..', import.meta.url)),
+				join(root, 'node_modules/octane'),
+				'dir',
+			);
+			const result = compileToVolarMappings(source, 'Labels.tsrx');
+			expect(result.errors).toEqual([]);
+			const file = join(root, 'Labels.tsx');
+			writeFileSync(file, result.code);
+			const program = ts.createProgram({
+				rootNames: [file],
+				options: {
+					jsx: ts.JsxEmit.Preserve,
+					module: ts.ModuleKind.ESNext,
+					moduleResolution: ts.ModuleResolutionKind.Bundler,
+					noEmit: true,
+					strict: true,
+					target: ts.ScriptTarget.ESNext,
+					types: [],
+				},
+			});
+			const sourceFile = program.getSourceFile(file)!;
+			const diagnostics = program.getSemanticDiagnostics(sourceFile);
+			// Only the call without a directive is reported; both directives are used.
+			expect(diagnostics.map(({ code }) => code)).toEqual([2345]);
+			expect(result.code.slice(diagnostics[0].start!)).toMatch(/^'three'/);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it('reports a typed error array when there are no parse errors', () => {
 		// Hard parse errors still throw (the underlying acorn parser can't
 		// recover from arbitrary brace mismatches). When parsing succeeds the

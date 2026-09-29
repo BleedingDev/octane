@@ -562,7 +562,8 @@ export function assertNoLiveClientOnlyImports(
 		// smuggle a client-only binding into the server graph.
 		if (node.type === 'TSEnumDeclaration') {
 			if (node.declare !== true) {
-				for (const member of node.members ?? []) visit(member.initializer, member, 'initializer');
+				for (const member of node.body?.members ?? [])
+					visit(member.initializer, member, 'initializer');
 			}
 			return;
 		}

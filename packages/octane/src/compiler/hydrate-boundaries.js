@@ -8,6 +8,7 @@
  * intentionally instantiated afresh for every resource query.
  */
 import { builders as b, parseModule, strongHash } from '@tsrx/core';
+import { adoptTemplateShape } from './parser-template-shape.js';
 import { inheritGeneratedOrigin } from './generated-origin.js';
 import {
 	createLexicalAnalysis,
@@ -897,7 +898,7 @@ function validateBoundary(boundary, filename, hookNames) {
 
 /** Resolve Hydrate boundaries and assign source-order paths under their nearest boundary. */
 export function analyzeHydrateBoundaries(source, filename = 'unknown.tsrx', parsedAst = null) {
-	const ast = parsedAst ?? parseModule(source, filename);
+	const ast = parsedAst ?? adoptTemplateShape(parseModule(source, filename));
 	const imports = collectImports(ast);
 	if (imports.hydrateNames.size === 0) {
 		return { ast, boundaries: [], imports, roots: [] };

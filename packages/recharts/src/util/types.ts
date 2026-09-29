@@ -718,10 +718,13 @@ export type ViewBox = CartesianViewBoxRequired | PolarViewBoxRequired;
 // Collect the event handlers off a props bag (or element), rebinding each to
 // `(e) => handler(props, e)` — recharts item components pass their own props as
 // the first argument of chart-level handlers.
+// The adapted props hold event handlers only, so they never carry a `ref`.
+export type AdaptedEventHandlers = Record<string, (e: Event) => void> & { ref?: undefined };
+
 export function adaptEventHandlers(
 	props: unknown,
 	newHandler?: (e: Event) => void,
-): Record<string, (e: Event) => void> | null {
+): AdaptedEventHandlers | null {
 	if (!props || typeof props === 'function' || typeof props === 'boolean') {
 		return null;
 	}
