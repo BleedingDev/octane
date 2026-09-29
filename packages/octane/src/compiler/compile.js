@@ -47,7 +47,6 @@ import {
 	unwrapServerFunctionInitializer,
 } from './server-context.js';
 import { createStyleScopePass } from './style-scopes.js';
-import { decodeHTMLStrict } from 'entities';
 import { print as esrapPrint } from 'esrap';
 import esrapTsx from 'esrap/languages/tsx';
 import { buildFatSegments } from './fat-segments.js';
@@ -23894,11 +23893,10 @@ function emitHeadServer(headNodes, ctx) {
 function normalizeAuthoredJsxLiterals(ast) {
 	return mapAst(ast, (node) => {
 		if (node.type === 'JSXText') {
-			// Clean up and decode the text as written, once. `@tsrx/core` gives
-			// `value` already decoded, as JSX parsers do, and `@tsrx/oxc` gives it
-			// as written; both give `raw` as written, without comments.
-			const written = typeof node.raw === 'string' ? node.raw : node.value;
-			const lines = written.split(/\r\n|\n|\r/);
+			// Both parsers give `value` with its character references decoded, as
+			// JSX parsers do, so it is only cleaned up here: JSX's whitespace rule,
+			// applied to the decoded text as Babel applies it.
+			const lines = node.value.split(/\r\n|\n|\r/);
 			let last = 0;
 			for (let i = 0; i < lines.length; i++) if (/[^ \t]/.test(lines[i])) last = i;
 			let value = '';
@@ -23908,7 +23906,6 @@ function normalizeAuthoredJsxLiterals(ast) {
 				if (i !== lines.length - 1) line = line.replace(/ +$/, '');
 				if (line !== '') value += line + (i !== last ? ' ' : '');
 			}
-			if (value.includes('&')) value = decodeHTMLStrict(value);
 			return value === node.value && value === node.raw ? node : { ...node, value, raw: value };
 		}
 		if (
@@ -23916,17 +23913,11 @@ function normalizeAuthoredJsxLiterals(ast) {
 			node.value?.type === 'Literal' &&
 			typeof node.value.value === 'string'
 		) {
-			// Decode the string as written, once. `@tsrx/core` gives `value`
-			// already decoded, as JSX parsers do, and `@tsrx/oxc` gives it as
-			// written, so decoding `value` decoded a core parse twice.
-			const raw = node.value.raw;
-			const written =
-				typeof raw === 'string' && raw.length >= 2 && (raw[0] === '"' || raw[0] === "'")
-					? raw.slice(1, -1)
-					: node.value.value;
-			if (!written.includes('&')) return null;
-			const value = decodeHTMLStrict(written);
-			return { ...node, value: { ...node.value, value, raw: JSON.stringify(value) } };
+			// Both parsers give `value` decoded. Where that differs from the string
+			// as written, print it from `value`, not from `raw`.
+			const { raw, value } = node.value;
+			if (typeof raw === 'string' && raw.slice(1, -1) === value) return null;
+			return { ...node, value: { ...node.value, raw: JSON.stringify(value) } };
 		}
 		if (
 			node.type === 'JSXStyleElement' &&

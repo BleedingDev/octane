@@ -404,8 +404,8 @@ catalogs:
       specifier: ^0.5.2
       version: 0.5.2
     '@tsrx/oxc':
-      specifier: 0.17.0
-      version: 0.17.0
+      specifier: 0.18.0
+      version: 0.18.0
     '@tsrx/prettier-plugin':
       specifier: ^0.5.2
       version: 0.5.2
@@ -7116,7 +7116,7 @@ importers:
         version: 0.5.2
       '@tsrx/oxc':
         specifier: catalog:default
-        version: 0.17.0(svelte@5.56.7)
+        version: 0.18.0(svelte@5.56.7)
       '@types/react':
         specifier: catalog:default
         version: 19.2.18
@@ -7135,9 +7135,6 @@ importers:
       devalue:
         specifier: catalog:default
         version: 5.8.2
-      entities:
-        specifier: 7.0.1
-        version: 7.0.1
       es-module-lexer:
         specifier: catalog:default
         version: 1.7.0
@@ -20602,60 +20599,60 @@ packages:
   '@tsrx/core@0.5.2':
     resolution: {integrity: sha512-osF3PgCwzHXcmzD2mZZHddI5Eitqviet1UxiV4nVU5cApoWiy9f+AVlIMbO7RftxFg9nfD/dlREoAbld2+5rIA==}
 
-  '@tsrx/oxc-darwin-arm64@0.17.0':
-    resolution: {integrity: sha512-4ZjXDz7diZIRiQyb9WK88jt2bUuvViizTchu0rQ3RTW1DZeThull6dUFED772SFSzSJjf22gIIVvUBTD1ZklXw==}
+  '@tsrx/oxc-darwin-arm64@0.18.0':
+    resolution: {integrity: sha512-0/SM6yIlIDgM0KIE2t5DXRpMpbIPUDPWc7u2UEv+klLVD25EkKUt87Jq5gDwjZLFBKGCgnZ+kA778JYktdoMfQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [darwin]
 
-  '@tsrx/oxc-darwin-x64@0.17.0':
-    resolution: {integrity: sha512-Y8T6dUEzRjx6qseQS9/mnZk/m75u02m24RaxOXgTk3LIIocuf5aKxhqtrCa5ZPlKHV31GA8E/bSR9hvlkBYm3Q==}
+  '@tsrx/oxc-darwin-x64@0.18.0':
+    resolution: {integrity: sha512-rSDBdlcSEb+kFgcdSSGBSWZ3b9gwKeDqMIIK3Hzb/xNTjzarfOQnat85cnDkjzjf8/EXbHgmZkA7TFHrVmh8Lw==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [darwin]
 
-  '@tsrx/oxc-linux-arm64-gnu@0.17.0':
-    resolution: {integrity: sha512-SaS7vio/X6Y6UH7BqgC24fauXtAM/ahlXseDaCFDFtYNHeLT622FyYyGKhNINRG0wBgxbKsB0UAbKyCgudFj9w==}
+  '@tsrx/oxc-linux-arm64-gnu@0.18.0':
+    resolution: {integrity: sha512-HR0KNMp2wYX+BYGX3qXiUFhcXbd3+fJvW6OYwumBoZuxTkm5npKI1mVaXm867FOvWQQIdNR2/8f1EWbzl1qlfw==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@tsrx/oxc-linux-arm64-musl@0.17.0':
-    resolution: {integrity: sha512-UolOLFyX03weKtYU/S44xvbp4HsRxOlFmsuxBKyJfhlN5CyUNaS+yLfjUDr4j747HcK2BdmE76r5k+ewn4xHfg==}
+  '@tsrx/oxc-linux-arm64-musl@0.18.0':
+    resolution: {integrity: sha512-Do0OOgcUxlFIrJF6ikdGgFlsqVH/F7/9qfY/JhNDUCfZhRnChcb1mrHSisN9M9wTd907U/Rg9g6IPWEJVOId4A==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  '@tsrx/oxc-linux-x64-gnu@0.17.0':
-    resolution: {integrity: sha512-/UIlTZWO63h4ApGFMF9EPGkqfiKy1ESxE/cM7/B+BB9mGS7TOHOclKMl9vD0TNFEAm1xqioxkdH0deEIRO33Uw==}
+  '@tsrx/oxc-linux-x64-gnu@0.18.0':
+    resolution: {integrity: sha512-iKx+hgzBDZOYwsdHUj/lhaagtvN7zW8HSTVCLFlSfqnwp3fOzZRllxSDaJEdgBTBPrp56EpNASLGAWFThGuglw==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@tsrx/oxc-linux-x64-musl@0.17.0':
-    resolution: {integrity: sha512-MTYr4cXKEP2v68QinI8GBt9hLSz0O5HmlhW/5cgaQ4DWLlyA/oOAV+Y13gEjEvdZ86H1rhf6SuCMsSg/yoKkGQ==}
+  '@tsrx/oxc-linux-x64-musl@0.18.0':
+    resolution: {integrity: sha512-kIcpwtNYQ68WLc3TNCwQfHLxcfj6T8xaK8D6RUD4E75zUkyiEBIMbltCIiN8wRRSmpopjbkUgpUCJjwKSVsN6Q==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  '@tsrx/oxc-win32-arm64-msvc@0.17.0':
-    resolution: {integrity: sha512-yzsQjlQzyLypD8keIp8nM1oIAY5a6jp2cv1cjCx/fg7ifLoEAUHbZ3NPe+1PU6c29dm9UHX3N7vEWsvPs6ELJg==}
+  '@tsrx/oxc-win32-arm64-msvc@0.18.0':
+    resolution: {integrity: sha512-nUclNFnpN/HmSqNxrNc+H6rOVVMhQtx8EQ1MGTnS9xaQcDDmsWdefNzH2BgcRMBdhxMI2KEEReYtXT47DlgQjQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [win32]
 
-  '@tsrx/oxc-win32-x64-msvc@0.17.0':
-    resolution: {integrity: sha512-URkYRTINYEgNHMTyFH5abM20xkgc9Yilx0pnxFIyejXZX/1DuXN1s06fxyS2/uFKiSQuBRSAKq5PINFTRUM0kA==}
+  '@tsrx/oxc-win32-x64-msvc@0.18.0':
+    resolution: {integrity: sha512-ypQAsqJSWoqdJVs0CVnOo9z0iU0u0fFUQxdl9QTCBKq7M1no5+ySEy8gW7U7BHq7iu8jY2IxgqHwgPx1gxcTJw==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [win32]
 
-  '@tsrx/oxc@0.17.0':
-    resolution: {integrity: sha512-dEERpFq8PtYBIWnXAs8W6/ekbPLmu5C8TLLs1RSrm7JgpKjOVq1tcEE1o+LDQJkWh0Zk93tB6Um6zBemyuv8fQ==}
+  '@tsrx/oxc@0.18.0':
+    resolution: {integrity: sha512-k/LGsis+dgNk7RinU6YNYLutrLNNMnuHNUiRLCwLoHrdWX+mmBGVdJRscYP1iiQ2cRwLJKt7h+SCQ27FIF+dSQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     hasBin: true
 
@@ -48196,31 +48193,31 @@ snapshots:
     transitivePeerDependencies:
       - '@typescript-eslint/types'
 
-  '@tsrx/oxc-darwin-arm64@0.17.0':
+  '@tsrx/oxc-darwin-arm64@0.18.0':
     optional: true
 
-  '@tsrx/oxc-darwin-x64@0.17.0':
+  '@tsrx/oxc-darwin-x64@0.18.0':
     optional: true
 
-  '@tsrx/oxc-linux-arm64-gnu@0.17.0':
+  '@tsrx/oxc-linux-arm64-gnu@0.18.0':
     optional: true
 
-  '@tsrx/oxc-linux-arm64-musl@0.17.0':
+  '@tsrx/oxc-linux-arm64-musl@0.18.0':
     optional: true
 
-  '@tsrx/oxc-linux-x64-gnu@0.17.0':
+  '@tsrx/oxc-linux-x64-gnu@0.18.0':
     optional: true
 
-  '@tsrx/oxc-linux-x64-musl@0.17.0':
+  '@tsrx/oxc-linux-x64-musl@0.18.0':
     optional: true
 
-  '@tsrx/oxc-win32-arm64-msvc@0.17.0':
+  '@tsrx/oxc-win32-arm64-msvc@0.18.0':
     optional: true
 
-  '@tsrx/oxc-win32-x64-msvc@0.17.0':
+  '@tsrx/oxc-win32-x64-msvc@0.18.0':
     optional: true
 
-  '@tsrx/oxc@0.17.0(svelte@5.56.7)':
+  '@tsrx/oxc@0.18.0(svelte@5.56.7)':
     dependencies:
       '@oxc-project/types': 0.150.0
       oxfmt-current: oxfmt@0.68.0(svelte@5.56.7)
@@ -48229,14 +48226,14 @@ snapshots:
       pathe: 2.0.3
       tinyglobby: 0.2.17
     optionalDependencies:
-      '@tsrx/oxc-darwin-arm64': 0.17.0
-      '@tsrx/oxc-darwin-x64': 0.17.0
-      '@tsrx/oxc-linux-arm64-gnu': 0.17.0
-      '@tsrx/oxc-linux-arm64-musl': 0.17.0
-      '@tsrx/oxc-linux-x64-gnu': 0.17.0
-      '@tsrx/oxc-linux-x64-musl': 0.17.0
-      '@tsrx/oxc-win32-arm64-msvc': 0.17.0
-      '@tsrx/oxc-win32-x64-msvc': 0.17.0
+      '@tsrx/oxc-darwin-arm64': 0.18.0
+      '@tsrx/oxc-darwin-x64': 0.18.0
+      '@tsrx/oxc-linux-arm64-gnu': 0.18.0
+      '@tsrx/oxc-linux-arm64-musl': 0.18.0
+      '@tsrx/oxc-linux-x64-gnu': 0.18.0
+      '@tsrx/oxc-linux-x64-musl': 0.18.0
+      '@tsrx/oxc-win32-arm64-msvc': 0.18.0
+      '@tsrx/oxc-win32-x64-msvc': 0.18.0
     transitivePeerDependencies:
       - svelte
       - vite-plus

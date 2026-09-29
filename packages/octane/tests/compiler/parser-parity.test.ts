@@ -41,7 +41,7 @@ function compileBoth(source: string, mode: Mode): string {
 }
 
 const SOURCES: Record<string, { source: string; client: string; server: string }> = {
-	// #1327: an attribute string is decoded once, from the text as written.
+	// #1327: an attribute string is decoded once.
 	'a double-encoded reference in an attribute': {
 		source: `export function App() @{\n\t<div title="a &amp;lt;b&amp;gt;">x</div>\n}`,
 		client: 'title=\\"a &amp;lt;b&amp;gt;\\"',
@@ -53,8 +53,8 @@ const SOURCES: Record<string, { source: string; client: string; server: string }
 		client: 'title=\\"a &amp;lt;b&amp;gt;\\">1 &gt; 0',
 		server: 'title="a &amp;lt;b&amp;gt;">${`1 &gt; 0`}',
 	},
-	// #1330: text is cleaned up and decoded once, from its text as written.
-	// `@tsrx/core` gives `value` decoded, and `@tsrx/oxc` gives it as written.
+	// #1330: text is decoded once, and JSX's whitespace rule applies to the
+	// decoded text, as Babel applies it.
 	'a double-encoded reference in text': {
 		source: `export function App() @{\n\t<p>&amp;lt;b&amp;gt; &amp;amp;</p>\n}`,
 		client: '<p>&amp;lt;b&amp;gt; &amp;amp;</p>',
@@ -67,8 +67,14 @@ const SOURCES: Record<string, { source: string; client: string; server: string }
 	},
 	'an encoded line break at the end of a line': {
 		source: `export function App() @{\n\t<p>a&#10;\n\t\tb</p>\n}`,
-		client: '<p>a\\n b</p>',
-		server: '<p>${`a\n b`}</p>',
+		client: '<p>a b</p>',
+		server: '<p>${`a b`}</p>',
+	},
+	// JSX decodes the XHTML named references only, so a later HTML name is text.
+	'a named reference JSX does not define': {
+		source: `export function App() @{\n\t<p title="&check;">&check; &hellip;</p>\n}`,
+		client: '<p title=\\"&amp;check;\\">&amp;check; \u2026</p>',
+		server: '<p title="&amp;check;">${`&amp;check; \u2026`}</p>',
 	},
 	'CRLF line breaks in text': {
 		source: 'export function App() @{\r\n\t<p>\r\n\t\ta &quot;b&quot;\r\n\t\tc\r\n\t</p>\r\n}',

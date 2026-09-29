@@ -3,7 +3,7 @@
 ---
 
 Update the shared TSRX compiler dependencies to `@tsrx/core` 0.5.2 and
-`@tsrx/oxc` 0.17.0.
+`@tsrx/oxc` 0.18.0.
 
 The parser now gives template markup TSX's exact tree: the indentation between
 children is its own whitespace text, and each `@case`/`@default` arm is one block.
@@ -23,12 +23,14 @@ The TSRX language changes in this release apply to `.tsrx` files:
   literal; compute any other expression into a local first.
 - Every compile error has a TypeScript (`TS…`) or TSRX (`TSRX…`) code.
 
-JSX text and attribute strings are cleaned up and decoded once, from the text as
-written. `@tsrx/core` now gives a `JSXText`'s `value` decoded, so the browser
-compiler, and a Node compile that fell back to `@tsrx/core`'s parser, would
-render `&amp;lt;` as `<` instead of `&lt;`; attribute strings already did.
-Layout checks read the text as written too, so text that is only `&nbsp;`
-still renders.
+JSX text and attribute strings are decoded once, by the parser. Both parsers
+now give their `value` decoded, so Octane no longer decodes it again: the
+browser compiler, and a Node compile that fell back to `@tsrx/core`'s parser,
+rendered `&amp;lt;` as `<` instead of `&lt;`. Decoding follows JSX, as in
+React: numeric references and the XHTML named references are decoded, and a
+later HTML name such as `&check;` stays text. JSX's whitespace rule applies to
+the decoded text, as Babel applies it. Layout checks read the text as written,
+so text that is only `&nbsp;` still renders.
 
 Enum member initializers are now visible to the client-only server check and to
 universal renderers' `forbiddenGlobals` validation, so a client-only binding or a
