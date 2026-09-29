@@ -23768,10 +23768,18 @@ function normalizeAuthoredJsxLiterals(ast) {
 		if (
 			node.type === 'JSXAttribute' &&
 			node.value?.type === 'Literal' &&
-			typeof node.value.value === 'string' &&
-			node.value.value.includes('&')
+			typeof node.value.value === 'string'
 		) {
-			const value = decodeHTMLStrict(node.value.value);
+			// Decode the string as written, once. `@tsrx/core` gives `value`
+			// already decoded, as JSX parsers do, and `@tsrx/oxc` gives it as
+			// written, so decoding `value` decoded a core parse twice.
+			const raw = node.value.raw;
+			const written =
+				typeof raw === 'string' && raw.length >= 2 && (raw[0] === '"' || raw[0] === "'")
+					? raw.slice(1, -1)
+					: node.value.value;
+			if (!written.includes('&')) return null;
+			const value = decodeHTMLStrict(written);
 			return { ...node, value: { ...node.value, value, raw: JSON.stringify(value) } };
 		}
 		if (

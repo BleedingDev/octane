@@ -47,8 +47,9 @@ export function MapDemo() @{
 }
 
 // Children.count over an element's multi-line children. The indentation
-// between them is layout whitespace, which is not a child in TSX.
-export function CountChildren(props) {
+// between them is layout whitespace, which is not a child in TSX, and a
+// comment between them renders as TSX's `{/* … */}`, which isn't one either.
+export function CountChildren(props: { el: { props: { children?: unknown } } }) {
 	return createElement('output', {
 		'data-count': String(Children.count(props.el.props.children)),
 	});
@@ -59,6 +60,7 @@ export function LayoutWhitespaceDemo() @{
 		<CountChildren
 			el={
 				<p>
+					// A comment child is not a child either.
 					<span>{'a'}</span>
 					<span>{'b'}</span>
 				</p>

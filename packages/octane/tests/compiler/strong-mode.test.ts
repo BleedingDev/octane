@@ -819,9 +819,8 @@ export function App() @{
 	});
 
 	it('rejects a nested template var that redeclares hook state', () => {
-		// A `var` hoists out of a nested `@{ … }` block into the component, where it
-		// redeclares the hook state, so TSRX rejects the program as TypeScript does.
-		// The editor leaves that error to TypeScript and adds no locality diagnostic.
+		// A `var` in a nested `@{ … }` block belongs to the component function, as
+		// in JavaScript, so it redeclares the hook state.
 		const source = `"use strong";
 import { useState } from 'octane';
 export function App(props) @{
@@ -831,8 +830,40 @@ export function App(props) @{
     <span>{count as string}</span>
   }</div>
 }`;
-		expect(() => compile(source, '/src/App.tsrx')).toThrow(SyntaxError);
-		expect(compileToVolarMappings(source, '/src/App.tsrx').diagnostics).toEqual([]);
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(source, '/src/App.tsrx', { mode })).toThrow(
+				expect.objectContaining({
+					name: 'SyntaxError',
+					message: expect.stringContaining("'count'"),
+				}),
+			);
+		}
+		const result = compileToVolarMappings(source, '/src/App.tsrx');
+		expect(result.errors).toEqual([
+			expect.objectContaining({ message: expect.stringContaining("'count'") }),
+		]);
+		expect(result.diagnostics).toEqual([]);
+	});
+
+	it('respects a var hoisted within a nested template block', () => {
+		const source = `"use strong";
+import { useState } from 'octane';
+export function App(props) @{
+  const [count] = useState(0);
+  <div>
+    {count as string}
+    @{
+      if (props.ready) { var shown = 'ready'; }
+      <span>{shown as string}</span>
+    }
+  </div>
+}`;
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(source, '/src/App.tsrx', { mode })).not.toThrow();
+		}
+		const result = compileToVolarMappings(source, '/src/App.tsrx');
+		expect(result.errors).toEqual([]);
+		expect(result.diagnostics).toEqual([]);
 	});
 
 	it.each([

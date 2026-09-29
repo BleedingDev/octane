@@ -1399,6 +1399,35 @@ export default interface ErasedShape { value: string }
 		).toThrow(/Client-only export "default".*server: "omit-child"/s);
 	});
 
+	it('lets an enum member shadow a client-only import in later initializers', () => {
+		const compiler = createOctaneCompiler({ root: '/project' });
+		const enumSource = 'export enum Value { Scene = 1, Next = Scene + 1 }\n';
+		for (const [filename, body] of [
+			['/project/src/member.ts', enumSource],
+			[
+				'/project/src/member.tsrx',
+				`${enumSource}export function App() @{\n\t<p>{String(Value.Next) as string}</p>\n}\n`,
+			],
+		]) {
+			expect(() =>
+				compiler.transform(`import Scene from './Scene.object.tsrx';\n${body}`, filename, {
+					environment: 'server',
+					clientOnlyImports: [
+						{
+							request: './Scene.object.tsrx',
+							resolvedId: '/project/src/Scene.object.tsrx',
+							reference: {
+								id: 'octane-client-reference-v1:object:/src/Scene.object.tsrx',
+								moduleId: '/src/Scene.object.tsrx',
+								renderer: 'object',
+							},
+						},
+					],
+				}),
+			).not.toThrow();
+		}
+	});
+
 	it('allows a named class expression to shadow a client-only import in its own body', () => {
 		const compiler = createOctaneCompiler({ root: '/project' });
 		expect(() =>

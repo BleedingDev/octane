@@ -23,6 +23,11 @@ The TSRX language changes in this release apply to `.tsrx` files:
   literal; compute any other expression into a local first.
 - Every compile error has a TypeScript (`TS…`) or TSRX (`TSRX…`) code.
 
+A JSX attribute string is decoded once, from its text as written. The browser
+compiler, and a Node compile that fell back to `@tsrx/core`'s parser, decoded
+`title="a &amp;lt;b&amp;gt;"` twice and rendered the title `a <b>` instead of
+`a &lt;b&gt;`.
+
 Enum member initializers are now visible to the client-only server check and to
 universal renderers' `forbiddenGlobals` validation, so a client-only binding or a
 forbidden global used in one is reported, and a member name used by a later
