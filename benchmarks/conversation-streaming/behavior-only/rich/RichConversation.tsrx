@@ -89,7 +89,7 @@ function DeterministicMap(props: DeterministicMapProps) @{
 }
 
 export function RichConversation(props: RichConversationProps) @{
-	('use dom bindings');
+	'use dom bindings';
 	<section data-rich aria-labelledby="rich-title">
 		<h1 id="rich-title">{props.title as string}</h1>
 		<ol id="rich-progress" aria-label="Response progress">

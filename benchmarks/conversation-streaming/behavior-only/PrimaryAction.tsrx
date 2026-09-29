@@ -2,7 +2,7 @@ import type { CSSProperties } from 'octane';
 import type { PrimaryActionSnapshot } from './primary-action-state.ts';
 
 export function PrimaryAction(snapshot: PrimaryActionSnapshot) @{
-	('use dom bindings');
+	'use dom bindings';
 	<button
 		id="primary-action"
 		type={snapshot.type}

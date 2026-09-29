@@ -16,7 +16,7 @@ export function FixedChild({
 	onClick,
 	ref,
 }: FixedChildProps) @{
-	('use dom bindings');
+	'use dom bindings';
 	const rounded = radius === 'full';
 	const classes = [
 		'base',

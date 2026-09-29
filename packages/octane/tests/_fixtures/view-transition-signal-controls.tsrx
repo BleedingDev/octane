@@ -26,7 +26,7 @@ export function StagingSignalControls(props: {
 }
 
 export function StagingBindingPresentation(props: { phase: string }) @{
-	('use dom bindings');
+	'use dom bindings';
 	<article data-presentation>
 		<p data-binding-text>{props.phase + ' text'}</p>
 		<p data-binding-value>{props.phase}</p>

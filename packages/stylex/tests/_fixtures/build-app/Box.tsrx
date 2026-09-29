@@ -8,7 +8,7 @@ const styles = stylex.create({
 });
 
 export function Box(props: { compact: boolean; width: number | null }) @{
-	('use dom bindings');
+	'use dom bindings';
 	const selected = props.compact ? styles.compact : styles.box;
 	<div {...styleProps(selected, styles.width(props.width))}>{'box'}</div>
 }

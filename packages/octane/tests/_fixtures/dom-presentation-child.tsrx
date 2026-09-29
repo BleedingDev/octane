@@ -7,6 +7,6 @@ export interface ControlStyleChildProps {
 }
 
 export function ControlStyleChild(props: ControlStyleChildProps) @{
-	('use dom bindings');
+	'use dom bindings';
 	<input value={props.draft} style={props.styles} />
 }

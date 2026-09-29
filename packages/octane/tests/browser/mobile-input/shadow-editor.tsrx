@@ -2,7 +2,7 @@ export function ShadowEditorRows(props: {
 	items: readonly { id: string; name: string }[];
 	onEditor(host: HTMLDivElement | null): void;
 }) @{
-	('use dom bindings');
+	'use dom bindings';
 	<>
 		@for (const item of props.items; key item.id) {
 			<figure data-file={item.id}>
