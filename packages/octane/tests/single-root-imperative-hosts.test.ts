@@ -145,13 +145,8 @@ interface ListShape {
 
 const listShapes: Record<string, ListShape> = {
 	'a noscript row': { program: { app: list(`<noscript class="row">{String(row.id)}</noscript>`) } },
-	'a keyed row the item key cannot absorb': {
-		program: {
-			app: list(
-				`<p key={row.id} class="row">{String(row.id)}<Mark/></p>`,
-				`function Mark() @{ <b class="mark"/> }`,
-			),
-		},
+	'a row root keyed like its row': {
+		program: { app: list(`<p key={row.id} class="row">{String(row.id)}<b class="mark"/></p>`) },
 	},
 	'a keyed @if arm': {
 		program: {
