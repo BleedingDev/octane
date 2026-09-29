@@ -61,7 +61,7 @@
         {
           "path": "packages/i18next/tests/_fixtures/runtime-diff.tsrx",
           "role": "support",
-          "sha256": "29c985249b8999c8cc0d810ca2de57a7e36d48fe5a9facff33bb2bdfba3f8173"
+          "sha256": "e595c8fb3bc36a37950b7a3e4ade8aa9f2dc1419f4d548632ab085167bad03c4"
         },
         {
           "path": "packages/i18next/tests/differential/_setup.ts",

@@ -130,6 +130,8 @@ const PREBUNDLED = [
 	'prettier/plugins/estree',
 	'@tsrx/prettier-plugin',
 	'octane > devalue',
+	// The in-browser compiler decodes JSX text entities.
+	'octane > entities',
 	'@octanejs/tanstack-router > @tanstack/history',
 	'@octanejs/tanstack-router > @tanstack/router-core',
 	'@octanejs/tanstack-router > @tanstack/store',

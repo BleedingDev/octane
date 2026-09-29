@@ -296,8 +296,11 @@ export function Canvas({
 		...style,
 	};
 
+	// `ref` belongs to the canvas, so the wrapper's spread never carries one.
+	const wrapperProps: Record<string, unknown> & { ref?: undefined } = domProps;
+
 	return (
-		<div ref={wrapperRef} style={wrapperStyle} {...domProps}>
+		<div ref={wrapperRef} style={wrapperStyle} {...wrapperProps}>
 			<div style={{ width: '100%', height: '100%' }}>
 				<canvas ref={[canvasRef, ref]} style={{ display: 'block' }}>
 					{fallback}
