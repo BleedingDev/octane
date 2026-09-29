@@ -11,9 +11,14 @@ import { useRef, useEffect } from 'octane';
 export function ArrayRefsOneEl(props) @{
 	const a = useRef(null);
 	const b = useRef(null);
-	useEffect((tgt) => {
-		tgt.a = a.current;
-		tgt.b = b.current;
-	}, [props.target]);
-	<div class="multi" ref={[a, b]}>{'mounted'}</div>
+	useEffect(
+		(tgt) => {
+			tgt.a = a.current;
+			tgt.b = b.current;
+		},
+		[props.target],
+	);
+	<div class="multi" ref={[a, b]}>
+		{'mounted'}
+	</div>
 }

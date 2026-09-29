@@ -48,8 +48,9 @@ export function Match(props: { matchId: string }) @{
 			_displayPending: m._displayPending,
 		}),
 		(previous, next) =>
-			previous.routeId === next.routeId && previous.ssr === next.ssr &&
-				previous._displayPending === next._displayPending,
+			previous.routeId === next.routeId &&
+			previous.ssr === next.ssr &&
+			previous._displayPending === next._displayPending,
 	);
 	const routeId = matchState.routeId as string;
 	const route = (router.routesById as Record<string, any>)[routeId];
@@ -58,15 +59,16 @@ export function Match(props: { matchId: string }) @{
 	const routeErrorComponent = route.options.errorComponent ?? router.options.defaultErrorComponent;
 	const routeOnCatch = route.options.onCatch ?? router.options.defaultOnCatch;
 	const routeNotFoundComponent = route.isRoot
-		? route.options.notFoundComponent ?? router.options.notFoundRoute?.options.component
+		? (route.options.notFoundComponent ?? router.options.notFoundRoute?.options.component)
 		: route.options.notFoundComponent;
 	const resolvedNoSsr = matchState.ssr === false || matchState.ssr === 'data-only';
 
 	// Boundary presence, per upstream MatchView. The root route only gets a
 	// Suspense boundary when explicitly opted in via wrapInSuspense.
 	const suspenseSignal =
-		route.options.wrapInSuspense ?? PendingComponent ??
-			(routeErrorComponent as ErrorRouteComponent | undefined)?.preload;
+		route.options.wrapInSuspense ??
+		PendingComponent ??
+		(routeErrorComponent as ErrorRouteComponent | undefined)?.preload;
 	const SuspenseWrap =
 		(!route.isRoot || route.options.wrapInSuspense || resolvedNoSsr) &&
 		(suspenseSignal || resolvedNoSsr)
@@ -75,11 +77,10 @@ export function Match(props: { matchId: string }) @{
 	const CatchWrap = routeErrorComponent ? CatchBoundary : SafeFragment;
 	const NotFoundWrap = routeNotFoundComponent ? CatchNotFound : SafeFragment;
 	const ShellComponent = route.isRoot
-		? (route.options as RootRouteOptions).shellComponent ?? SafeFragment
+		? ((route.options as RootRouteOptions).shellComponent ?? SafeFragment)
 		: SafeFragment;
 
-	const pendingElement =
-		PendingComponent ? createElement(PendingComponent, {}) : null;
+	const pendingElement = PendingComponent ? createElement(PendingComponent, {}) : null;
 	const parentRouteId = route.parentRoute?.id;
 
 	<ShellComponent>
@@ -101,8 +102,9 @@ export function Match(props: { matchId: string }) @{
 							(error as any).routeId ??= routeId;
 
 							if (
-								!routeNotFoundComponent || error.routeId && error.routeId !== routeId ||
-									!error.routeId && !route.isRoot
+								!routeNotFoundComponent ||
+								(error.routeId && error.routeId !== routeId) ||
+								(!error.routeId && !route.isRoot)
 							) {
 								throw error;
 							}
@@ -184,17 +186,15 @@ function MatchInner(props: { matchId: string }) {
 
 	const Comp = route.options.component ?? router.options.defaultComponent;
 	const remountFn = route.options.remountDeps ?? router.options.defaultRemountDeps;
-	const remountDeps =
-		remountFn
-			? remountFn({
-					routeId,
-					loaderDeps: match.loaderDeps,
-					params: match._strictParams,
-					search: match._strictSearch,
-				})
-			: undefined;
-	const key =
-		remountDeps ? JSON.stringify(remountDeps) : undefined;
+	const remountDeps = remountFn
+		? remountFn({
+				routeId,
+				loaderDeps: match.loaderDeps,
+				params: match._strictParams,
+				search: match._strictSearch,
+			})
+		: undefined;
+	const key = remountDeps ? JSON.stringify(remountDeps) : undefined;
 	if (Comp) return createElement(Comp, key !== undefined ? { key } : {});
 	return createElement(Outlet, {});
 }
@@ -218,8 +218,7 @@ function OnRendered() @{
 
 		if (
 			currentResolvedLocation &&
-				(!previousResolvedLocation ||
-					previousResolvedLocation.href !== currentResolvedLocation.href)
+			(!previousResolvedLocation || previousResolvedLocation.href !== currentResolvedLocation.href)
 		) {
 			router.emit({
 				type: 'onRendered',

@@ -38,11 +38,13 @@ export function ShadowedCaptures(props) @{
 
 export function FoldedCaptures(props) {
 	const label = props.label;
-	return <section>
-		@if (props.read()) {
-			<button onClick={() => props.onPick(label)}>{label}</button>
-		}
-	</section>;
+	return (
+		<section>
+			@if (props.read()) {
+				<button onClick={() => props.onPick(label)}>{label}</button>
+			}
+		</section>
+	);
 }
 
 export function ElseCaptures(props) @{

@@ -6,9 +6,9 @@ import { createElement, useState } from 'octane';
 // React.createElement) for differential parity. `className` is used (not `class`)
 // because React maps it to the `class` attribute; Octane's de-opt does the same.
 export function DeoptList(props) @{
-	<ul>{props.items.map(
-		(it) => createElement('li', { key: it.id, className: 'row' }, it.label),
-	)}</ul>
+	<ul>
+		{props.items.map((it) => createElement('li', { key: it.id, className: 'row' }, it.label))}
+	</ul>
 }
 
 // Stateful version driving reorder / insert / remove through clicks, for the
@@ -20,12 +20,15 @@ export function DeoptListStateful() @{
 		{ id: 3, label: 'c' },
 	]);
 	<div>
-		<button id="reverse" onClick={() => setItems([...items].reverse())}>{'rev'}</button>
-		<button
-			id="add"
-			onClick={() => setItems([...items, { id: items.length + 1, label: 'x' }])}
-		>{'add'}</button>
-		<button id="remove" onClick={() => setItems(items.slice(1))}>{'rm'}</button>
+		<button id="reverse" onClick={() => setItems([...items].reverse())}>
+			{'rev'}
+		</button>
+		<button id="add" onClick={() => setItems([...items, { id: items.length + 1, label: 'x' }])}>
+			{'add'}
+		</button>
+		<button id="remove" onClick={() => setItems(items.slice(1))}>
+			{'rm'}
+		</button>
 		<ul>{items.map((it) => createElement('li', { key: it.id, className: 'row' }, it.label))}</ul>
 	</div>
 }
@@ -39,13 +42,23 @@ export function DeoptUnkeyed(props) @{
 // `<li/>` at this value position to `createElement('li', …)`. Same source runs on
 // React (where `.map(<li/>)` is native), so the differential rig proves parity.
 export function JsxList(props) @{
-	<ul>{props.items.map((it) => <li key={it.id}>{it.label as string}</li>)}</ul>
+	<ul>
+		{props.items.map((it) => (
+			<li key={it.id}>{it.label as string}</li>
+		))}
+	</ul>
 }
 
 // A return-JSX component with a typed destructured parameter, matching ordinary
 // TSX function syntax used by application components.
 export function DestructuredJsxList({ items }: { items: Array<{ id: number; label: string }> }) {
-	return <ul>{items.map((it) => <li key={it.id}>{it.label as string}</li>)}</ul>;
+	return (
+		<ul>
+			{items.map((it) => (
+				<li key={it.id}>{it.label as string}</li>
+			))}
+		</ul>
+	);
 }
 
 export function JsxListStateful() @{
@@ -55,12 +68,19 @@ export function JsxListStateful() @{
 		{ id: 3, label: 'c' },
 	]);
 	<div>
-		<button id="reverse" onClick={() => setItems([...items].reverse())}>{'rev'}</button>
-		<button
-			id="add"
-			onClick={() => setItems([...items, { id: items.length + 1, label: 'x' }])}
-		>{'add'}</button>
-		<button id="remove" onClick={() => setItems(items.slice(1))}>{'rm'}</button>
-		<ul>{items.map((it) => <li key={it.id}>{it.label as string}</li>)}</ul>
+		<button id="reverse" onClick={() => setItems([...items].reverse())}>
+			{'rev'}
+		</button>
+		<button id="add" onClick={() => setItems([...items, { id: items.length + 1, label: 'x' }])}>
+			{'add'}
+		</button>
+		<button id="remove" onClick={() => setItems(items.slice(1))}>
+			{'rm'}
+		</button>
+		<ul>
+			{items.map((it) => (
+				<li key={it.id}>{it.label as string}</li>
+			))}
+		</ul>
 	</div>
 }

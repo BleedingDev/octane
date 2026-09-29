@@ -24,8 +24,7 @@ export function Matches() @{
 	const rootRoute = (router.routesById as any)[rootRouteId];
 	const PendingComponent =
 		rootRoute.options.pendingComponent ?? router.options.defaultPendingComponent;
-	const pendingElement =
-		PendingComponent ? createElement(PendingComponent, {}) : null;
+	const pendingElement = PendingComponent ? createElement(PendingComponent, {}) : null;
 	const InnerWrap = router.options.InnerWrap ?? SafeFragment;
 
 	// `createRouter({ scrollRestoration: true })` wires scroll save/restore here, so

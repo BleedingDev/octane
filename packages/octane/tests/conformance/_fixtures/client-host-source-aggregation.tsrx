@@ -61,7 +61,9 @@ export function HostApplicationOrder(props) @{
 }
 
 export function AliasApplicationOrder(props) @{
-	<label htmlFor={props.firstFor} id={props.id} for={props.finalFor}>label</label>
+	<label htmlFor={props.firstFor} id={props.id} for={props.finalFor}>
+		label
+	</label>
 }
 
 export function MutableHostCollision(props) @{
@@ -81,7 +83,9 @@ export function MutableHostCollision(props) @{
 export function DuplicateHostSources(props) @{
 	<section id="duplicate-host-sources">
 		<div id="duplicate-title" title={props.first} title={props.second} />
-		<label id="duplicate-alias" htmlFor={props.first} for={props.second}>label</label>
+		<label id="duplicate-alias" htmlFor={props.first} for={props.second}>
+			label
+		</label>
 		<input id="duplicate-value" value={props.first} value={props.second} readOnly />
 		<div
 			id="duplicate-danger"
@@ -96,7 +100,9 @@ export function PropChildrenSources(props) @{
 	<section id="prop-children-sources">
 		<div id="direct-prop-child" children={props.direct} />
 		<div id="spread-prop-child" {...props.first} {...props.second} />
-		<div id="nested-child-wins" {...props.nested}>nested</div>
+		<div id="nested-child-wins" {...props.nested}>
+			nested
+		</div>
 	</section>
 }
 
@@ -109,7 +115,9 @@ export function DynamicVoidChild(props) @{
 }
 
 export function RepeatedAliasSources(props) @{
-	<label {...props.first} {...props.second} htmlFor={props.finalFor}>label</label>
+	<label {...props.first} {...props.second} htmlFor={props.finalFor}>
+		label
+	</label>
 }
 
 export function StableSpreadSources(props) @{

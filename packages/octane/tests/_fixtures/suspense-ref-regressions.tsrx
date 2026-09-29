@@ -24,11 +24,15 @@ export function RootFragmentRef(props: RootRefProps) @{
 }
 
 function RenderProbe(props: { value: string }) @{
-	<i class="render-probe" data-value={props.value}>{'probe'}</i>
+	<i class="render-probe" data-value={props.value}>
+		{'probe'}
+	</i>
 }
 
 function InitialRefChild(props: { innerRef: ElementRef }) @{
-	<li class="initial-ref-item" ref={props.innerRef}>{'ref item'}</li>
+	<li class="initial-ref-item" ref={props.innerRef}>
+		{'ref item'}
+	</li>
 }
 
 function InitialSuspendingChild(props: { promise: Promise<string> }) @{
@@ -52,13 +56,12 @@ export function SuspendedInitialHostRef(props: {
 	</ul>
 }
 
-export function SuspendedHostRefUpdate(props: {
-	innerRef: ElementRef;
-	promise: Promise<string>;
-}) @{
+export function SuspendedHostRefUpdate(props: { innerRef: ElementRef; promise: Promise<string> }) @{
 	@try {
 		<>
-			<li class="updated-ref-item" ref={props.innerRef}>{'ref item'}</li>
+			<li class="updated-ref-item" ref={props.innerRef}>
+				{'ref item'}
+			</li>
 			<InitialSuspendingChild promise={props.promise} />
 		</>
 	} @pending {
@@ -77,7 +80,9 @@ export function SupersededRefOrder(props: {
 	<>
 		@try {
 			const value = use(props.promise);
-			<span class="superseded-value" ref={props.cbRef}>{value as string}</span>
+			<span class="superseded-value" ref={props.cbRef}>
+				{value as string}
+			</span>
 		} @pending {
 			<span class="superseded-fallback">{'loading'}</span>
 		}

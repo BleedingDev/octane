@@ -12,13 +12,17 @@ export function NavApp() @{
 		@if (page === 'home') {
 			<>
 				<section class="hero">
-					<a href="#" class="lnk" onBlur={() => setBlurs(blurs + 1)}>{'home link'}</a>
+					<a href="#" class="lnk" onBlur={() => setBlurs(blurs + 1)}>
+						{'home link'}
+					</a>
 				</section>
 				<aside class="strip">{'strip'}</aside>
 			</>
 		} @else {
 			<p class="docs">{'docs ' + blurs}</p>
 		}
-		<button class="go" onClick={() => setPage('docs')}>{'go'}</button>
+		<button class="go" onClick={() => setPage('docs')}>
+			{'go'}
+		</button>
 	</div>
 }

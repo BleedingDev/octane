@@ -49,16 +49,14 @@ export function useTransitioner() {
 	useEffect(() => {
 		const unsub = router.history.subscribe(() => router.load());
 
-		const nextLocation = router.buildLocation(
-			{
-				to: router.latestLocation.pathname,
-				search: true,
-				params: true,
-				hash: true,
-				state: true,
-				_includeValidateSearch: true,
-			} as any,
-		);
+		const nextLocation = router.buildLocation({
+			to: router.latestLocation.pathname,
+			search: true,
+			params: true,
+			hash: true,
+			state: true,
+			_includeValidateSearch: true,
+		} as any);
 		if (
 			trimPathRight(router.latestLocation.publicHref) !== trimPathRight(nextLocation.publicHref)
 		) {
@@ -72,8 +70,8 @@ export function useTransitioner() {
 	// on re-runs for the same router instance.
 	useLayoutEffect(() => {
 		if (
-			typeof window !== 'undefined' && router.ssr ||
-				mountLoadForRouter.current.router === router && mountLoadForRouter.current.mounted
+			(typeof window !== 'undefined' && router.ssr) ||
+			(mountLoadForRouter.current.router === router && mountLoadForRouter.current.mounted)
 		) {
 			return;
 		}

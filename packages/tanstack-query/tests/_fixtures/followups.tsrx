@@ -42,15 +42,17 @@ export function Queries(props: { client: unknown }) @{
 export function Fetching(props: { client: unknown; queryFn: () => Promise<string> }) @{
 	const reader = useQuery({ queryKey: ['fz'], queryFn: props.queryFn, retry: false }, props.client);
 	const fetching = useIsFetching(undefined, props.client);
-	<div id="status">{'fetching:' + fetching + ' status:' + reader.status as string}</div>
+	<div id="status">{('fetching:' + fetching + ' status:' + reader.status) as string}</div>
 }
 
 export function Mutating(props: { client: unknown; mutationFn: (v: string) => Promise<string> }) @{
 	const m = useMutation({ mutationKey: ['mz'], mutationFn: props.mutationFn }, props.client);
 	const pending = useIsMutating(undefined, props.client);
 	<div>
-		<span id="status">{'pending:' + pending as string}</span>
-		<button id="go" onClick={() => m.mutate('x')}>go</button>
+		<span id="status">{('pending:' + pending) as string}</span>
+		<button id="go" onClick={() => m.mutate('x')}>
+			go
+		</button>
 	</div>
 }
 
@@ -64,7 +66,7 @@ export function Prefetch(props: { client: unknown }) @{
 
 function SuspenseReader(props: { queryFn: () => Promise<string> }) @{
 	const q = useSuspenseQuery({ queryKey: ['susq'], queryFn: props.queryFn, retry: false });
-	<span id="data">{'data:' + q.data as string}</span>
+	<span id="data">{('data:' + q.data) as string}</span>
 }
 
 function SequentialSuspenseReader(props: {
@@ -73,7 +75,7 @@ function SequentialSuspenseReader(props: {
 }) @{
 	const a = useSuspenseQuery({ queryKey: ['susq-a'], queryFn: props.queryFnA, retry: false });
 	const b = useSuspenseQuery({ queryKey: ['susq-b'], queryFn: props.queryFnB, retry: false });
-	<span id="sequential-data">{a.data + '/' + b.data as string}</span>
+	<span id="sequential-data">{(a.data + '/' + b.data) as string}</span>
 }
 
 export function SuspenseQApp(props: { client: unknown; queryFn: () => Promise<string> }) @{
@@ -95,7 +97,7 @@ export function SequentialSuspenseQApp(props: {
 		} @pending {
 			<span id="sequential-fallback">loading</span>
 		} @catch (error) {
-			<span id="sequential-error">{'error:' + (error as Error).message as string}</span>
+			<span id="sequential-error">{('error:' + (error as Error).message) as string}</span>
 		}
 	</QueryClientProvider>
 }
@@ -106,7 +108,7 @@ function HydratedReader() @{
 		queryFn: () => Promise.resolve('refetched'),
 		staleTime: Infinity,
 	});
-	<span id="hdata">{'data:' + q.data as string}</span>
+	<span id="hdata">{('data:' + q.data) as string}</span>
 }
 
 export function HydrationApp(props: { client: unknown; state: unknown }) @{

@@ -26,7 +26,7 @@ export function StagingSignalControls(props: {
 }
 
 export function StagingBindingPresentation(props: { phase: string }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<article data-presentation>
 		<p data-binding-text>{props.phase + ' text'}</p>
 		<p data-binding-value>{props.phase}</p>
@@ -41,10 +41,7 @@ export function StagingBindingPresentation(props: { phase: string }) @{
 	</article>
 }
 
-export function StagingHydratedBinding(props: {
-	phase: string;
-	when: HydrateWhen;
-}) @{
+export function StagingHydratedBinding(props: { phase: string; when: HydrateWhen }) @{
 	<ViewTransition>
 		<Hydrate split={false} when={props.when}>
 			<StagingBindingPresentation phase={props.phase} />
@@ -59,7 +56,7 @@ function StagingSignalOwner(props: { name: string; cleanups: string[] }) @{
 			props.cleanups.push(props.name + ':' + value$.get());
 		};
 	}, []);
-	<button data-owner={props.name} onClick={() => value$.set(value$.get() + 1)}>{String(
-		value$.get(),
-	)}</button>
+	<button data-owner={props.name} onClick={() => value$.set(value$.get() + 1)}>
+		{String(value$.get())}
+	</button>
 }

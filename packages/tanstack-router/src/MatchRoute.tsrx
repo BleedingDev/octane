@@ -11,10 +11,13 @@ import { useStore } from './useStore.ts';
 export function useMatchRoute() {
 	const router = useRouter();
 	useStore(router.stores.matchRouteDeps, (d) => d);
-	return useCallback((opts: Record<string, any>) => {
-		const { pending, caseSensitive, fuzzy, includeSearch, ...rest } = opts;
-		return router.matchRoute(rest as any, { pending, caseSensitive, fuzzy, includeSearch });
-	}, [router]);
+	return useCallback(
+		(opts: Record<string, any>) => {
+			const { pending, caseSensitive, fuzzy, includeSearch, ...rest } = opts;
+			return router.matchRoute(rest as any, { pending, caseSensitive, fuzzy, includeSearch });
+		},
+		[router],
+	);
 }
 
 // Props are permissive (`Record<string, any>` + optional render-prop children) —
@@ -29,7 +32,5 @@ export function MatchRoute(props: Record<string, any>) @{
 			: params
 				? props.children
 				: null;
-	<>
-		{out}
-	</>
+	<>{out}</>
 }

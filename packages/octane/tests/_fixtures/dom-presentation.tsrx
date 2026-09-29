@@ -20,7 +20,7 @@ export interface ActionPresentationProps {
 }
 
 export function ActionPresentation(props: ActionPresentationProps) @{
-	'use dom bindings';
+	('use dom bindings');
 	<button
 		id="early-action"
 		type={props.type}
@@ -51,12 +51,14 @@ function ActionHydrationSuffix(props: { suspend: boolean; promise: Promise<void>
 	<span>{'Ready'}</span>
 }
 
-export function ActionHydration(props: ActionPresentationProps & {
-	when: HydrationStrategy;
-	suspend: boolean;
-	promise: Promise<void>;
-	onHydrated(): void;
-}) @{
+export function ActionHydration(
+	props: ActionPresentationProps & {
+		when: HydrationStrategy;
+		suspend: boolean;
+		promise: Promise<void>;
+		onHydrated(): void;
+	},
+) @{
 	<Hydrate
 		when={props.when}
 		split={false}
@@ -106,13 +108,15 @@ export interface LoginPresentationProps {
 }
 
 export function LoginPresentation(props: LoginPresentationProps) @{
-	'use dom bindings';
+	('use dom bindings');
 	<form action={unbound('/login')} method="post" aria-busy={props.pending}>
 		<label>
 			{props.label as string}
 			<input name="email" type="email" disabled={props.pending} aria-invalid={props.error !== ''} />
 		</label>
-		<p role="status" hidden={props.error === ''}>{props.error as string}</p>
+		<p role="status" hidden={props.error === ''}>
+			{props.error as string}
+		</p>
 		<SubmitButton label={props.submitLabel} disabled={props.pending} pending={props.pending} />
 	</form>
 }
@@ -130,13 +134,14 @@ export interface AttachmentPresentationProps {
 	locked: boolean;
 	onRemove(id: string): void;
 	onRetry(id: string): void;
-	onInput?: | ((element: Element | null) => void | (() => void))
-	| { current: HTMLInputElement | null }
-	| null;
+	onInput?:
+		| ((element: Element | null) => void | (() => void))
+		| { current: HTMLInputElement | null }
+		| null;
 }
 
 export function AttachmentPresentation(props: AttachmentPresentationProps) @{
-	'use dom bindings';
+	('use dom bindings');
 	<>
 		@for (const item of props.items; key item.id) {
 			<figure data-file={item.id} aria-busy={item.state === 'uploading'}>
@@ -171,7 +176,7 @@ export interface SafetyPresentationProps {
 }
 
 export function SafetyPresentation(props: SafetyPresentationProps) @{
-	'use dom bindings';
+	('use dom bindings');
 	<>
 		@if (props.visible) {
 			<section role="alert">
@@ -184,10 +189,9 @@ export function SafetyPresentation(props: SafetyPresentationProps) @{
 						@if (action.href !== null) {
 							<a href={action.href}>{action.label as string}</a>
 						} @else {
-							<button
-								type="button"
-								onClick={() => props.onAction(action.id)}
-							>{action.label as string}</button>
+							<button type="button" onClick={() => props.onAction(action.id)}>
+								{action.label as string}
+							</button>
 						}
 					}
 				</div>
@@ -197,15 +201,18 @@ export function SafetyPresentation(props: SafetyPresentationProps) @{
 }
 
 export function AdjacentPresentation(props: { first: string; last: string }) @{
-	'use dom bindings';
-	<p>Before {props.first as string}{props.last as string} after</p>
+	('use dom bindings');
+	<p>
+		Before {props.first as string}
+		{props.last as string} after
+	</p>
 }
 
 export function InlineRefPresentation(props: {
 	onAttach(element: Element | null): void | (() => void);
 	title: string;
 }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<input title={props.title} ref={(node) => props.onAttach(node)} />
 }
 
@@ -217,7 +224,7 @@ export function SignalRowPresentation(props: {
 		classes: SignalHandle<string> | string;
 	}[];
 }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<>
 		@for (const item of props.items; key item.id) {
 			<figure data-row={item.id} class={item.classes} style={{ '--progress': item.progress }}>
@@ -231,7 +238,7 @@ export function SignalRowPresentation(props: {
 export function SignalTextPresentation(props: {
 	value: SignalHandle<string | number | boolean | null> | string | number | boolean | null;
 }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<p>{props.value}</p>
 }
 
@@ -242,7 +249,7 @@ export interface ControlPresentationProps {
 }
 
 export function ControlPresentation(props: ControlPresentationProps) @{
-	'use dom bindings';
+	('use dom bindings');
 	<section title={props.title}>
 		<input type="text" value={props.draft} />
 		<input type="checkbox" checked={props.checked} />
@@ -264,7 +271,7 @@ export function NativeControlPresentation({
 	required,
 	placeholder,
 }: NativeControlPresentationProps) @{
-	'use dom bindings';
+	('use dom bindings');
 	<textarea
 		value={unbound(draft$)}
 		readOnly={readOnly}
@@ -287,7 +294,7 @@ export interface NativeControlHostProps {
 }
 
 export function NativeControlHost(props: NativeControlHostProps) @{
-	'use dom bindings';
+	('use dom bindings');
 	<form
 		class={props.className}
 		data-layout-mode={props.layoutMode}
@@ -297,7 +304,9 @@ export function NativeControlHost(props: NativeControlHostProps) @{
 		inert={unbound(props.inert)}
 		ref={unbound(props.onReady)}
 		onKeyDown={unbound(props.onKeyDown)}
-	>{unbound(props.children)}</form>
+	>
+		{unbound(props.children)}
+	</form>
 }
 
 export function NativeControlLayout(
@@ -354,7 +363,7 @@ export function NativeControlSiblingPresentation({
 	required,
 	placeholder,
 }: NativeControlPresentationProps) @{
-	'use dom bindings';
+	('use dom bindings');
 	<section>
 		<textarea
 			value={unbound(draft$)}
@@ -376,7 +385,7 @@ export function NativeControlPairPresentation({
 	second: SignalHandle<string>;
 	onReady?: (element: HTMLElement | null) => void;
 }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<section ref={onReady}>
 		<textarea value={unbound(first)} />
 		<textarea value={unbound(second)} />
@@ -415,21 +424,20 @@ export function UnmatchedNativeControlSpread({
 	/>
 }
 
-function NativeControlHydrationSuffix(props: {
-	suspend: boolean;
-	promise: Promise<void>;
-}) @{
+function NativeControlHydrationSuffix(props: { suspend: boolean; promise: Promise<void> }) @{
 	if (props.suspend) use(props.promise);
 	<span>{'Ready'}</span>
 }
 
-export function NativeControlHydration(props: NativeControlPresentationProps & {
-	className: string;
-	when: HydrationStrategy;
-	suspend: boolean;
-	promise: Promise<void>;
-	onHydrated(): void;
-}) @{
+export function NativeControlHydration(
+	props: NativeControlPresentationProps & {
+		className: string;
+		when: HydrationStrategy;
+		suspend: boolean;
+		promise: Promise<void>;
+		onHydrated(): void;
+	},
+) @{
 	<Hydrate when={props.when} split={false} onHydrated={props.onHydrated}>
 		<NativeControlHost className={props.className}>
 			<NativeControlPresentation
@@ -449,7 +457,7 @@ export function SampledControlPresentation(props: {
 	checked: SignalHandle<boolean>;
 	plain: string;
 }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<section>
 		<input value={props.draft.get()} />
 		<input type="checkbox" checked={props.checked.get()} />
@@ -461,7 +469,7 @@ export function RadioControlPresentation(props: {
 	first: SignalHandle<boolean>;
 	second: SignalHandle<boolean>;
 }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<section>
 		<input type="radio" name="reentrant-choice" checked={props.second} />
 		<input type="radio" name="reentrant-choice" checked={props.first} />
@@ -471,7 +479,7 @@ export function RadioControlPresentation(props: {
 export function ControlRowsPresentation(props: {
 	items: readonly { id: string; draft: SignalHandle<string> }[];
 }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<>
 		@for (const item of props.items; key item.id) {
 			<label data-control={item.id}>
@@ -486,7 +494,7 @@ export function ControlSelectPresentation(props: {
 	values: SignalHandle<readonly string[]>;
 	options: readonly string[];
 }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<select multiple value={props.values}>
 		@for (const option of props.options; key option) {
 			<option value={unbound(option)}>{option as string}</option>
@@ -497,7 +505,7 @@ export function ControlSelectPresentation(props: {
 export function WholeStylePresentation(props: {
 	styles: SignalCSSProperties | string | SignalHandle<SignalCSSProperties | string | null> | null;
 }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<section style={props.styles}>
 		<input defaultValue={unbound('native')} />
 	</section>
@@ -508,7 +516,7 @@ export function SpreadStylePresentation(props: {
 	left: SignalHandle<number>;
 	extra: SignalCSSProperties;
 }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<section style={{ ...props.base, left: props.left, ...props.extra }} />
 }
 
@@ -516,6 +524,6 @@ export function StringProjectionPresentation(props: {
 	account: { name: string } | null;
 	identifier: string;
 }) @{
-	'use dom bindings';
+	('use dom bindings');
 	<span title={(props.account?.name.trim() || props.identifier).slice(0, 1).toUpperCase()} />
 }

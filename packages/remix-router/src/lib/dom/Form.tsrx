@@ -57,8 +57,7 @@ export function Form(props: FormProps) @{
 	const { useTransitions } = useContext(NavigationContext);
 	const submit = useSubmit();
 	const formAction = useFormAction(action, { relative });
-	const formMethod =
-		method.toLowerCase() === 'get' ? 'get' : 'post';
+	const formMethod = method.toLowerCase() === 'get' ? 'get' : 'post';
 	const isAbsolute = typeof action === 'string' && ABSOLUTE_URL_REGEX.test(action);
 
 	function submitHandler(event: SubmitEvent) {
@@ -68,22 +67,23 @@ export function Form(props: FormProps) @{
 
 		// Native submitters are button/input elements (upstream types the React
 		// nativeEvent submitter the same way).
-		const submitter = event.submitter as HTMLButtonElement | HTMLInputElement | null ?? null;
+		const submitter = (event.submitter as HTMLButtonElement | HTMLInputElement | null) ?? null;
 
 		const submitMethod =
-			submitter && submitter.getAttribute('formmethod') as HTMLFormMethod | null || method;
+			(submitter && (submitter.getAttribute('formmethod') as HTMLFormMethod | null)) || method;
 
-		const doSubmit = () => submit(submitter || event.currentTarget as HTMLFormElement, {
-			fetcherKey,
-			method: submitMethod,
-			navigate,
-			replace,
-			state,
-			relative,
-			preventScrollReset,
-			viewTransition,
-			defaultShouldRevalidate,
-		});
+		const doSubmit = () =>
+			submit(submitter || (event.currentTarget as HTMLFormElement), {
+				fetcherKey,
+				method: submitMethod,
+				navigate,
+				replace,
+				state,
+				relative,
+				preventScrollReset,
+				viewTransition,
+				defaultShouldRevalidate,
+			});
 
 		if (useTransitions && navigate !== false) {
 			startTransition(() => doSubmit());
@@ -99,5 +99,7 @@ export function Form(props: FormProps) @{
 		onSubmit={reloadDocument ? onSubmit : submitHandler}
 		{...rest}
 		data-discover={!isAbsolute && discover === 'render' ? 'true' : undefined}
-	>{children}</form>
+	>
+		{children}
+	</form>
 }

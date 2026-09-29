@@ -13,10 +13,9 @@ export function PortalledWithTsrx(props) @{
 
 // Inline arrow returning a @{ } block — directly as createPortal's body argument.
 export function InlineTsrx(props) @{
-	<div class="host">{createPortal(
-		() => @{
+	<div class="host">
+		{createPortal(() => @{
 			<span class="inline">{'inline'}</span>
-		},
-		props.target,
-	)}</div>
+		}, props.target)}
+	</div>
 }

@@ -113,20 +113,22 @@ export const expectIndexed = (
 	expect(state.indexes.nodes[item.props.id].path).toEqual(path);
 };
 
-export const executeSequenceFactory = (reducer: Reducer<any, any>) => <UserData extends Data>(
-	initialState: PrivateAppState<UserData>,
-	actions: ((currentState: PrivateAppState<UserData>) => PuckAction)[],
-) => {
-	let currentState: PrivateAppState<UserData> = initialState;
+export const executeSequenceFactory =
+	(reducer: Reducer<any, any>) =>
+	<UserData extends Data>(
+		initialState: PrivateAppState<UserData>,
+		actions: ((currentState: PrivateAppState<UserData>) => PuckAction)[],
+	) => {
+		let currentState: PrivateAppState<UserData> = initialState;
 
-	actions.forEach((actionFn) => {
-		const action = actionFn(currentState);
+		actions.forEach((actionFn) => {
+			const action = actionFn(currentState);
 
-		currentState = reducer(currentState, action) as PrivateAppState<UserData>;
-	});
+			currentState = reducer(currentState, action) as PrivateAppState<UserData>;
+		});
 
-	return currentState;
-};
+		return currentState;
+	};
 
 export const testSetup = () => {
 	let _reducer = createReducer({ appStore: appStore.getState() });
