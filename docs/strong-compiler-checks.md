@@ -9,6 +9,7 @@ support explicit dependencies, manual memo hooks, and ordinary raw HTML props.
 
 | Diagnostic | What it detects | Replacement |
 | --- | --- | --- |
+| `OCTANE_STRONG_EFFECT_STATE_UPDATE` | Effect setup calls a state updater synchronously. This includes updaters and callbacks returned by same-module custom hooks, and callbacks that run before the next paint: `startTransition`, a `useTransition` start function, `queueMicrotask`, `.then`/`.catch`/`.finally` on `Promise.resolve(value)` or `Promise.reject()`, `setTimeout` without a positive delay, and code after awaiting a value that is not a pending promise. | Derive the value during render, or use `useLinkedState` when state follows another value. `requestAnimationFrame`, timers with a positive delay, and external subscription callbacks remain event-driven. |
 | `OCTANE_STRONG_EFFECT_DATA_FETCH` | An effect starts a known fetch and invokes a known state updater in its asynchronous continuation, without returning cleanup. | Read asynchronous render data with `use()`, or implement a cancellable external synchronization with cleanup. |
 | `OCTANE_STRONG_EFFECT_CHAIN` | An effect reads state written by another effect's own execution or promise continuation in the same component. | Derive the value during render, use `useLinkedState`, or combine the external synchronization. External subscription and timer callbacks remain event-driven updates. |
 | `OCTANE_STRONG_UNLINKED_PROP_STATE` | An eager `useState` initializer or two-argument `useReducer` initial state is derived from component props. | Use `useLinkedState(source, reconcile)` for state that follows a source. Use `useState(() => initialValue)` or an explicit third `useReducer` initializer for a deliberate initial capture. |
@@ -46,11 +47,13 @@ The `manualSlots` integration option cannot allocate these additional caches;
 an eligible declaration in such a module reports
 `OCTANE_STRONG_AUTOMATIC_MEMO_UNSUPPORTED`.
 
-These are bounded source checks. They follow supported local aliases and known
-callbacks; they do not prove arbitrary imported functions, mutable containers,
-or all asynchronous data flow. An effect returning cleanup still needs to cancel
-or ignore stale results correctly. External subscriptions, event-driven updates,
-and effect cleanup remain supported.
+These are bounded source checks. They follow supported local aliases, known
+callbacks, and state tuples, updaters, callbacks, and transition starts
+returned by same-module custom hooks. They do not prove arbitrary imported
+functions, mutable containers, or all asynchronous data flow. An effect
+returning cleanup still needs to cancel or ignore stale results correctly.
+External subscriptions, event-driven updates, and effect cleanup remain
+supported.
 
 ```tsx
 "use strong";

@@ -846,7 +846,12 @@ unless one of their own modules opts in with `"use strong"`.
 These patterns become compile errors:
 
 - Calling a `useState`, `useReducer`, or `useLinkedState` updater during render.
-- Calling one of those updaters synchronously while an effect is being set up.
+- Calling one of those updaters synchronously while an effect is being set up
+  (`OCTANE_STRONG_EFFECT_STATE_UPDATE`). This includes updaters returned by a
+  same-module custom hook, and callbacks that run before the next paint:
+  `startTransition`, a `useTransition` start function, `queueMicrotask`,
+  `Promise.resolve().then`, a `setTimeout` without a positive delay, and code
+  after awaiting a value that is not a pending promise.
 - Calling a known third-tuple state getter during render
   (`OCTANE_STRONG_RENDER_STATE_GETTER_CALL`). Render from the first tuple member;
   read the latest scheduled state in an event, effect, or deferred callback.

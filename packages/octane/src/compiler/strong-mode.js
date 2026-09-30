@@ -7,6 +7,7 @@ import { createRendererRegionResolver } from './renderer-boundaries.js';
 import { analyzeStrongHTML } from './strong-html.js';
 import { analyzeNativeChangeDiagnostics } from './native-change-diagnostics.js';
 import { createStrongTemplatePolicy } from './strong-template-policy.js';
+import { createStrongEffectPolicy } from './strong-effects.js';
 
 const STATE_HOOKS = new Set(['useState', 'useReducer', 'useLinkedState']);
 const EFFECT_HOOKS = new Set(['useEffect', 'useLayoutEffect', 'useInsertionEffect']);
@@ -73,6 +74,8 @@ const SNAPSHOT_BINDING = { kind: 'snapshot' };
 const STATE_GETTER_BINDING = { kind: 'getter' };
 const PROP_BINDING = { kind: 'prop' };
 const FETCH_BINDING = { kind: 'fetch' };
+const TRANSITION_START_BINDING = { kind: 'transition-start' };
+const TRANSITION_TUPLE_BINDING = { kind: 'transition-tuple' };
 const UNDEFINED_BINDING = { kind: 'constant', value: UNDEFINED_VALUE, primitive: undefined };
 const GLOBAL_OBJECT_BINDING = { kind: 'global-object' };
 const AMBIENT_GLOBAL_BINDINGS = new Map(
@@ -1419,6 +1422,11 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 	const effectRecords = [];
 	const effectBranchExits = new WeakMap();
 	const unlinkedPropInitializers = new Set();
+	// A synchronous call to a local function records what it returned, so a
+	// custom hook's state tuple or updater keeps its provenance in the caller.
+	const callShapes = new WeakMap();
+	const derivedTuples = new WeakMap();
+	let returnCollector = null;
 	let renderOwner = null;
 	let currentEffect = null;
 	let currentEffectControl = null;
@@ -1524,6 +1532,12 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		filename,
 		options,
 	});
+	const effectPolicy = createStrongEffectPolicy({
+		ast,
+		analysis: strongHookAnalysis.analysis,
+		callNames: strongHookAnalysis.callNames,
+		report,
+	});
 
 	function predeclareHoistedVars(node, scope) {
 		if (!mayHaveHoistedVars || node == null) return;
@@ -1583,7 +1597,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		const effect = phase === 'effect';
 		const code = effect ? STRONG_EFFECT_STATE_UPDATE : STRONG_RENDER_STATE_UPDATE;
 		const message = effect
-			? 'Strong mode does not allow synchronous state updates inside effect setup. Derive the value during render or use useLinkedState when state follows another value.'
+			? 'Strong mode does not allow synchronous state updates inside effect setup. startTransition, a useTransition start function, queueMicrotask, Promise.resolve().then, a zero-delay setTimeout, and awaiting a value that is not a pending promise all run before the next paint, so they count as setup too. Derive the value during render or use useLinkedState when state follows another value.'
 			: 'Strong mode does not allow state updates during render. Use useLinkedState when state needs to reset or change with another value.';
 		report(code, node, message, [{ hook: 'useLinkedState' }]);
 	}
@@ -1880,7 +1894,13 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		if (node == null) return false;
 		switch (node.type) {
 			case 'AwaitExpression':
-				return true;
+				// Inside effect-owned work, awaiting a settled value resumes in a
+				// microtask, before the next paint: it does not end synchronous setup.
+				return (
+					currentEffect === null ||
+					!effectPolicy.zeroDelayAwait(node.argument) ||
+					alwaysAwaits(node.argument)
+				);
 			case 'SequenceExpression':
 				return (node.expressions ?? []).some(alwaysAwaits);
 			case 'CallExpression':
@@ -2352,6 +2372,9 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 					markEffectCleanup(body, functionScope);
 				}
 				visit(body, functionScope, phase);
+				if (returnCollector?.fn === node) {
+					returnCollector.shapes.push(returnShape(body, functionScope));
+				}
 			}
 		} finally {
 			currentFunction = enclosingFunction;
@@ -2471,6 +2494,13 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 			bindAmbientPattern(declaration.id, ambient, scope, bind);
 			return;
 		}
+		if (
+			initial?.type === 'CallExpression' &&
+			importedHook(initial.callee, scope) === 'useTransition'
+		) {
+			bindTransitionPattern(declaration.id, scope, bind);
+			return;
+		}
 		if (declarationKind === 'const' || !isReassigned(declaration.id)) {
 			if (fetchFunction(initial, scope)) {
 				bind(declaration.id, FETCH_BINDING);
@@ -2516,6 +2546,8 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				importedHook(initial.callee, scope) === 'useRef'
 			) {
 				bind(declaration.id, { kind: 'ref' });
+			} else if (declarationKind === 'const' && transitionStart(initial, scope)) {
+				target.bindings.set(declaration.id.name, TRANSITION_START_BINDING);
 			} else if (declarationKind === 'const' && stateTupleUpdater(initial, scope)) {
 				target.bindings.set(declaration.id.name, stateTupleUpdater(initial, scope));
 			} else if (declarationKind === 'const' && stateTupleGetter(initial, scope)) {
@@ -2533,7 +2565,9 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 					value?.kind === 'effect-event' ||
 					value?.kind === 'linked-options' ||
 					value?.kind === 'linked-key' ||
-					value?.kind === 'constant'
+					value?.kind === 'constant' ||
+					value?.kind === 'transition-start' ||
+					value?.kind === 'transition-tuple'
 				) {
 					target.bindings.set(declaration.id.name, value);
 				} else if (value == null && initial.name === 'undefined') {
@@ -2604,6 +2638,149 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				else if (prop) bindPropPattern(declaration.id, bind);
 			}
 		}
+		const shape = initial?.type === 'CallExpression' ? callShapes.get(initial) : undefined;
+		if (shape !== undefined && stateTuple === null) bindReturnedShape(declaration.id, shape, bind);
+	}
+
+	function bindTransitionPattern(pattern, scope, bind) {
+		if (pattern?.type === 'Identifier') {
+			bind(pattern, TRANSITION_TUPLE_BINDING);
+		} else if (pattern?.type === 'ArrayPattern') {
+			const element = pattern.elements?.[1];
+			bind(
+				element?.type === 'AssignmentPattern' ? element.left : element,
+				TRANSITION_START_BINDING,
+			);
+		} else if (pattern?.type === 'ObjectPattern') {
+			for (const property of pattern.properties ?? []) {
+				if (property.type !== 'Property') continue;
+				const key = property.computed
+					? staticPrimitiveValue(property.key, scope)
+					: (property.key?.name ?? property.key?.value);
+				const value = property.value;
+				if (key === 1 || key === '1') {
+					bind(value?.type === 'AssignmentPattern' ? value.left : value, TRANSITION_START_BINDING);
+				}
+			}
+		}
+	}
+
+	function transitionStart(expression, scope) {
+		const node = unwrap(expression);
+		if (node?.type === 'Identifier') return resolve(scope, node.name)?.kind === 'transition-start';
+		if (node?.type !== 'MemberExpression' || node.computed !== true) return false;
+		const object = unwrap(node.object);
+		const key = staticPrimitiveValue(node.property, scope);
+		return (
+			(key === 1 || key === '1') &&
+			((object?.type === 'Identifier' &&
+				resolve(scope, object.name)?.kind === 'transition-tuple') ||
+				(object?.type === 'CallExpression' &&
+					importedHook(object.callee, scope) === 'useTransition'))
+		);
+	}
+
+	// Only values whose provenance matters to effect checks cross a custom-hook
+	// return: state tuples and updaters, getters, callbacks, and transition starts.
+	function shapeMember(expression, scope) {
+		const value = expressionBinding(expression, scope);
+		if (
+			isCallableValue(value) ||
+			value?.kind === 'state-tuple' ||
+			value?.kind === 'transition-start'
+		) {
+			return value;
+		}
+		return transitionStart(expression, scope) ? TRANSITION_START_BINDING : null;
+	}
+
+	function returnShape(expression, scope) {
+		const node = unwrap(expression);
+		if (node == null) return null;
+		const tuple = stateTupleBinding(node, scope);
+		if (tuple !== null) return tuple;
+		if (node.type === 'ArrayExpression') {
+			const elements = [];
+			for (const element of node.elements ?? []) {
+				// Positions after a spread depend on its runtime length.
+				if (element?.type === 'SpreadElement') break;
+				elements.push(element == null ? null : shapeMember(element, scope));
+			}
+			return elements.some((element) => element !== null)
+				? { kind: 'returned-array', elements }
+				: null;
+		}
+		if (node.type === 'ObjectExpression') {
+			const properties = new Map();
+			for (const property of node.properties ?? []) {
+				// A spread or unknown computed key can replace any earlier property.
+				if (property.type !== 'Property') {
+					properties.clear();
+					continue;
+				}
+				const key = property.computed
+					? staticPrimitiveValue(property.key, scope)
+					: (property.key?.name ?? property.key?.value);
+				if (key === UNKNOWN_PRIMITIVE) {
+					properties.clear();
+					continue;
+				}
+				properties.set(
+					String(key),
+					property.kind === 'init' && property.method !== true
+						? shapeMember(property.value, scope)
+						: null,
+				);
+			}
+			return [...properties.values()].some((value) => value !== null)
+				? { kind: 'returned-object', properties }
+				: null;
+		}
+		return shapeMember(node, scope);
+	}
+
+	function mergeShapes(shapes) {
+		const [first] = shapes;
+		return first != null && shapes.every((shape) => shape === first) ? first : null;
+	}
+
+	function bindReturnedShape(pattern, shape, bind) {
+		if (pattern?.type === 'Identifier') {
+			if (shape.kind !== 'returned-array' && shape.kind !== 'returned-object') bind(pattern, shape);
+		} else if (pattern?.type === 'ArrayPattern' && shape.kind === 'returned-array') {
+			pattern.elements?.forEach((element, index) => {
+				const value = shape.elements[index];
+				if (value != null)
+					bind(element?.type === 'AssignmentPattern' ? element.left : element, value);
+			});
+		} else if (pattern?.type === 'ObjectPattern' && shape.kind === 'returned-object') {
+			for (const property of pattern.properties ?? []) {
+				if (property.type !== 'Property' || property.computed) continue;
+				const value = shape.properties.get(property.key?.name ?? String(property.key?.value));
+				const target =
+					property.value?.type === 'AssignmentPattern' ? property.value.left : property.value;
+				if (value != null) bind(target, value);
+			}
+		}
+	}
+
+	// Each call of a custom hook owns separate state. Keep the provenance, but
+	// never let two calls of one hook read as the same state in effect graphs.
+	function derivedTuple(call, tuple) {
+		let tuples = derivedTuples.get(call);
+		if (tuples === undefined) derivedTuples.set(call, (tuples = new Map()));
+		let derived = tuples.get(tuple);
+		if (derived === undefined) {
+			const state = { call, state: tuple.snapshot.state };
+			derived = {
+				kind: 'state-tuple',
+				snapshot: { kind: 'snapshot', state, array: tuple.snapshot.array },
+				setter: { kind: 'setter', state },
+				getter: STATE_GETTER_BINDING,
+			};
+			tuples.set(tuple, derived);
+		}
+		return derived;
 	}
 
 	function stateTupleBinding(expression, scope) {
@@ -2614,7 +2791,10 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		}
 		if (node?.type !== 'CallExpression') return null;
 		const hook = importedHook(node.callee, scope);
-		if (!STATE_HOOKS.has(hook)) return null;
+		if (!STATE_HOOKS.has(hook)) {
+			const shape = hook === null ? callShapes.get(node) : undefined;
+			return shape?.kind === 'state-tuple' ? derivedTuple(node, shape) : null;
+		}
 		// A known array initializer is a narrow mutator check, not a judgment
 		// about arbitrary methods on object snapshots or opaque hook outputs.
 		let tuple = stateTuples.get(node);
@@ -2657,6 +2837,10 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 	function bindDeclaration(declaration, declarationKind, scope, phase) {
 		bindDeclarationValue(declaration, declarationKind, scope);
 		visit(declaration.init, scope, phase);
+		// Visiting a local call records what it returned; bind that provenance.
+		if (callShapes.has(unwrap(declaration.init))) {
+			bindDeclarationValue(declaration, declarationKind, scope);
+		}
 		return visitPatternExpressions(
 			declaration.id,
 			scope,
@@ -3152,7 +3336,8 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				binding?.kind === 'derived-state' ||
 				binding?.kind === 'state-tuple' ||
 				binding?.kind === 'constant' ||
-				binding?.kind === 'linked-key'
+				binding?.kind === 'linked-key' ||
+				binding?.kind === 'transition-start'
 			) {
 				return binding;
 			}
@@ -4006,6 +4191,9 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 					markEffectCleanup(node.argument, scope);
 				}
 				visit(node.argument, scope, phase);
+				if (returnCollector?.fn === currentFunction) {
+					returnCollector.shapes.push(returnShape(node.argument, scope));
+				}
 				return;
 			}
 			case 'ClassDeclaration':
@@ -4378,17 +4566,27 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 					if (effectOwnsWrites && fetchFunction(callee, scope)) currentEffect.started.add(node);
 					const callback = callableValue(callee, scope);
 					if (callback === null) {
+						// Transitions, microtasks, zero-delay timers, and settled promises
+						// run their callbacks before the next paint: that is still setup.
+						const immediate = transitionStart(callee, scope)
+							? 'sync'
+							: effectPolicy.runsBeforePaint(node);
 						const promiseContinuation =
+							!immediate &&
 							callee?.type === 'MemberExpression' &&
 							['then', 'catch', 'finally'].includes(ambientPropertyKey(callee, scope));
 						const request = promiseContinuation ? fetchRequest(callee.object, scope) : null;
 						const before = fetchContinuation;
 						const beforeOwnsWrites = effectOwnsWrites;
-						effectOwnsWrites &&= promiseContinuation;
+						effectOwnsWrites &&= immediate !== false || promiseContinuation;
 						if (request !== null && currentEffect.started.has(request)) fetchContinuation = true;
 						try {
 							for (const argument of node.arguments ?? [])
-								visitCallable(callableValue(argument, scope), unwrap(argument), 'deferred');
+								visitCallable(
+									callableValue(argument, scope),
+									unwrap(argument),
+									immediate ? executionPhase : 'deferred',
+								);
 						} finally {
 							fetchContinuation = before;
 							effectOwnsWrites = beforeOwnsWrites;
@@ -4403,14 +4601,28 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				) {
 					const callback = callableValue(callee, scope);
 					if (callback !== null) {
-						visitCallable(
-							callback,
-							callee,
-							executionPhase,
-							callback.kind === 'setter' || callback.kind === 'getter'
-								? null
-								: argumentValues(node.arguments, scope),
-						);
+						const enclosingCollector = returnCollector;
+						const collector =
+							callback.kind === 'callback' && callback.node.async !== true
+								? { fn: callback.node, shapes: [] }
+								: null;
+						returnCollector = collector;
+						try {
+							visitCallable(
+								callback,
+								callee,
+								executionPhase,
+								callback.kind === 'setter' || callback.kind === 'getter'
+									? null
+									: argumentValues(node.arguments, scope),
+							);
+						} finally {
+							returnCollector = enclosingCollector;
+						}
+						if (collector !== null && collector.shapes.length !== 0) {
+							const shape = mergeShapes(collector.shapes);
+							if (shape !== null) callShapes.set(node, shape);
+						}
 					}
 				}
 				return;
