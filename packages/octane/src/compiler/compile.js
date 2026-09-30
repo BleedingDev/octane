@@ -1056,6 +1056,90 @@ function rejectTextareaValueChildren(tag, node, ctx) {
 	);
 }
 
+const TEXTAREA_CHILD_KINDS = {
+	Element: 'an element',
+	TSRXExpression: 'a JSX expression',
+	IfStatement: 'an `@if` block',
+	ForOfStatement: 'an `@for` block or a mapped JSX list',
+	SwitchStatement: 'an `@switch` block',
+	TryStatement: 'an `@try` block',
+};
+
+// A `<textarea>`'s content is RCDATA: the HTML parser keeps markup and comments
+// inside it as literal text, so neither the client template nor the server can
+// place a `<!>` placeholder, a `<!-- -->` separator or a `<!--[-->` frame there.
+// Its children are therefore text on both sides: they fold into ONE text value
+// that the client binds as the host's only Text node (runtime `textareaText`)
+// and the server serializes markerless (`ssrTextareaText`). Returns the parts in
+// source order, or null when the ordinary only-child path already emits
+// markerless text on both sides (one static literal or one proven text hole).
+// Throws for a child that cannot be text, on both emit paths.
+function textareaTextParts(tag, ns, children, ctx) {
+	if (tag !== 'textarea' || (ns !== 'html' && ns !== 'opaque') || children.length === 0) {
+		return null;
+	}
+	const parts = [];
+	for (const child of children) {
+		if (child.type !== 'Text') {
+			const element = child.type === 'HeadHoist' ? child.element : child;
+			const kind =
+				element.type === 'JSXElement' || (element.type === 'Element' && !isComponentTag(element))
+					? `\`<${jsxTagName(element) || elementTagName(element)}>\``
+					: (TEXTAREA_CHILD_KINDS[child.type] ?? 'a non-text child');
+			const l = (element.loc ?? child.expression?.loc)?.start;
+			const at = l
+				? ` (${ctx.mapSourceName ? ctx.mapSourceName + ':' : ''}${l.line}:${l.column})`
+				: '';
+			throw new Error(
+				`\`<textarea>\` children must be text, but it contains ${kind}. A textarea's content ` +
+					'is its default value and the HTML parser keeps markup inside it as literal ' +
+					`text: move the markup outside the textarea, or pass a string expression.${at}`,
+			);
+		}
+		// Authored binding views address each hole by its own marker range.
+		if (
+			child._octaneBindingText ||
+			child._octaneBindingOpaque ||
+			child._octaneBindingValue ||
+			child._octaneBindingSlot
+		) {
+			return null;
+		}
+		const literal = staticTextLiteral(child.expression);
+		if (literal === '') continue;
+		const previous = parts.at(-1);
+		if (literal !== null && previous?.kind === 'static') {
+			parts[parts.length - 1] = { ...previous, value: previous.value + literal };
+		} else if (literal !== null) {
+			parts.push({ kind: 'static', value: literal, node: child });
+		} else {
+			const text =
+				isDirectSignalHandleExpression(child.expression) ||
+				isKnownTextChildExpression(child.expression, ctx.knownStringChildLocals);
+			parts.push({ kind: text ? 'text' : 'child', expr: child.expression, node: child });
+		}
+	}
+	// Static text alone is baked into the template and serialized as one merged
+	// run; a sole text hole mounts with htext and serializes unframed.
+	if (parts.every((part) => part.kind === 'static')) return null;
+	if (children.length === 1 && parts[0].kind === 'text') return null;
+	return parts;
+}
+
+// The runtime call's arguments: the parts array, then a 't' at each
+// `{x as string}` part (omitted when there is none).
+function textareaTextArgs(parts, lowerHole) {
+	const values = parts.map((part) =>
+		part.kind === 'static'
+			? b.literal(part.value, JSON.stringify(part.value))
+			: lowerHole(part.expr, part.kind === 'text', part.node),
+	);
+	const textHoles = parts.map((part) => (part.kind === 'text' ? 't' : '-')).join('');
+	return textHoles.includes('t')
+		? [b.array(values), b.literal(textHoles, JSON.stringify(textHoles))]
+		: [b.array(values)];
+}
+
 // React's raw-HTML contract is mutually exclusive with a non-nullish child.
 // Static TSRX can reject definitely contradictory shapes before either the
 // client or server renderer runs them. Preserve React's accepted null/undefined
@@ -2701,6 +2785,81 @@ function collectComponentLocals(componentNode) {
 	return locals;
 }
 
+// Every name a callback binds for code in its own body: its params, a function
+// expression's own name, and each declaration at ANY statement depth, where
+// collectComponentLocals reads only the top level. A name from a sibling block is
+// included too, which is sound only because a name is threaded when code reads it
+// free: that read already means whatever the name resolves to at the call site.
+// collectFreeIdentifiers must therefore never report a nested scope's own names
+// (a `@{ … }` block's locals, a `@catch` param) as free. Nested functions and
+// render bodies bind their own names, and are visited on their own.
+function collectCallbackBindings(fn) {
+	const names = new Set();
+	for (const p of fn.params || []) collectBindings(p, names);
+	if (fn.type === 'FunctionExpression' && fn.id) names.add(fn.id.name);
+	visit(fn.body);
+	return names;
+
+	function visit(node) {
+		if (node == null || typeof node !== 'object') return;
+		if (Array.isArray(node)) {
+			for (const statement of node) visit(statement);
+			return;
+		}
+		switch (node.type) {
+			case 'VariableDeclaration':
+				for (const d of node.declarations || []) collectBindings(d.id, names);
+				return;
+			case 'FunctionDeclaration':
+			case 'ClassDeclaration':
+				if (node.id) names.add(node.id.name);
+				return;
+			case 'BlockStatement':
+				visit(node.body);
+				return;
+			case 'IfStatement':
+				visit(node.consequent);
+				visit(node.alternate);
+				return;
+			case 'ForStatement':
+				visit(node.init);
+				visit(node.body);
+				return;
+			case 'ForInStatement':
+			case 'ForOfStatement':
+				visit(node.left);
+				visit(node.body);
+				return;
+			case 'WhileStatement':
+			case 'DoWhileStatement':
+			case 'LabeledStatement':
+				visit(node.body);
+				return;
+			case 'TryStatement':
+				visit(node.block);
+				if (node.handler?.param) collectBindings(node.handler.param, names);
+				visit(node.handler?.body);
+				visit(node.finalizer);
+				return;
+			case 'SwitchStatement':
+				for (const c of node.cases || []) visit(c.consequent);
+				return;
+			default:
+				return;
+		}
+	}
+}
+
+// Whether `node` reads a name an enclosing callback binds. Such a name is in scope
+// where `node` is written, but not in the owning body a hoisted helper lands in.
+function readsCallbackScope(node, callbackScope) {
+	if (callbackScope == null || callbackScope.size === 0) return false;
+	for (const name of collectFreeIdentifiers(node, [])) {
+		if (callbackScope.has(name)) return true;
+	}
+	return false;
+}
+
 /**
  * Compute the set of component-local names that are guaranteed STABLE across
  * renders. Used by the auto-callback pass below to decide which `const X =
@@ -3961,6 +4120,12 @@ function collectFreeIdentifiers(root, initiallyBound, ignoreNodes = null) {
 			walk(n.body, scope);
 			return;
 		}
+		// The compiler's own renderable child hole (a normalized `{expr}` or
+		// `@{ … }` child) shares the prefix, but its expression is runtime code.
+		if (t === 'TSRXExpression') {
+			walk(n.expression, scope);
+			return;
+		}
 		if (t.startsWith('TS')) return;
 
 		if (t === 'Identifier') {
@@ -4064,12 +4229,34 @@ function collectFreeIdentifiers(root, initiallyBound, ignoreNodes = null) {
 			return;
 		}
 
-		// CatchClause introduces its param.
+		// CatchClause introduces its param, and a `@catch (error, reset)` clause
+		// also its reset param.
 		if (t === 'CatchClause') {
 			const newScope = new Set(scope);
 			if (n.param) collectBindings(n.param, newScope);
+			if (n.resetParam) collectBindings(n.resetParam, newScope);
 			if (n.param) walkPatternExpressions(n.param, newScope);
 			walk(n.body, newScope);
+			return;
+		}
+
+		// A `@{ … }` block's setup declarations are scoped to its setup and render
+		// output, like a block statement's. Otherwise a block-local reads as a
+		// capture of any outer name it shares, which a caller would thread from a
+		// call site where that outer name may not be in scope.
+		if (t === 'JSXCodeBlock') {
+			const newScope = new Set(scope);
+			for (const stmt of n.body || []) {
+				if (stmt.type === 'VariableDeclaration') {
+					for (const d of stmt.declarations || []) collectBindings(d.id, newScope);
+				} else if (stmt.type === 'FunctionDeclaration' && stmt.id) {
+					newScope.add(stmt.id.name);
+				}
+			}
+			for (const key in n) {
+				if (AST_WALK_SKIP_KEYS.has(key)) continue;
+				walk(n[key], newScope);
+			}
 			return;
 		}
 
@@ -7695,7 +7882,9 @@ function isSingleHostIfRoot(node) {
 	if (!isIfDirective(node) || node.alternate == null) return false;
 	const armIsSingleHost = (arm) => {
 		if (isIfDirective(arm)) return isSingleHostIfRoot(arm);
-		const render = statementsOf(arm).filter((s) => isJsxNode(s) || isIfDirective(s));
+		const statements = statementsOf(arm);
+		if (armMayExit(statements)) return false;
+		const render = statements.filter((s) => isJsxNode(s) || isIfDirective(s));
 		return render.length === 1 && isSingleTemplateHost(render[0]);
 	};
 	return armIsSingleHost(node.consequent) && armIsSingleHost(node.alternate);
@@ -7751,6 +7940,7 @@ function collectSingleRootIfDeps(render, locals, ctx) {
 		if (isSwitchDirective(arm)) return switchOk(arm);
 		const statements = Array.isArray(arm) ? arm : statementsOf(arm);
 		if (insideSwitch && hasSwitchCaseLocalBinding(statements)) return false;
+		if (armMayExit(statements)) return false;
 		const out = statements.filter((s) => isJsxNode(s) || isIfDirective(s) || isSwitchDirective(s));
 		if (out.length !== 1) return false;
 		const sole = out[0];
@@ -7860,7 +8050,7 @@ function anchorlessRootShape(node) {
  * folded into the item key when that is safe.
  */
 function isSsrMarkerlessForItem(node, itemBody) {
-	if (node?._octaneBindingSite !== undefined) return false;
+	if (node?._octaneBindingSite !== undefined || armMayExit(itemBody)) return false;
 	const jsxChildren = itemBody.filter((s) => isJsxNode(s));
 	return jsxChildren.length === 1 && isSingleTemplateHost(jsxChildren[0]);
 }
@@ -8102,14 +8292,18 @@ function alwaysCompletesAbruptly(statements) {
  * template, so normalize every component-level early return through `?? null`.
  * This preserves one evaluation and every renderable value while making bare or
  * explicitly-undefined returns an unambiguous empty output. Nested functions are
- * separate execution scopes and remain untouched.
+ * separate execution scopes and remain untouched. So is JSX: a return inside a
+ * directive arm is that arm's early exit, which the arm lowers exactly as it
+ * does in a template body, so the server and client ranges agree.
  */
 function normalizeOwnRenderableReturns(statement, preserveJsx = false) {
 	return mapAst(statement, (node) => {
 		if (
 			node.type === 'FunctionDeclaration' ||
 			node.type === 'FunctionExpression' ||
-			node.type === 'ArrowFunctionExpression'
+			node.type === 'ArrowFunctionExpression' ||
+			JSX_CHILDREN_BEARING_TYPES.has(node.type) ||
+			SETUP_VALUE_DIRECTIVE_TYPES.has(node.type)
 		)
 			return node;
 		if (node.type !== 'ReturnStatement') return null;
@@ -10287,6 +10481,8 @@ function compileInternal(
 	// Same contract for React-style conditional JSX returns: branch-selected
 	// output compiles as template control flow instead of de-opt descriptors.
 	ast = lowerJsxReturnBranchComponents(ast);
+	// A nested `@{ … }` function that code calls directly returns JSX instead.
+	ast = lowerDirectlyCalledTemplateFunctions(ast);
 	// Omitted dependency lists are compiler-owned: infer reactive captures
 	// before any component splitting/hoisting so every lexical binding is still
 	// visible to the shared TSRX/TSX analysis. Explicit arrays and `null` pass
@@ -11820,6 +12016,7 @@ function compileServer(
 	// hydration expects in both development and production.
 	ast = lowerNullishComponentExits(ast);
 	ast = lowerJsxReturnBranchComponents(ast);
+	ast = lowerDirectlyCalledTemplateFunctions(ast);
 	// Mirror the client transform exactly. Effects are server no-ops, but
 	// useMemo/useCallback execute during SSR and must receive the same inferred
 	// dependency shape as hydration's client compile.
@@ -12338,7 +12535,11 @@ function ssrCompileBodyWithMapTemps(
 		// itself. rewriteEarlyExits wants the array.
 		const bodyStmts =
 			node.body && node.body.type === 'BlockStatement' ? node.body.body || [] : node.body || [];
-		const bodyRewritten = rewriteEarlyExits(bodyStmts);
+		// A statement array is a synthetic arm body (see splitArmExits); a function
+		// body keeps its returns on the generic value ABI.
+		const bodyRewritten = Array.isArray(node.body)
+			? splitArmExits(unwrapOutputCodeBlock(bodyStmts), ctx)
+			: rewriteEarlyExits(unwrapOutputCodeBlock(bodyStmts));
 		statements = [];
 		jsxNodes = [];
 		for (const child of bodyRewritten) {
@@ -14062,15 +14263,37 @@ function ssrEmitElement(node, ctx, name, inlinedSubs, parentNs, cssHash, compone
 	// still gets a `<!--[-->…<!--]-->` block). Must match the client's only-child
 	// markerless condition exactly so both sides agree for hydration: a single `Text`
 	// child that is neither a static literal (baked into HTML) nor proven text
-	// (emitted via `ssrText`).
+	// (emitted via `ssrText`). A spread or raw-HTML writer does not change the
+	// client's shape, so it must not change this one: inside RCDATA (<textarea>)
+	// a frame around a primitive would parse as literal text.
 	const onlyChild0 =
 		normChildren.length === 1 && normChildren[0].type === 'Text' ? normChildren[0] : null;
+	const textareaParts = textareaTextParts(tag, selfNs, normChildren, ctx);
 	let childrenExpr;
 	if (authoredStaticScriptContent !== undefined) {
 		const content = escapeInlineScriptContent(authoredStaticScriptContent);
 		childrenExpr = ssrHtmlTemplate(content === '' ? [] : [content], node, ctx);
+	} else if (textareaParts !== null) {
+		// The client binds these as one Text node (see textareaTextParts).
+		ctx.runtimeNeeded.add('ssrTextareaText');
+		childrenExpr = ssrCall(
+			'ssrTextareaText',
+			textareaTextArgs(textareaParts, (expression, text, part) =>
+				ssrSignalValue(
+					resolveStyleExpr(
+						text
+							? rewriteHookCalls(expression, ctx, name)
+							: rewriteJsxValues(rewriteHookCalls(expression, ctx, name), ctx),
+						cssHash,
+					),
+					ctx,
+					part,
+					true,
+				),
+			),
+			node,
+		);
 	} else if (
-		htmlSources.length === 0 &&
 		onlyChild0 !== null &&
 		!onlyChild0._octaneBindingOpaque &&
 		!onlyChild0._octaneBindingValue &&
@@ -14144,7 +14367,15 @@ function ssrEmitElement(node, ctx, name, inlinedSubs, parentNs, cssHash, compone
 		ctx.runtimeNeeded.add('ssrChildrenSources');
 		childrenExpr = ssrCall(
 			'ssrChildrenSources',
-			[b.array(effectiveChildrenPropSources), ssrThunk(childrenExpr, node), b.id('__s')],
+			[
+				b.array(effectiveChildrenPropSources),
+				ssrThunk(childrenExpr, node),
+				b.id('__s'),
+				// A textarea's children prop is text too (see textareaTextParts).
+				...(tag === 'textarea' && (selfNs === 'html' || selfNs === 'opaque')
+					? [b.literal(true, 'true')]
+					: []),
+			],
 			node,
 		);
 	}
@@ -15262,7 +15493,10 @@ function ssrEmitTsrxExpression(node, ctx, name, inlinedSubs, parentNs, cssHash, 
 				b.literal(false),
 				undefinedNode(),
 				undefinedNode(),
-				b.literal(componentInvocationSite(ctx, node)),
+				// Hash the authored JSX, as the client's lowerHostFragment does, not
+				// the synthetic wrapper: every signal instance below this renderer
+				// chains its key from this site.
+				b.literal(componentInvocationSite(ctx, expr)),
 			],
 			node,
 		);
@@ -16131,7 +16365,7 @@ function compileFunctionBody(node, ctx, name, parentNs = 'html', cssHash = null,
 		statements = node.body.body || [];
 		jsxNodes = node.body.render ? [node.body.render] : [];
 	} else {
-		const bodyRewritten = rewriteEarlyExits(node.body);
+		const bodyRewritten = splitArmExits(unwrapOutputCodeBlock(node.body), ctx);
 		statements = [];
 		jsxNodes = [];
 		for (const child of bodyRewritten) {
@@ -16333,11 +16567,11 @@ function compileFunctionBody(node, ctx, name, parentNs = 'html', cssHash = null,
 	// Rewrite hook calls and `<tsrx>` blocks in statements before printing them.
 	// A `<tsrx>` block at expression position (e.g. `const f = <tsrx>...</tsrx>`)
 	// is hoisted as a render function in inlinedSubs and replaced with an
-	// identifier reference. Suitable for top-level render-prop patterns where
-	// the block doesn't capture local arrow params.
+	// identifier reference. One that reads a setup callback's names stays for
+	// rewriteJsxValues, which compiles it in place inside that callback.
 	const rewrittenStatements = preparedStatements
 		.map((s) => rewriteHookCalls(s, ctx, name, options?.localHookSlots === true))
-		.map((s) => rewriteTsrxBlocks(s, ctx, name, inlinedSubs))
+		.map((s) => rewriteTsrxBlocks(s, ctx, name, inlinedSubs, 'html', null, true))
 		// JSX component element at VALUE position in setup (e.g. `const el = <App/>`)
 		// → createElement(App, props). Output JSX (jsxNodes) was already split off.
 		.map((s) => rewriteJsxValues(s, ctx));
@@ -21099,6 +21333,11 @@ function rewriteExtractedFragmentHole(expression, ctx, parentNs) {
 	}
 	const fold = ctx._foldCtx;
 	if (fold?.compInlinedSubs === undefined) return lowered;
+	// The owner's body sits outside any callback the directive is written in, so a
+	// sub-template reading that callback's names compiles in place instead. The
+	// hole props are built at the call site, inside the callback, so its closure
+	// sees them.
+	if (readsCallbackScope(lowered, ctx._callbackScopeNames)) return rewriteJsxValues(lowered, ctx);
 	return rewriteTsrxBlocks(lowered, ctx, 'fragment', fold.compInlinedSubs, parentNs, fold.cssHash);
 }
 
@@ -21174,10 +21413,10 @@ function isStaticReturnedFragmentComponent(node, ctx) {
 // The renderer builds a keyed, `noscript`/document, or parser-repaired host as a
 // descriptor (isDescriptorBuiltHost), and a descriptor child must be a value: a
 // FoldedDirective or template-only component placeholder under it would be
-// dropped. Inside such a host (`inDescriptor`), directives and components lower
-// to value holes here in the owning component, as a `@{}` body and the server
-// lower them. Misreading a template host as a descriptor host costs only the
-// template fast path; the reverse drops children.
+// dropped. Inside such a host (`inDescriptor`), directives, components, and child
+// `@{}` blocks lower to value holes here in the owning component, as a `@{}` body
+// and the server lower them. Misreading a template host as a descriptor host costs
+// only the template fast path; the reverse drops children.
 function extractFragment(node, ctx, holeProps, parentNs = 'html', inDescriptor = false) {
 	const descriptor =
 		inDescriptor ||
@@ -21407,6 +21646,17 @@ function extractFragment(node, ctx, holeProps, parentNs = 'html', inDescriptor =
 			const hn = `h${holeProps.length}`;
 			holeProps.push(objectProp(hn, lowerJsxChild(child, ctx)));
 			newChildren.push(b.jsx_expression_container(memberProps(hn, child)));
+		} else if (descriptor && t === 'JSXCodeBlock') {
+			// lowerJsxChild lowers the block as it does under a `@{}` body's descriptor:
+			// a render-only block transparently, and a setup-bearing one through this
+			// component's fold. The renderer must never fold it, since that would move
+			// the block's setup away from the locals it closes over.
+			const value = lowerJsxChild(child, ctx);
+			if (value !== null) {
+				const hn = `h${holeProps.length}`;
+				holeProps.push(objectProp(hn, value));
+				newChildren.push(b.jsx_expression_container(memberProps(hn, child)));
+			}
 		} else if (t === 'JSXCodeBlock') {
 			const body = child.body || [];
 			if (body.length === 0) {
@@ -21884,8 +22134,10 @@ function lowerHostFragment(
  *
  * In both cases the helper is added to `inlinedSubs` (visible in the
  * surrounding component-body scope) so it captures the parent component's
- * locals via closure. It cannot capture params of nested arrows — see
- * compiler README.
+ * locals via closure. The names a callback inside `node` binds are not in scope
+ * there, so with `leaveCallbackReads` a sub-template that reads one is left in
+ * place, for the rewriteJsxValues pass that must follow to compile inside that
+ * callback.
  */
 function rewriteTsrxBlocks(
 	node,
@@ -21894,8 +22146,15 @@ function rewriteTsrxBlocks(
 	inlinedSubs,
 	parentNs = 'html',
 	cssHash = null,
+	leaveCallbackReads = false,
 ) {
-	return mapAst(node, (n) => {
+	return rewrite(node, null);
+
+	function rewrite(root, callbackScope) {
+		return mapAst(root, (n) => visit(n, callbackScope));
+	}
+
+	function visit(n, callbackScope) {
 		if (n.type === 'Tsrx' || n.type === 'Tsx') {
 			const helperName = `__tsrx$${ctx.nextHelperId++}`;
 			const fakeBody = {
@@ -21909,6 +22168,8 @@ function rewriteTsrxBlocks(
 			return inheritOriginLoc(b.id(helperName), n);
 		}
 		if (n.type === 'ArrowFunctionExpression' && n.body && n.body.type === 'JSXCodeBlock') {
+			// The callback's names do not exist in the body the helper would join.
+			if (readsCallbackScope(n, callbackScope)) return n;
 			// `() => @{ … }` — new sub-template form. Hoist as a regular component
 			// body so its body.body (setup) + body.render (JSX) feed back through
 			// the standard compileFunctionBody path.
@@ -21929,8 +22190,24 @@ function rewriteTsrxBlocks(
 			);
 			return inheritOriginLoc(b.id(helperName), n);
 		}
+		if (leaveCallbackReads && isFunctionNode(n)) {
+			const scope = new Set(callbackScope);
+			for (const name of collectCallbackBindings(n)) scope.add(name);
+			let out = n;
+			for (const key in n) {
+				if (key === 'loc' || key === 'start' || key === 'end' || key === 'metadata') continue;
+				const child = n[key];
+				if (child === null || typeof child !== 'object') continue;
+				const mapped = rewrite(child, scope);
+				if (mapped !== child) {
+					if (out === n) out = { ...n };
+					out[key] = mapped;
+				}
+			}
+			return out;
+		}
 		return null;
-	});
+	}
 }
 
 /**
@@ -21950,20 +22227,31 @@ function rewriteTsrxBlocks(
  * A name the function introduces can shadow an enclosing lifetime-invariant
  * binding with one that changes between renders, so it must not inherit that
  * proof. `compileFunctionBody` recomputes the nested body's own invariants.
+ *
+ * Inside a module-level callback (`untracked`), nothing tracks the names the
+ * enclosing callbacks bind, so no env tuple can carry them. The whole nested
+ * compile, including the templates nested in it, then runs with no component
+ * context, which keeps every arm inline where it closes over those names.
  */
-function withNestedTemplateScope(fn, ctx, compile) {
+function withNestedTemplateScope(fn, ctx, compile, untracked = false) {
 	const prevLocals = ctx.currentComponentLocals;
 	const prevInvariantLocals = ctx.currentInvariantLocals;
 	const prevEventInvariantLocals = ctx.currentEventInvariantLocals;
+	const prevUntracked = ctx._untrackedScope;
 	const introduced = collectComponentLocals(fn);
-	const locals = new Set(prevLocals);
-	for (const name of introduced) locals.add(name);
-	ctx.currentComponentLocals = locals;
+	if (prevLocals == null && (untracked || prevUntracked === true)) {
+		ctx._untrackedScope = true;
+	} else {
+		const locals = new Set(prevLocals);
+		for (const name of introduced) locals.add(name);
+		ctx.currentComponentLocals = locals;
+	}
 	ctx.currentInvariantLocals = withoutShadowedNames(prevInvariantLocals, introduced);
 	ctx.currentEventInvariantLocals = withoutShadowedNames(prevEventInvariantLocals, introduced);
 	try {
 		return compile();
 	} finally {
+		ctx._untrackedScope = prevUntracked;
 		ctx.currentComponentLocals = prevLocals;
 		ctx.currentInvariantLocals = prevInvariantLocals;
 		ctx.currentEventInvariantLocals = prevEventInvariantLocals;
@@ -21993,7 +22281,7 @@ const SETUP_VALUE_DIRECTIVE_TYPES = new Set([
 // `@{ … }` block is also folded as a setup value, but it is a sub-template rather
 // than a set of arms — `rewriteTsrxBlocks` owns its expression-position handling,
 // and the unowned-directive diagnostic's advice does not apply to it — so it is
-// deliberately absent here.
+// deliberately absent here. With no owning body, lowerJsxChild compiles it in place.
 const VALUE_DIRECTIVE_ARM_TYPES = new Set([
 	'JSXIfExpression',
 	'JSXForExpression',
@@ -22351,12 +22639,14 @@ function rewriteJsxValues(node, ctx, eagerMapCallbackRoots = false, eagerMapCall
 			const name = n.id?.name ?? allocCompilerName(ctx, '__template');
 			// A nested body must not replace the enclosing component's warm plan.
 			const previousWarm = ctx._pendingWarm;
+			const compile = () =>
+				ctx.mode === 'server'
+					? ssrCompileBody(n, ctx, name, null, [], 'opaque')
+					: compileFunctionBody(n, ctx, name, 'opaque');
 			try {
-				const compiled = withNestedTemplateScope(n, ctx, () =>
-					ctx.mode === 'server'
-						? ssrCompileBody(n, ctx, name, null, [], 'opaque')
-						: compileFunctionBody(n, ctx, name, 'opaque'),
-				);
+				// A missing fold marks a module-level callback, whose names only this
+				// function's closure can reach.
+				const compiled = withNestedTemplateScope(n, ctx, compile, lower == null);
 				return functionExpressionFromDeclaration({ ...compiled, id: n.id ?? null }, n);
 			} finally {
 				ctx._pendingWarm = previousWarm;
@@ -22432,10 +22722,13 @@ function rewriteJsxValues(node, ctx, eagerMapCallbackRoots = false, eagerMapCall
 				// arms beside values they cannot reach. Drop the fold for this subtree so
 				// re-entries below (an attribute value re-enters rewriteJsxValues, with no
 				// function node left in view) cannot pick it back up, and the directive
-				// reaches the unowned diagnostic instead of folding into the wrong scope.
+				// reaches the unowned diagnostic instead of folding into the wrong scope. A
+				// `@{ … }` child block has no arms, so lowerJsxChild compiles it in place.
 				ctx._valueDirectiveLowering = null;
 			} else {
-				const introduced = collectComponentLocals(n);
+				// Including names bound in the callback's nested blocks, which a fold
+				// written in one of those blocks reads just the same.
+				const introduced = collectCallbackBindings(n);
 				const extended = new Set(previousLocals);
 				for (const name of introduced) extended.add(name);
 				ctx.currentComponentLocals = extended;
@@ -22506,6 +22799,13 @@ function rewriteJsxValues(node, ctx, eagerMapCallbackRoots = false, eagerMapCall
 function lowerInspectableJsxChild(child, ctx) {
 	const fold = ctx._valueDirectiveLowering;
 	if (fold == null) return lowerJsxChild(child, ctx);
+	// A render-only @{} block is transparent grouping: lowerJsxChild unwraps it
+	// to its render root. Letting lowerSetupValueDirectives fold it would produce
+	// a component range on the server while the descriptor path emits the
+	// unwrapped children on the client, breaking hydration.
+	if (child && child.type === 'JSXCodeBlock' && (child.body?.length ?? 0) === 0) {
+		return lowerJsxChild(child, ctx);
+	}
 	const prepared = lowerSetupValueDirectives(child, fold);
 	const t = prepared && prepared.type;
 	if (
@@ -22544,6 +22844,19 @@ function lowerJsxChild(child, ctx) {
 		const fold = ctx._valueDirectiveLowering;
 		if (fold != null) return fold(child);
 		rejectUnownedValueDirective(child);
+	}
+	if (t === 'JSXCodeBlock') {
+		// A render-only block is transparent grouping, as under a template host.
+		if ((child.body?.length ?? 0) === 0) {
+			return child.render ? lowerJsxChild(child.render, ctx) : null;
+		}
+		// A setup-bearing or code-only block is its own render scope. The owning
+		// body's fold compiles it into a renderer that closes over that body, the
+		// value both targets build. With no owning body, as inside a module-level
+		// callback, it compiles in place as the `() => @{ … }` child that
+		// normalizeChildren makes of it, closing over the callback's params.
+		const fold = ctx._valueDirectiveLowering;
+		return fold != null ? fold(child) : rewriteJsxValues(childCodeBlockArrow(child), ctx);
 	}
 	if (t === 'JSXFragment' || t === 'Fragment') {
 		const els = [];
@@ -26311,7 +26624,10 @@ function planJsx(
 			// Const-seeded straight into the bag factory args — no mount statement.
 			if (cc.isChild && !noTemplate) {
 				bag.constField(`_chv$${cc.id}`, 'null');
-				bag.constField(`_chp$${cc.id}`, 'undefined');
+				// An only-child hole's first render must reach childTextHole even for
+				// `undefined`: while hydrating, that call reconciles the host's server
+				// children, which no other binding owns.
+				bag.constField(`_chp$${cc.id}`, cc.onlyChildText ? 'unset' : 'undefined');
 			}
 		},
 	});
@@ -26356,11 +26672,12 @@ function planJsx(
 			);
 		}
 		// Const-seeded fields keep their registry strings until the factory call.
-		// A mixed-style scalar starts at its private owning scope so its first
-		// deferred write still runs for null/undefined. The same identity lets its
-		// setter distinguish a fresh mount from a preserved suspended retry.
+		// An `unset` field starts at its private owning scope, which no rendered
+		// value equals, so its first write still runs for null/undefined. For a
+		// mixed-style scalar, the same identity lets its setter distinguish a fresh
+		// mount from a preserved suspended retry.
 		const constArgNode = (expr) =>
-			expr === 'null' ? b.literal(null) : expr === 'style-unset' ? b.id('__s') : b.id(expr);
+			expr === 'null' ? b.literal(null) : expr === 'unset' ? b.id('__s') : b.id(expr);
 		const bagFieldValue = (f) =>
 			f.hostVar !== null
 				? b.id(f.hostVar)
@@ -27863,7 +28180,7 @@ function emitDeferredMount(bind, elVar, bag) {
 			: bind.kind === 'style' || bind.kind === 'styleProperties'
 				? `_sty$${bind.id}`
 				: `_prev$${bind.id}`,
-		bind.kind === 'styleProperty' || bind.kind === 'styleProperties' ? 'style-unset' : 'undefined',
+		bind.kind === 'styleProperty' || bind.kind === 'styleProperties' ? 'unset' : 'undefined',
 	);
 	if (bind.kind === 'styleProperties') {
 		if (bind.spread) bag.constField(`_styFull$${bind.id}`, 'undefined');
@@ -30518,6 +30835,9 @@ function emitElementHtml(
 	}
 
 	let children = normalizeChildren(sourceChildren, childNs === 'svg', ctx, tag === 'noscript');
+	// Before metadata lifting, so a `<title>` inside a textarea is rejected here
+	// exactly as the server rejects it.
+	const textareaParts = textareaTextParts(tag, hostNs, children, ctx);
 	// NESTED document metadata / Float resources are zero-DOM children: lift
 	// them to the enclosing plan's head list (mounted out-of-band by
 	// emitHeadClient — scope-owned metadata, global resources), mirroring the
@@ -30533,8 +30853,51 @@ function emitElementHtml(
 		}
 		if (hasNestedHoist) children = children.filter((n) => n.type !== 'HeadHoist');
 	}
-	// Special case: a single Text child (only-child text fast path).
-	if (
+	if (textareaParts !== null) {
+		// Every child folds into one text binding (see textareaTextParts). It is a
+		// direct signal binding when any hole may carry a handle: the runtime then
+		// returns one derived handle over the parts.
+		let signalCapable = false;
+		for (const part of textareaParts) {
+			if (part.kind === 'static') continue;
+			if (canCarryDirectSignalHandle(part.expr)) signalCapable = true;
+			else if (canCarryDirectSignalHandle(part.expr, false, true)) ctx.signalBindingsUsed = true;
+			if (isDirectSignalHandleExpression(part.expr)) ctx.signalBindingsEager = true;
+		}
+		if (signalCapable) ctx.signalBindingsUsed = true;
+		const expr = inheritOriginLoc(
+			b.call(
+				requireRuntimeForContext(ctx, 'textareaText'),
+				...textareaTextArgs(textareaParts, (expression, text) =>
+					text
+						? resolveStyleExpr(expression, cssHash)
+						: tsrxExprNode(
+								resolveStyleExpr(rewriteChildHoleValue(expression, ctx), cssHash),
+								ctx,
+								componentName,
+								inlinedSubs,
+								childNs,
+								cssHash,
+							),
+				),
+			),
+			node,
+		);
+		// A customized built-in's constructor may inspect children while cloned.
+		const seededText = !directPropNames.has('is');
+		bindings.push({
+			id: bindings.length,
+			kind: 'textOnlyChild',
+			expr,
+			path,
+			seededText,
+			...(signalCapable
+				? { signalDirect: true, signalSite: directSignalSite(ctx, node, 'binding') }
+				: {}),
+		});
+		if (seededText) appendTemplatePart(html, ' ', 'text');
+	} else if (
+		// Special case: a single Text child (only-child text fast path).
 		children.length === 1 &&
 		children[0].type === 'Text' &&
 		!children[0]._octaneBindingText &&
@@ -33162,10 +33525,10 @@ function makeForCall(node, ctx, inlinedSubs, parentNs = 'html', cssHash = null) 
 	// parent is laid out per child (e.g. <tbody> in js-framework-benchmark).
 	// In addition to a direct host root, accept only narrowly-proven sole
 	// component and host-vs-host conditional roots; all other shapes keep item
-	// ranges.
+	// ranges. An item that can exit early renders no root when it does.
 	let singleRoot = false;
 	let singleRootExpr = null;
-	{
+	if (!armMayExit(subStmts)) {
 		const jsxChildren = subStmts.filter((s) => isJsxNode(s));
 		if (jsxChildren.length === 1) {
 			const c = jsxChildren[0];
@@ -33461,6 +33824,181 @@ function rewriteEarlyExits(body, allowExplicitNull = false) {
 		out.push(stmt);
 	}
 	return out;
+}
+
+/**
+ * Split a directive arm (an @if/@else, @switch case, @try/@pending/@catch, or
+ * @for/@empty body) into its guard-nested form. The arm renders its final node
+ * unless it exits first, and an exit is `return;`, `return null;`, or a
+ * `continue;` that targets the `@for`. Wherever the exit sits in the arm's
+ * setup, it ends only that arm's output, exactly like the top-level guard
+ * rewriteEarlyExits nests. An exit inside a setup statement sets a flag and
+ * breaks out of that statement, and the flag becomes the guard:
+ *
+ *   if (a) { if (b) return null; f(); } rest
+ *   ⇒
+ *   let __exit = false;
+ *   __exit: if (a) { if (b) { __exit = true; break __exit; } f(); }
+ *   if (!__exit) { rest }
+ *
+ * Jumps that target a loop, `switch`, or label inside the arm, and returns in
+ * a nested function, stay JavaScript. Statements the split renders (directives
+ * and JSX-bearing `if`/`for`/`try`) are arms themselves and lower their own
+ * exits when they compile. Legacy synthetic bodies only: a real function body
+ * returns through the generic value ABI.
+ */
+function splitArmExits(body, ctx) {
+	let out = null;
+	for (let i = 0; i < body.length; i++) {
+		const stmt = body[i];
+		let lowered = stmt;
+		if (!isEarlyExitIf(stmt, true) && !isJsxNode(stmt)) {
+			// An unconditional exit: nothing after it runs.
+			if (isEarlyExitStatement(stmt, true)) return rewriteEarlyExits(out ?? body.slice(0, i), true);
+			let flag = null;
+			const replaced = replaceArmExits(stmt, false, false, ctx, (exit) => {
+				flag ??= allocCompilerName(ctx, '__exit');
+				return inheritOriginLoc(
+					b.block([
+						b.stmt(b.assignment('=', b.id(flag), b.literal(true, 'true'))),
+						{ type: 'BreakStatement', label: b.id(flag) },
+					]),
+					exit,
+				);
+			});
+			if (flag !== null) {
+				lowered = [
+					inheritOriginLoc(b.let(b.id(flag), b.literal(false, 'false')), stmt),
+					inheritOriginLoc(b.labeled(flag, replaced), stmt),
+					inheritOriginLoc(b.if(b.id(flag), b.return(), null), stmt),
+				];
+			}
+		}
+		if (out === null && lowered !== stmt) out = body.slice(0, i);
+		if (out !== null) Array.isArray(lowered) ? out.push(...lowered) : out.push(lowered);
+	}
+	return rewriteEarlyExits(out ?? body, true);
+}
+
+/**
+ * Replace each exit a setup statement owns with `exit(node)`. A value return
+ * and a `break` that targets the directive have no arm equivalent, so they are
+ * compile errors instead of literal JavaScript that renders "null"/"undefined",
+ * leaves stale DOM, or breaks out of a function.
+ */
+function replaceArmExits(node, loop, breakable, ctx, exit) {
+	if (node === null || typeof node !== 'object') return node;
+	if (Array.isArray(node)) {
+		let out = null;
+		for (let i = 0; i < node.length; i++) {
+			const mapped = replaceArmExits(node[i], loop, breakable, ctx, exit);
+			if (out === null && mapped !== node[i]) out = node.slice(0, i);
+			if (out !== null) out.push(mapped);
+		}
+		return out ?? node;
+	}
+	const type = node.type;
+	if (isArmJumpBoundary(type)) return node;
+	const jump = armJump(node, loop, breakable);
+	if (jump === 'exit') return exit(node);
+	if (jump === 'value') {
+		throw armExitError(
+			ctx,
+			node,
+			'A directive arm can only end early with `return;` or `return null;`. Its output is ' +
+				'the node it ends with, so a returned value has nothing to render in its place: ' +
+				'render the alternative from an `@if`/`@else` arm instead.',
+		);
+	}
+	if (jump === 'break') {
+		throw armExitError(
+			ctx,
+			node,
+			'`break` cannot leave the `@for` or `@switch` around a directive arm. End the arm ' +
+				'early with `return;` instead, or filter the `@for` items to stop the list early.',
+		);
+	}
+	const innerLoop = loop || LOOP_TYPES.has(type);
+	const innerBreakable = breakable || innerLoop || type === 'SwitchStatement';
+	let out = null;
+	for (const key in node) {
+		if (AST_WALK_SKIP_KEYS.has(key)) continue;
+		const child = node[key];
+		if (child === null || typeof child !== 'object') continue;
+		const mapped = replaceArmExits(child, innerLoop, innerBreakable, ctx, exit);
+		if (mapped !== child) (out ??= { ...node })[key] = mapped;
+	}
+	return out ?? node;
+}
+
+/**
+ * Whether an arm's setup can end it before its output node, so the output is
+ * conditional. Single-root and markerless proofs that pick an arm's output by
+ * its JSX statements must reject such an arm: when the exit is taken there is
+ * no host to serve as the boundary.
+ */
+function armMayExit(statements) {
+	return statements.some(
+		(statement) => !isJsxNode(statement) && ownsArmJump(statement, false, false),
+	);
+}
+
+function ownsArmJump(node, loop, breakable) {
+	if (node === null || typeof node !== 'object') return false;
+	if (Array.isArray(node)) return node.some((child) => ownsArmJump(child, loop, breakable));
+	const type = node.type;
+	if (isArmJumpBoundary(type)) return false;
+	if (armJump(node, loop, breakable) !== null) return true;
+	const innerLoop = loop || LOOP_TYPES.has(type);
+	const innerBreakable = breakable || innerLoop || type === 'SwitchStatement';
+	for (const key in node) {
+		if (AST_WALK_SKIP_KEYS.has(key)) continue;
+		const child = node[key];
+		if (
+			child !== null &&
+			typeof child === 'object' &&
+			ownsArmJump(child, innerLoop, innerBreakable)
+		)
+			return true;
+	}
+	return false;
+}
+
+// Nested functions own their returns, and JSX and directives own their arms.
+function isArmJumpBoundary(type) {
+	return (
+		typeof type !== 'string' ||
+		FN_TYPES.has(type) ||
+		type === 'StaticBlock' ||
+		JSX_CHILDREN_BEARING_TYPES.has(type) ||
+		SETUP_VALUE_DIRECTIVE_TYPES.has(type)
+	);
+}
+
+/**
+ * How a jump statement relates to the arm whose setup holds it: 'exit' ends
+ * the arm, 'value' (a value return) and 'break' (one that targets the
+ * directive) have no arm meaning, and null stays JavaScript. `loop` and
+ * `breakable` say whether an unlabeled `continue`/`break` here targets a loop
+ * or `switch` inside the arm; a labeled jump always targets a label inside it.
+ */
+function armJump(node, loop, breakable) {
+	switch (node.type) {
+		case 'ReturnStatement':
+			return isEarlyExitStatement(node, true) ? 'exit' : 'value';
+		case 'ContinueStatement':
+			return node.label == null && !loop ? 'exit' : null;
+		case 'BreakStatement':
+			return node.label == null && !breakable ? 'break' : null;
+		default:
+			return null;
+	}
+}
+
+function armExitError(ctx, node, message) {
+	const l = node.loc && node.loc.start;
+	const at = l ? ` (${ctx.mapSourceName ? ctx.mapSourceName + ':' : ''}${l.line}:${l.column})` : '';
+	return new Error(message + at);
 }
 
 /**
@@ -33982,6 +34520,125 @@ function lowerJsxReturnBranchComponents(ast) {
 	return out === null ? ast : { ...ast, body: out };
 }
 
+/**
+ * A `@{ … }` body is shorthand for returning JSX: `(v) => @{ …; <p /> }` means
+ * `(v) => { …; return <p />; }`. A template function declared inside another
+ * function normally compiles as a render body instead, which receives its
+ * Scope as an argument and renders into it. That is sound only while the
+ * runtime is the one calling it: a `{helper}` child, a `<Helper />` tag, or a
+ * portal body. A direct call `helper(v)` passes no Scope, so the body reads
+ * `__s.slots` of undefined.
+ *
+ * When any code that can see the binding calls it directly, or hands it to
+ * `.map`, lower the function to its returned-JSX form, so the call returns a
+ * JSX value exactly as the `=> <jsx>` form does on the client and the server.
+ * The runtime's own calls render that value too. A call through a shadowing
+ * binding of the same name also lowers it, which costs only the template fast
+ * path.
+ *
+ * Module-level template functions are components, which this pass leaves to
+ * the component pipeline. Async and generator ones keep their bodies, because
+ * their returned-JSX forms return a promise or an iterator instead of JSX.
+ */
+function lowerDirectlyCalledTemplateFunctions(ast) {
+	// Template function node → [binding name, the function that declares it].
+	const candidates = new Map();
+	walkWithEnclosingFunctions(ast.body, (node, functions) => {
+		if (functions.length === 0) return;
+		let fn = null;
+		let name;
+		if (node.type === 'FunctionDeclaration') {
+			fn = node;
+			name = node.id?.name;
+		} else if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier') {
+			const init = unwrapTsExpr(node.init);
+			if (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') {
+				fn = init;
+				name = node.id.name;
+			}
+		}
+		if (fn?.body?.type === 'JSXCodeBlock' && !fn.async && !fn.generator && name !== undefined) {
+			candidates.set(fn, [name, functions[functions.length - 1]]);
+		}
+	});
+	if (candidates.size === 0) return ast;
+
+	// Function node → candidate names that code inside it calls directly.
+	const names = new Set([...candidates.values()].map(([name]) => name));
+	const calledIn = new Map();
+	walkWithEnclosingFunctions(ast.body, (node, functions) => {
+		// Optional calls are an `optional` CallExpression inside a ChainExpression,
+		// or Babel's OptionalCallExpression and OptionalMemberExpression.
+		if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return;
+		let callee = unwrapTsExpr(node.callee);
+		if (callee?.type === 'MemberExpression' || callee?.type === 'OptionalMemberExpression') {
+			const method = callee.computed ? callee.property?.value : callee.property?.name;
+			// `helper.call(…)` and `helper.apply(…)` call it, and so does
+			// `rows.map(helper)`, with the row index where a Scope would go.
+			callee =
+				method === 'call' || method === 'apply'
+					? unwrapTsExpr(callee.object)
+					: method === 'map'
+						? unwrapTsExpr(node.arguments[0])
+						: null;
+		}
+		if (callee?.type !== 'Identifier' || !names.has(callee.name)) return;
+		for (const fn of functions) {
+			let called = calledIn.get(fn);
+			if (called === undefined) calledIn.set(fn, (called = new Set()));
+			called.add(callee.name);
+		}
+	});
+	const lowered = new Set();
+	for (const [fn, [name, owner]] of candidates) {
+		if (calledIn.get(owner)?.has(name)) lowered.add(fn);
+	}
+	if (lowered.size === 0) return ast;
+	const lower = (node) =>
+		mapAst(node, (n) => {
+			if (!lowered.has(n)) return null;
+			const block = n.body;
+			const render = block.render;
+			const statements = [...lower(block.body)];
+			if (render != null) {
+				// A directive output returns as a value-position directive.
+				const value = lower(render);
+				// `() => @{ <p /> }` is exactly `() => <p />`.
+				if (statements.length === 0 && n.type === 'ArrowFunctionExpression') {
+					return { ...n, body: value, expression: true };
+				}
+				statements.push(inheritOriginLoc(b.return(value), render));
+			}
+			const body = inheritOriginLoc(b.block(statements), block);
+			return n.type === 'ArrowFunctionExpression'
+				? { ...n, body, expression: false }
+				: { ...n, body };
+		});
+	return lower(ast);
+}
+
+/** Visit every node with the functions that enclose it, outermost first. */
+function walkWithEnclosingFunctions(root, visit) {
+	const functions = [];
+	const walk = (node) => {
+		if (node == null || typeof node !== 'object') return;
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child);
+			return;
+		}
+		visit(node, functions);
+		const isFunction = isFunctionNode(node);
+		if (isFunction) functions.push(node);
+		for (const key in node) {
+			if (key === 'loc' || key === 'start' || key === 'end' || key === 'metadata') continue;
+			const child = node[key];
+			if (child !== null && typeof child === 'object') walk(child);
+		}
+		if (isFunction) functions.pop();
+	};
+	walk(root);
+}
+
 function isJsxNode(node) {
 	if (!node) return false;
 	if (isWrappedJsxDirective(node)) return true;
@@ -33991,12 +34648,16 @@ function isJsxNode(node) {
 	if (node.type === 'JSXElement' || node.type === 'JSXFragment') return true;
 	// New TSRX directive nodes — always JSX-position. normalizeChildren will
 	// lower them to IfStatement / ForOfStatement / TryStatement / SwitchStatement
-	// when planJsx runs over them.
+	// when planJsx runs over them. A child `@{ … }` block in a statement list is
+	// a directive arm's output node, never setup: normalizeChildren makes a
+	// render-only block transparent and gives a setup-bearing one its own scope,
+	// exactly as it does for a block among element children.
 	if (
 		node.type === 'JSXIfExpression' ||
 		node.type === 'JSXForExpression' ||
 		node.type === 'JSXTryExpression' ||
 		node.type === 'JSXSwitchExpression' ||
+		node.type === 'JSXCodeBlock' ||
 		node.type === 'JSXExpressionContainer' ||
 		node.type === 'JSXText' ||
 		node.type === 'JSXStyleElement'
@@ -34025,6 +34686,18 @@ function isWrappedJsxDirective(node) {
 		type === 'JSXTryExpression' ||
 		type === 'JSXSwitchExpression'
 	);
+}
+
+// `@for` item bodies and `@switch` cases wrap a child `@{ … }` block written as
+// their output in an ExpressionStatement. The parser admits a block only as a
+// body's final statement, so unwrap just that one. A block inside plain JS
+// control flow in the body's setup is wrapped the same way and stays a
+// JavaScript expression, exactly like an element written there.
+function unwrapOutputCodeBlock(statements) {
+	const last = statements[statements.length - 1];
+	return last?.type === 'ExpressionStatement' && last.expression?.type === 'JSXCodeBlock'
+		? [...statements.slice(0, -1), last.expression]
+		: statements;
 }
 
 function bodyContainsJsx(node) {

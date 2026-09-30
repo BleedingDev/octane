@@ -497,3 +497,105 @@ describe('compile errors — slot-keyed hooks in plain JS loops', () => {
 		expect(() => compile(src, 'map-hook.tsrx', { mode: 'server' })).not.toThrow();
 	});
 });
+
+// Textarea content is RCDATA: the parser keeps markup inside it as literal
+// text, so an element or template directive there cannot mean what it says.
+describe('compile errors — textarea children', () => {
+	it.each([
+		['an element', '<textarea><b>x</b></textarea>', /contains `<b>`/],
+		['a component', '<textarea>{"a"}<Field /></textarea>', /contains an element/],
+		['document metadata', '<div><textarea><title>x</title></textarea></div>', /contains `<title>`/],
+		['an @if block', '<textarea>@if (props.on) {\n{"a"}\n}</textarea>', /contains an `@if` block/],
+		['a JSX expression', '<textarea>{props.on ? <b /> : "x"}</textarea>', /a JSX expression/],
+		[
+			'a mapped JSX list',
+			'<textarea>{props.items.map((item) => <i key={item}>{item}</i>)}</textarea>',
+			/contains an `@for` block or a mapped JSX list/,
+		],
+	])('rejects %s inside a textarea on both emit paths', (_label, markup, detail) => {
+		const src = `function Field() @{ <input /> }\nexport function T(props: any) @{\n\t${markup}\n}\n`;
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(src, 'textarea.tsrx', { mode })).toThrow(
+				/`<textarea>` children must be text/,
+			);
+			expect(() => compile(src, 'textarea.tsrx', { mode })).toThrow(detail);
+		}
+	});
+
+	it('allows text and markup children of an SVG-namespace textarea', () => {
+		const src = `export function T(props: any) @{
+			<div>
+				<textarea>hello {props.a}{props.b as string}</textarea>
+				<svg><textarea><b>x</b></textarea></svg>
+			</div>
+		}`;
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(src, 'textarea.tsrx', { mode })).not.toThrow();
+		}
+	});
+});
+
+// A directive arm's output is its final node, so it can end early only with
+// `return;`, `return null;`, or (in an `@for` body) `continue;`. A value return
+// has nothing to render in the node's place, and a `break` that targets the
+// directive has no loop to leave in the compiled arm.
+describe('compile errors — directive arm exits', () => {
+	const component = (markup: string) =>
+		`export function Arm({ x, items }: { x: number; items: string[] }) @{\n\t<div>${markup}</div>\n}\n`;
+
+	it.each([
+		['a returned element', '@if (x > 0) { if (x > 1) return <i />; <b /> }'],
+		['a returned string', '@if (x > 0) { <b /> } @else { if (x < -1) return "none"; <i /> }'],
+		[
+			'a value returned from a nested loop',
+			'@for (const item of items; key item) { for (const c of item) { if (c === "a") return c; } <b /> }',
+		],
+		[
+			'an explicit `undefined`',
+			'@switch (x) { @case 1: { if (x > 0) { return undefined; } <b /> } }',
+		],
+	])('rejects %s in an arm on both emit paths, at the return', (_label, markup) => {
+		// The markup sits on line 2 after `\t<div>`; columns are zero-based.
+		const at = `(arm-exit.tsrx:2:${'\t<div>'.length + markup.indexOf('return')})`;
+		for (const mode of ['client', 'server'] as const) {
+			const run = () => compile(component(markup), 'arm-exit.tsrx', { mode });
+			expect(run).toThrow(/can only end early with `return;` or `return null;`/);
+			expect(run).toThrow(at);
+		}
+	});
+
+	it.each([
+		['an `@for` body', '@for (const item of items; key item) { if (item === "") break; <b /> }'],
+		['an `@switch` case', '@switch (x) { @case 1: { if (x > 0) break; <b /> } }'],
+		[
+			'an `@if` arm inside an `@for`',
+			'@for (const item of items; key item) { @if (x > 0) { { break; } <b /> } }',
+		],
+	])('rejects a `break` that targets the directive around %s', (_label, markup) => {
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(component(markup), 'arm-exit.tsrx', { mode })).toThrow(
+				/`break` cannot leave the `@for` or `@switch` around a directive arm/,
+			);
+		}
+	});
+
+	it('allows value returns in the component body and in functions inside an arm', () => {
+		const src = `export function Arm({ x }: { x: number }) @{
+			if (x < 0) return <i />;
+			<div>
+				@if (x > 0) {
+					const pick = () => {
+						return x > 1 ? 'b' : 'a';
+					};
+					for (const c of [pick()]) {
+						if (c === 'a') break;
+					}
+					<b>{pick()}</b>
+				}
+			</div>
+		}`;
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(src, 'arm-exit.tsrx', { mode })).not.toThrow();
+		}
+	});
+});

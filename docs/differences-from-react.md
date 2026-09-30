@@ -893,9 +893,23 @@ commit/discrete event reasserts. `<textarea>` with children AND a
 
 Uncontrolled `defaultValue` updates change an input or textarea's reset baseline
 without replacing its live value. A select uses `defaultValue` on mount and
-when `multiple` changes. A textarea authored with children instead has a live
-text binding; use `defaultValue` when later renders must preserve user edits.
+when `multiple` changes. A textarea's children, whether authored as JSX, held
+by a spread, or passed as `children=`, are instead a live text binding; use
+`defaultValue` when later renders must preserve user edits.
 Removing a controlled textarea's `value` retains its current content.
+
+A textarea's children are text on the client and the server. React accepts at
+most one child and converts it with `'' + children`, so an element becomes
+`[object Object]` and `false` becomes `"false"`. Octane joins any number of
+children into one text value. Holes follow their usual text rules: `{x}` renders
+strings and numbers, renders `null`, `undefined` and booleans as nothing, and
+joins arrays or iterables of text; `{x as string}` stringifies like any text
+binding. An element, function or other object throws on both sides, and an
+element, component or template directive written inside a `<textarea>` is a
+compile error. The HTML parser keeps textarea content as literal text, so it
+can carry no hydration markers. A compiled textarea's holes may each hold a
+signal handle; a textarea made by `createElement` or stored JSX takes text
+children only.
 
 A function form action has no `action` attribute while intercepted. Octane does
 not serialize React's JavaScript-URL sentinel. `onSubmit` and ancestor handlers
@@ -1138,7 +1152,7 @@ as non-goals in the parity ledger.
 
 ## Document metadata and Float resources
 
-Hoisted `<title>`/`<meta>`/`<link>` follow React 19's model with two
+Hoisted `<title>`/`<meta>`/`<link>` follow React 19's model with three
 differences:
 
 - **Ownership is per compile site, not per content.** Each authored element
@@ -1149,6 +1163,12 @@ differences:
   unmounts.
 - **`<title>` accepts any children Octane can stringify** — multiple children
   and expressions concatenate. React 19 errors on non-string title children.
+- **Hydration moves folded metadata into `document.head`.** A body-only render
+  prepends its hoisted metadata to `html`. When that whole `html` fills the
+  hydrating container, `hydrateRoot` moves each metadata entry into
+  `document.head` and adopts it there, so the hydrated DOM matches a client
+  render. React adopts the element where it lies in the container. Folded Float
+  resources and hints stay in place in both.
 
 Metadata and resources hoist from ANY depth, matching React: an element
 nested inside a host partitions out of the body on both the client and the
@@ -1751,7 +1771,9 @@ throwing.
 `hydrateRoot`'s `onRecoverableError` option fires (dev AND prod) after a
 structural or text recovery — a rebuilt subtree, corrected text, or a discarded
 stale server range —
-coalesced to one report per root per microtask burst. Octane recovers per site
+coalesced to one report per root per microtask burst. A boundary that retries
+hydration after suspending does not report content that an earlier attempt
+already rebuilt. Octane recovers per site
 rather than client-rendering a whole boundary, so attribute-level value patches
 do not report: production React does not detect those at all, and reporting
 Octane's extra detection would make the channel incomparable.

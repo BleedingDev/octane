@@ -58,6 +58,7 @@ import {
 	FOR_BLOCK_OPEN_EMPTY,
 	FOR_BLOCK_OPEN_ITEMS,
 	EMPTY_COMMENT,
+	TEXT_SEPARATOR,
 	SUSPENSE_SCRIPT_ATTR,
 	SUSPENSE_RESOLVED_COMMENT,
 	SUSPENSE_RESOLVED_SEED_ATTR,
@@ -130,8 +131,10 @@ import {
 	applyElementDefaultProps,
 	childElementKey,
 	childrenIterator,
+	describeTextareaChild,
 	escapeMappedElementKey,
 	resolveLazyDefaultProps as lazyResolvedProps,
+	textareaChildText,
 } from './shared-value-helpers.js';
 
 // Shared client/SSR CSS helpers (single source in css.ts so class strings and
@@ -2295,6 +2298,38 @@ export function ssrChildTextPre(v: unknown, scope: SSRScope): string {
 	return content.charCodeAt(0) === 10 ? '\n' + content : content;
 }
 
+function rejectTextareaChild(child: unknown): never {
+	throw new Error(formatServerError(336, describeTextareaChild(child, isElementDescriptor)));
+}
+
+/**
+ * @internal A <textarea>'s authored children as its one markerless text, the
+ * server twin of the client's `textareaText`. Textarea content is RCDATA, so a
+ * `<!-- -->` separator or `<!--[-->` frame would parse as part of its default
+ * value. `textHoles` marks the `{x as string}` parts with a 't'; a part that is
+ * itself a signal handle is read, as the client binds it. A leading newline is
+ * doubled because the parser discards one directly after the opening tag.
+ */
+export function ssrTextareaText(parts: unknown[], textHoles?: string): string {
+	// Raw HTML probes only whether a child is present (ssrInnerHtml).
+	let probing = false;
+	for (const part of parts) if (probingDangerHtmlChild(part)) probing = true;
+	if (probing) return '';
+	let text = '';
+	for (let i = 0; i < parts.length; i++) {
+		let part = parts[i];
+		if (isSignalHandle(part)) part = readSignalBinding(part);
+		text +=
+			textHoles !== undefined && textHoles.charCodeAt(i) === 116 // 't'
+				? part == null || part === false
+					? ''
+					: String(part)
+				: textareaChildText(part, rejectTextareaChild);
+	}
+	const escaped = escapeHtml(text);
+	return escaped.charCodeAt(0) === 10 ? '\n' + escaped : escaped;
+}
+
 /** @internal First renderable child when static output has no shielding markers. */
 export function ssrChildPre(v: unknown, scope: SSRScope): string {
 	const content = ssrChild(v, scope);
@@ -2431,6 +2466,10 @@ function ssrHostElement(
 						: raw;
 		} else if (rawInner !== undefined) {
 			inner = rawInner;
+		} else if (hasChildren && semanticTag === 'textarea' && namespace === 'html') {
+			// Text on both sides, like a compiled textarea (the client folds these in
+			// deoptHostChildren); the newline guard below protects a leading '\n'.
+			inner = escapeHtml(textareaChildText(children, rejectTextareaChild));
 		} else if (hasChildren) {
 			// Script-data does not decode HTML entities. A compiler-generated host
 			// descriptor therefore needs the same whole-body serializer as the direct
@@ -2600,33 +2639,93 @@ function ssrDeoptItemContent(value: unknown, scope: SSRScope): string {
 
 // Serialize the CONTENT inside a host descriptor (a `createElement(...)` child
 // subtree) as PLAIN markup — NO childSlot block markers. Mirrors the client's
-// `buildDeoptDom`, which builds the descriptor's children as raw DOM nodes inside
-// the element (the de-opt host path REBUILDS on hydration, so the inside carries no
-// adopt markers). This keeps the serialized `<span>text</span>` byte-identical to a
-// fresh client mount. Arrays flatten, nested host descriptors recurse, components
-// still render through `ssrComponent` (block-wrapped — a component IS a hydration
-// boundary even inside de-opt markup), primitives coerce to escaped text.
+// de-opt reconciler (`reconcileDeoptChildren`), which builds the descriptor's
+// children as raw DOM nodes inside the element and adopts the server's nodes
+// positionally on hydration, so the inside carries no block markers. Arrays
+// flatten, nested host descriptors recurse, components still render through
+// `ssrComponent` (block-wrapped — a component IS a hydration boundary even inside
+// de-opt markup), primitives coerce to escaped text.
+//
+// The client builds one Text node per primitive child, but the HTML parser merges
+// adjacent server texts into one. Adjacent texts therefore get the compiled
+// template path's `<!-- -->` separator (React's convention), which the client
+// reconciler drops as it adopts them. Adjacency looks through nested arrays and
+// empty values, so it is tracked in SSR_DESCRIPTOR_TEXT_TAIL rather than read
+// back from the output, whose concatenation V8 would have to flatten per child.
 function ssrDescriptorContent(v: unknown, scope: SSRScope): string {
+	SSR_DESCRIPTOR_TEXT_TAIL = false;
+	return ssrDescriptorPart(v, scope);
+}
+
+// Whether the de-opt content serialized so far ends with a text node. Each
+// ssrDescriptorContent call starts clear, markup clears it, and empty values
+// leave it unchanged.
+let SSR_DESCRIPTOR_TEXT_TAIL = false;
+
+function ssrDescriptorPart(v: unknown, scope: SSRScope): string {
 	if (v == null || v === false || v === true || v === '') return '';
-	if (typeof v === 'object' && SERVER_HTML in v) return (v as ServerHtml)[SERVER_HTML];
+	if (typeof v === 'object' && SERVER_HTML in v) {
+		SSR_DESCRIPTOR_TEXT_TAIL = false;
+		return (v as ServerHtml)[SERVER_HTML];
+	}
 	if (Array.isArray(v)) {
 		let out = '';
-		for (let i = 0; i < v.length; i++) out += ssrDescriptorContent(v[i], scope);
+		for (let i = 0; i < v.length; i++) out += ssrDescriptorPart(v[i], scope);
 		return out;
 	}
 	if (typeof v === 'object' && (v as any).$$kind === ELEMENT_TAG) {
 		const d = v as ElementDescriptor;
-		if (typeof d.type === 'string') return ssrHostElement(d.type, d.props, d.children, scope);
-		return ssrComponentDescriptor(d, scope);
+		const html =
+			typeof d.type === 'string'
+				? ssrHostElement(d.type, d.props, d.children, scope)
+				: ssrComponentDescriptor(d, scope);
+		SSR_DESCRIPTOR_TEXT_TAIL = false;
+		return html;
 	}
 	if (typeof v === 'function') {
 		// A host descriptor can receive a compiler-generated children block through
 		// an uncompiled wrapper. Its transient function identity must not become part
 		// of the streamed async boundary key used for a later retry.
-		return ssrComponent(scope, v as ServerComponent, {}, undefined, undefined, isChildrenBlock(v));
+		const html = ssrComponent(
+			scope,
+			v as ServerComponent,
+			{},
+			undefined,
+			undefined,
+			isChildrenBlock(v),
+		);
+		SSR_DESCRIPTOR_TEXT_TAIL = false;
+		return html;
 	}
 	if (typeof v === 'object') throw invalidChildError(v as object);
-	return escapeHtml(v);
+	const text = escapeHtml(v);
+	if (!SSR_DESCRIPTOR_TEXT_TAIL) {
+		SSR_DESCRIPTOR_TEXT_TAIL = true;
+		return text;
+	}
+	return ssrContentParsesComments() ? TEXT_SEPARATOR + text : text;
+}
+
+// HTML elements whose content the parser reads as RCDATA or raw text (noscript
+// is raw text whenever scripting is enabled). A comment there is literal text,
+// and the parser keeps the whole content as one text node anyway.
+const RAW_TEXT_CONTENT = new Set([
+	'textarea',
+	'title',
+	'script',
+	'style',
+	'xmp',
+	'iframe',
+	'noembed',
+	'noframes',
+	'noscript',
+	'plaintext',
+]);
+
+// Whether the host whose content is being serialized tokenizes comments.
+function ssrContentParsesComments(): boolean {
+	const host = CURRENT_SSR_ELEMENT;
+	return host === null || host.namespace !== 'html' || !RAW_TEXT_CONTENT.has(host.tag);
 }
 
 /**
@@ -3831,9 +3930,11 @@ export function ssrChildrenSources(
 	sources: readonly (readonly [boolean, unknown])[],
 	renderFallback: () => string,
 	scope: SSRScope,
+	textarea = false,
 ): string {
 	const child = finalPresentSource(sources);
-	return child[0] ? ssrChildText(child[1], scope) : renderFallback();
+	if (!child[0]) return renderFallback();
+	return textarea ? ssrTextareaText([child[1]]) : ssrChildText(child[1], scope);
 }
 
 /**
@@ -4210,9 +4311,12 @@ function ssrOptionSelected(value: unknown, content: string): string {
 		key = String(value);
 	} else {
 		// Content carrying markup (nested elements / hydration markers) skips
-		// the text fallback — React flattens simple text children only.
-		if (content.indexOf('<') !== -1) return '';
-		key = unescapeOptionText(content);
+		// the text fallback — React flattens simple text children only. The
+		// separator between adjacent texts is not markup; the text is theirs.
+		const text =
+			content.indexOf(TEXT_SEPARATOR) === -1 ? content : content.replaceAll(TEXT_SEPARATOR, '');
+		if (text.indexOf('<') !== -1) return '';
+		key = unescapeOptionText(text);
 	}
 	if (scope.multi !== null) return scope.multi.has(key) ? ' selected' : '';
 	return scope.single === key ? ' selected' : '';
