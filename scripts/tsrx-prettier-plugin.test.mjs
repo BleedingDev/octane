@@ -10,12 +10,16 @@ import * as prettier from 'prettier';
 // from scratch, so a statement it cannot print used to become a placeholder
 // comment, an empty loop body used to vanish so the next statement became the
 // body, and the parentheses around an `as` cast were dropped so the cast took
-// in the surrounding operator. These rewrites pass `prettier --check` once
-// committed, so these tests pin the output and compare the AST before and
-// after formatting.
+// in the surrounding operator. Dropped parentheses also mixed `??` with `||`
+// or `&&`, and let an object, function or class start a statement or an arrow
+// body. These rewrites pass `prettier --check` once committed, so these tests
+// pin the output and compare the AST before and after formatting.
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/tsrx-prettier-statements.tsrx', import.meta.url));
 const CAST_FIXTURE = fileURLToPath(new URL('./fixtures/tsrx-prettier-casts.tsrx', import.meta.url));
+const OPERATOR_FIXTURE = fileURLToPath(
+	new URL('./fixtures/tsrx-prettier-operator-parens.tsrx', import.meta.url),
+);
 const IGNORE_FILE = fileURLToPath(new URL('../.prettierignore', import.meta.url));
 // Plugin names resolve from the working directory, so pass the module itself.
 const { plugins: configuredPlugins, ...config } = await prettier.resolveConfig(FIXTURE);
@@ -267,5 +271,98 @@ describe('@tsrx/prettier-plugin casts', () => {
 		await assertFormats('(function () {}) as T;', '(function () {}) as T;');
 		await assertFormats('(class {}) as T;', '(class {}) as T;');
 		await assertFormats('f = () => ({} as T).a;', 'f = () => ({} as T).a;');
+	});
+});
+
+describe('@tsrx/prettier-plugin operator parentheses', () => {
+	test('keeps the committed fixture byte-identical under the repository config', async () => {
+		const info = await prettier.getFileInfo(OPERATOR_FIXTURE, { ignorePath: IGNORE_FILE });
+		assert.deepEqual(info, { ignored: false, inferredParser: 'tsrx' });
+
+		const source = readFileSync(OPERATOR_FIXTURE, 'utf8');
+		assert.equal(await format(source), source);
+		const ast = await parse(source);
+		assert.equal(countNodes(ast, 'LogicalExpression'), 11);
+		assert.equal(countNodes(ast, 'ObjectExpression'), 2);
+		assert.equal(countNodes(ast, 'FunctionExpression'), 1);
+	});
+
+	test('keeps the parentheses `??` needs next to `||` and `&&`', async () => {
+		for (const source of [
+			'x = a ?? (b && c);',
+			'x = a ?? (b || c);',
+			'x = (a || b) ?? c;',
+			'x = (a && b) ?? c;',
+			'x = (a ?? b) || c;',
+			'x = a && (b ?? c);',
+			'x = a ?? (b || c) ?? d;',
+			"x = <div class={a ?? (b && 'c')} />;",
+		]) {
+			await assertFormats(source, source);
+			// Without them, `??` mixes with `||` or `&&`, which is a syntax error
+			const bare = source.replaceAll(/[()]/g, '');
+			assert.match(String(await parseOutcome(bare)), /cannot be mixed/, bare);
+		}
+	});
+
+	test('keeps an object, function or class that starts a statement, an arrow body or a default export in parentheses', async () => {
+		// Each pair is the source and its output. The head prints inside its
+		// own parentheses, as Prettier prints it, wherever the source put
+		// them; without them the code parses differently or not at all.
+		for (const [source, expected] of [
+			['f = () => ({}) || y;', 'f = () => ({}) || y;'],
+			['f = () => ({}) ? a : b;', 'f = () => ({}) ? a : b;'],
+			['f = () => ({ a }) instanceof Map;', 'f = () => ({ a }) instanceof Map;'],
+			['f = () => ({})!;', 'f = () => ({})!;'],
+			['f = () => ({}) as T || y;', 'f = () => ({}) as T || y;'],
+			['f = () => ({} || y);', 'f = () => ({}) || y;'],
+			['f = () => ({}.a || y);', 'f = () => ({}).a || y;'],
+			['({}) || y;', '({}) || y;'],
+			['({} || y);', '({}) || y;'],
+			['({}.a = 1);', '({}).a = 1;'],
+			['({})();', '({})();'],
+			['({})`t`;', '({})`t`;'],
+			['({}) + 1;', '({}) + 1;'],
+			['if (a) ({}) || y;', 'if (a) ({}) || y;'],
+			['(function () {}) || y;', '(function () {}) || y;'],
+			['(async function () {}) || y;', '(async function () {}) || y;'],
+			['(function () {});', '(function () {});'],
+			['(function () {})`t`;', '(function () {})`t`;'],
+			['(class {}) || y;', '(class {}) || y;'],
+			['(class {});', '(class {});'],
+			['export default (function () {}) || y;', 'export default (function () {}) || y;'],
+			['export default (class {} || y);', 'export default (class {}) || y;'],
+		]) {
+			await assertFormats(source, expected);
+			const bare = expected.replace(
+				/\((\{[^()]*\}|(?:async )?function \(\) \{\}|class \{\})\)/,
+				'$1',
+			);
+			assert.notDeepEqual(await parseOutcome(bare), await parseOutcome(expected), bare);
+		}
+
+		// A decorated class keeps its decorators inside the parentheses
+		const decorated = '(@dec class {}) || y;';
+		assert.deepEqual(
+			withoutPositions(await parse(await format(decorated))),
+			withoutPositions(await parse(decorated)),
+		);
+	});
+
+	test('adds no parentheses where an operand already moves the head off the start', async () => {
+		for (const source of [
+			'({}.a);',
+			'({}).a || y;',
+			'f = () => ({}.a);',
+			'f = () => ({} ? a : b);',
+			'f = () => ({}.a = 1);',
+			'f = () => ({} as T).a;',
+			'(function () {}());',
+			'(function () {}).call(x);',
+			'f = () => function () {} || y;',
+			'export default {} || y;',
+		]) {
+			await assertFormats(source, source);
+		}
 	});
 });

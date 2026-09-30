@@ -631,8 +631,11 @@ patchedDependencies:
   # them, throw on a node type with no printer instead of writing a
   # placeholder comment, and keep the parentheses an `as`/`satisfies` cast
   # needs as an operand instead of regrouping it (`'k' in (e.target as T)`
-  # became `('k' in e.target) as T`). Backports tsrx-org/tsrx#322, the
-  # empty-body part of tsrx-org/tsrx#283, and the cast part of
+  # became `('k' in e.target) as T`), that `??` needs next to `||`/`&&`
+  # (`a ?? (b && c)` became `a ?? b && c`), and that an object, function or
+  # class needs at the head of a statement or arrow body (`() => ({}) || y`
+  # became `() => {} || y`). Backports tsrx-org/tsrx#322, the empty-body part
+  # of tsrx-org/tsrx#283, and the cast, `??` and head parts of
   # tsrx-org/tsrx#258 (all in @tsrx/prettier-plugin >= 0.4.12); guarded by
   # scripts/tsrx-prettier-plugin.test.mjs. Drop when the plugin is upgraded.
   '@tsrx/prettier-plugin@0.4.10': patches/@tsrx__prettier-plugin@0.4.10.patch

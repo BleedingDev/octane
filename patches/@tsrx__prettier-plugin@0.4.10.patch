@@ -1,25 +1,97 @@
 diff --git a/src/index.js b/src/index.js
-index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50f3cb5654 100644
+index d5cd8a4fff9d3036a2539f9809abeab6a871a366..2c7078633f19d97b121daee992027e30e5668f31 100644
 --- a/src/index.js
 +++ b/src/index.js
-@@ -465,17 +465,90 @@ function binaryExpressionNeedsParens(node, parent) {
+@@ -366,33 +366,35 @@ function iterateFunctionParametersPath(path, iteratee) {
+ 	}
+ }
+ 
+-// Operator precedence (higher number = higher precedence)
++// Operator precedence (higher number = higher precedence). `??` binds
++// loosest, as in Prettier's table.
+ /** @type {Record<string, number>} */
+ const PRECEDENCE = {
+-	'||': 1,
+-	'&&': 2,
+-	'|': 3,
+-	'^': 4,
+-	'&': 5,
+-	'==': 6,
+-	'!=': 6,
+-	'===': 6,
+-	'!==': 6,
+-	'<': 7,
+-	'<=': 7,
+-	'>': 7,
+-	'>=': 7,
+-	in: 7,
+-	instanceof: 7,
+-	'<<': 8,
+-	'>>': 8,
+-	'>>>': 8,
+-	'+': 9,
+-	'-': 9,
+-	'*': 10,
+-	'/': 10,
+-	'%': 10,
+-	'**': 11,
++	'??': 1,
++	'||': 2,
++	'&&': 3,
++	'|': 4,
++	'^': 5,
++	'&': 6,
++	'==': 7,
++	'!=': 7,
++	'===': 7,
++	'!==': 7,
++	'<': 8,
++	'<=': 8,
++	'>': 8,
++	'>=': 8,
++	in: 8,
++	instanceof: 8,
++	'<<': 9,
++	'>>': 9,
++	'>>>': 9,
++	'+': 10,
++	'-': 10,
++	'*': 11,
++	'/': 11,
++	'%': 11,
++	'**': 12,
+ };
+ 
+ /**
+@@ -430,6 +432,16 @@ function binaryExpressionNeedsParens(node, parent) {
+ 		return false;
+ 	}
+ 
++	// `??` does not mix with `||` or `&&` without parentheses: `a ?? b && c`
++	// and `a || b ?? c` are syntax errors
++	if (
++		node.type === 'LogicalExpression' &&
++		parent.type === 'LogicalExpression' &&
++		(node.operator === '??') !== (parent.operator === '??')
++	) {
++		return true;
++	}
++
+ 	// For BinaryExpression/LogicalExpression parents, check precedence
+ 	if (parent.type === 'BinaryExpression' || parent.type === 'LogicalExpression') {
+ 		const nodePrecedence = getPrecedence(node.operator);
+@@ -465,6 +477,10 @@ function binaryExpressionNeedsParens(node, parent) {
   * The cast binds at relational precedence, so lower-precedence operands parse
   * differently without their parens: `a ?? b as string` is `a ?? (b as string)`,
   * and mixing `??` with an unparenthesized cast operand is a TS syntax error.
-+ * An object that starts an arrow body or a statement, and a function or class
-+ * that starts a statement, need them so they do not begin a block or a
-+ * declaration: `() => ({}) as T`. A tighter binary operand or an `await`
-+ * keeps the parentheses written around it, as Prettier prints them:
-+ * `(a + b) as T`.
++ * A tighter binary operand or an `await` keeps the parentheses written around
++ * it, as Prettier prints them: `(a + b) as T`. An object, function or class
++ * operand at the head of a statement or an arrow body prints its own:
++ * `() => ({}) as T` (see {@link startsAmbiguousHead}).
   * @param {AST.Node} expression - The cast operand
-+ * @param {AstPath} path - The path to the cast
   * @returns {boolean} - True if parentheses are required
   */
--function castOperandNeedsParens(expression) {
-+function castOperandNeedsParens(expression, path) {
- 	switch (expression.type) {
- 		case 'LogicalExpression':
- 		case 'ArrowFunctionExpression':
+@@ -475,12 +491,196 @@ function castOperandNeedsParens(expression) {
  		case 'YieldExpression':
  			return true;
  		case 'BinaryExpression':
@@ -30,28 +102,6 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
 +			);
 +		case 'AwaitExpression':
 +			return Boolean(expression.metadata?.parenthesized);
-+		case 'ObjectExpression':
-+		case 'FunctionExpression':
-+		case 'ClassExpression': {
-+			// Climb the chain of casts this one is the operand of
-+			let child = path.node;
-+			for (let depth = 0; ; depth++) {
-+				const parent = path.getParentNode(depth);
-+				if (
-+					(parent?.type === 'TSAsExpression' || parent?.type === 'TSSatisfiesExpression') &&
-+					parent.expression === child
-+				) {
-+					child = parent;
-+					continue;
-+				}
-+				return (
-+					parent?.type === 'ExpressionStatement' ||
-+					(parent?.type === 'ArrowFunctionExpression' &&
-+						parent.body === child &&
-+						expression.type === 'ObjectExpression')
-+				);
-+			}
-+		}
 +		default:
 +			return false;
 +	}
@@ -92,10 +142,154 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
 +		case 'ClassDeclaration':
 +		case 'ClassExpression':
 +			return parent.superClass === node;
++		default:
++			return false;
++	}
++}
++
++/**
++ * The key of the child a node's printed output starts with, when that child
++ * is an expression printed without a leading token of the node's own.
++ * @param {AST.Node} node
++ * @returns {string | null}
++ */
++function getLeftmostChildKey(node) {
++	switch (node.type) {
++		case 'AssignmentExpression':
++		case 'BinaryExpression':
++		case 'LogicalExpression':
++			return 'left';
++		case 'MemberExpression':
++			return 'object';
++		case 'CallExpression':
++			return 'callee';
++		case 'TaggedTemplateExpression':
++			return 'tag';
++		case 'ConditionalExpression':
++			return 'test';
++		case 'UpdateExpression':
++			return node.prefix ? null : 'argument';
++		case 'ChainExpression':
++		case 'TSAsExpression':
++		case 'TSSatisfiesExpression':
++		case 'TSNonNullExpression':
++		case 'TSInstantiationExpression':
++			return 'expression';
++		default:
++			return null;
++	}
++}
++
++/**
++ * Whether parentheses print around the leftmost operand `node` of `parent`,
++ * its own or ones `parent` prints around it. Mirrors the printers: a
++ * parenthesized member, call or conditional keeps its parentheses, operators
++ * and casts keep the ones they need, a sequence always has them, and a member
++ * object, call callee or assignment target keeps the ones written around it.
++ * @param {AST.Node} node - The leftmost operand
++ * @param {AST.Node} parent - The node it starts
++ * @returns {boolean}
++ */
++function leftmostOperandHasParens(node, parent) {
++	const parenthesized = Boolean(node.metadata?.parenthesized);
++	switch (node.type) {
++		case 'SequenceExpression':
++			return true;
++		case 'MemberExpression':
++		case 'CallExpression':
++		case 'ConditionalExpression':
++			if (parenthesized) {
++				return true;
++			}
++			break;
++		case 'BinaryExpression':
++		case 'LogicalExpression':
++			if (binaryExpressionNeedsParens(node, parent)) {
++				return true;
++			}
++			break;
++		case 'AssignmentExpression':
++			if (assignmentExpressionNeedsParens(node, parent)) {
++				return true;
++			}
++			break;
++		case 'TSAsExpression':
++		case 'TSSatisfiesExpression':
++			if (castNeedsParens(node, parent)) {
++				return true;
++			}
++			break;
++	}
++	switch (parent.type) {
++		case 'MemberExpression':
++		case 'AssignmentExpression':
++			return parenthesized;
++		case 'CallExpression':
++			return (
++				parenthesized &&
++				(node.type === 'ArrowFunctionExpression' ||
++					node.type === 'FunctionExpression' ||
++					node.type === 'TSAsExpression' ||
++					node.type === 'TSSatisfiesExpression')
++			);
++		case 'TSNonNullExpression':
++			return node.type === 'TSAsExpression' || node.type === 'TSSatisfiesExpression';
++		case 'TSAsExpression':
++		case 'TSSatisfiesExpression':
++			return castOperandNeedsParens(node);
  		default:
  			return false;
  	}
-@@ -1078,34 +1151,49 @@ function finishTsrxNode(node, parts, nodeContent) {
+ }
+ 
++/**
++ * Whether an object literal, function or class expression prints inside
++ * parentheses because it would otherwise be the first token of a context that
++ * reads it differently: a statement (`{` opens a block, `function` and
++ * `class` a declaration), an arrow body (`{` opens a block body), or an
++ * `export default` (`function` and `class` start a declaration). Like
++ * Prettier's `startsWithNoLookaheadToken`, this follows the chain of leftmost
++ * operands: `({}) || y;`, `() => ({}) ? a : b`, `(function () {}) || y;`.
++ * An operand printed inside parentheses already moves the head off the
++ * start, as in `({}.a);`. The statement, arrow and `export default` printers
++ * wrap an object statement, an object or assignment arrow body, and a
++ * default-exported function or class themselves.
++ * @param {AstPath} path - The path to the object, function or class expression
++ * @returns {boolean}
++ */
++function startsAmbiguousHead(path) {
++	const node = /** @type {AST.Node} */ (path.node);
++	let child = node;
++	for (let level = 0; ; level++) {
++		const parent = /** @type {AST.Node | null} */ (path.getParentNode(level));
++		if (!parent || leftmostOperandHasParens(child, parent)) {
++			return false;
++		}
++		switch (parent.type) {
++			case 'ExpressionStatement':
++				return child !== node || node.type !== 'ObjectExpression';
++			case 'ArrowFunctionExpression':
++				return (
++					node.type === 'ObjectExpression' &&
++					parent.body === child &&
++					child !== node &&
++					child.type !== 'AssignmentExpression'
++				);
++			case 'ExportDefaultDeclaration':
++				return child !== node && node.type !== 'ObjectExpression';
++		}
++		const key = getLeftmostChildKey(parent);
++		if (!key || /** @type {Record<string, unknown>} */ (parent)[key] !== child) {
++			return false;
++		}
++		child = parent;
++	}
++}
++
+ /**
+  * Check if a parenthesized AssignmentExpression needs its parentheses preserved.
+  * @param {AST.AssignmentExpression} node - The expression node
+@@ -1078,34 +1278,49 @@ function finishTsrxNode(node, parts, nodeContent) {
  }
  
  /**
@@ -166,7 +360,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  				parts.push(hardline);
  
  				// Check if there should be blank lines between this comment and the next
-@@ -1114,44 +1202,44 @@ function printTsrxNode(node, path, options, print, args) {
+@@ -1114,44 +1329,44 @@ function printTsrxNode(node, path, options, print, args) {
  					if (blankLinesBetween > 0) {
  						parts.push(hardline);
  					}
@@ -187,7 +381,13 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
 +	}
 +	return parts;
 +}
-+
+ 
+-				// Check if comment and node are on the same line (for inline JSDoc comments)
+-				const isCommentInlineWithParen =
+-					isLastComment && isCommentFollowedBySameLineParen(comment, options);
+-				const isCommentOnSameLine =
+-					isLastComment && comment.loc && node.loc && comment.loc.end.line === node.loc.start.line;
+-				const shouldKeepOnSameLine = isCommentOnSameLine || isCommentInlineWithParen;
 +/**
 + * Main print function for TSRX AST nodes
 + * @param {AST.Node | AST.CSS.StyleSheet} node - The AST node to print
@@ -202,19 +402,10 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
 +		return String(node || '');
 +	}
  
--				// Check if comment and node are on the same line (for inline JSDoc comments)
--				const isCommentInlineWithParen =
--					isLastComment && isCommentFollowedBySameLineParen(comment, options);
--				const isCommentOnSameLine =
--					isLastComment && comment.loc && node.loc && comment.loc.end.line === node.loc.start.line;
--				const shouldKeepOnSameLine = isCommentOnSameLine || isCommentInlineWithParen;
-+	/** @type {Doc[]} */
-+	const parts = [];
- 
 -				if (!isInlineContext && !shouldKeepOnSameLine) {
 -					parts.push(hardline);
-+	const isInlineContext = args && args.isInlineContext;
-+	const suppressLeadingComments = args && args.suppressLeadingComments;
++	/** @type {Doc[]} */
++	const parts = [];
  
 -					// Check if there should be blank lines between this comment and the next
 -					if (nextComment) {
@@ -234,21 +425,16 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
 -				}
 -			}
 -		}
++	const isInlineContext = args && args.isInlineContext;
++	const suppressLeadingComments = args && args.suppressLeadingComments;
++
 +	// Handle leading comments
 +	if (node.leadingComments && !suppressLeadingComments) {
 +		parts.push(...printLeadingComments(node, node.leadingComments, options, isInlineContext));
  	}
  
  	// Handle inner comments (for nodes with no children to attach to)
-@@ -1930,13 +2018,16 @@ function printTsrxNode(node, path, options, print, args) {
- 				'typeAnnotation',
- 			);
- 			const expressionDoc = path.call(print, 'expression');
--			const operand = castOperandNeedsParens(node.expression)
-+			const operand = castOperandNeedsParens(node.expression, path)
- 				? ['(', expressionDoc, ')']
- 				: expressionDoc;
- 			nodeContent =
+@@ -1937,6 +2152,9 @@ function printTsrxNode(node, path, options, print, args) {
  				node.typeAnnotation.type !== 'TSTypeLiteral' && willBreak(typeAnnotation)
  					? [operand, ' as', indent([line, typeAnnotation])]
  					: [operand, ' as ', typeAnnotation];
@@ -258,15 +444,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  			break;
  		}
  
-@@ -1946,13 +2037,16 @@ function printTsrxNode(node, path, options, print, args) {
- 				'typeAnnotation',
- 			);
- 			const expressionDoc = path.call(print, 'expression');
--			const operand = castOperandNeedsParens(node.expression)
-+			const operand = castOperandNeedsParens(node.expression, path)
- 				? ['(', expressionDoc, ')']
- 				: expressionDoc;
- 			nodeContent =
+@@ -1953,6 +2171,9 @@ function printTsrxNode(node, path, options, print, args) {
  				node.typeAnnotation.type !== 'TSTypeLiteral' && willBreak(typeAnnotation)
  					? [operand, ' satisfies', indent([line, typeAnnotation])]
  					: [operand, ' satisfies ', typeAnnotation];
@@ -276,7 +454,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  			break;
  		}
  
-@@ -2099,6 +2193,10 @@ function printTsrxNode(node, path, options, print, args) {
+@@ -2099,6 +2320,10 @@ function printTsrxNode(node, path, options, print, args) {
  			nodeContent = printContinueStatement(node, path, options, print);
  			break;
  
@@ -287,7 +465,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  		case 'DebuggerStatement':
  			nodeContent = printDebuggerStatement(node, path, options);
  			break;
-@@ -2288,6 +2386,7 @@ function printTsrxNode(node, path, options, print, args) {
+@@ -2288,6 +2513,7 @@ function printTsrxNode(node, path, options, print, args) {
  						blockParent.type === 'TryStatement' ||
  						blockParent.type === 'CatchClause' ||
  						blockParent.type === 'SwitchCase' ||
@@ -295,7 +473,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  						blockParent.type === 'JSXIfExpression' ||
  						blockParent.type === 'JSXForExpression' ||
  						blockParent.type === 'JSXTryExpression' ||
-@@ -2879,11 +2978,15 @@ function printTsrxNode(node, path, options, print, args) {
+@@ -2879,11 +3105,15 @@ function printTsrxNode(node, path, options, print, args) {
  			nodeContent = ['@', path.call(print, 'expression')];
  			break;
  
@@ -316,7 +494,23 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  	}
  
  	// Decorators have runtime effects, so every decorated node prints them —
-@@ -4078,6 +4181,18 @@ function extractAndPrintLeadingComments(node) {
+@@ -2893,6 +3123,15 @@ function printTsrxNode(node, path, options, print, args) {
+ 		nodeContent = [...printDecorators(decorated, path, options, print), nodeContent];
+ 	}
+ 
++	if (
++		(node.type === 'ObjectExpression' ||
++			node.type === 'FunctionExpression' ||
++			node.type === 'ClassExpression') &&
++		startsAmbiguousHead(path)
++	) {
++		nodeContent = ['(', nodeContent, ')'];
++	}
++
+ 	return finishTsrxNode(/** @type {AST.Node} */ (node), parts, nodeContent);
+ }
+ 
+@@ -4078,6 +4317,18 @@ function extractAndPrintLeadingComments(node) {
  	return parts;
  }
  
@@ -335,7 +529,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  /**
   * Print an if statement
   * @param {AST.IfStatement} node - The if statement node
-@@ -4111,15 +4226,11 @@ function printIfStatement(node, path, options, print, directive = false) {
+@@ -4111,15 +4362,11 @@ function printIfStatement(node, path, options, print, directive = false) {
  	parts.push(testDoc);
  
  	// Handle the consequent
@@ -353,7 +547,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  	}
  
  	// Handle the alternate
-@@ -4131,9 +4242,10 @@ function printIfStatement(node, path, options, print, directive = false) {
+@@ -4131,9 +4378,10 @@ function printIfStatement(node, path, options, print, directive = false) {
  			parts.push(' ');
  		}
  
@@ -365,7 +559,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  				path.call(
  					(alternatePath) =>
  						printIfStatement(
-@@ -4147,7 +4259,7 @@ function printIfStatement(node, path, options, print, directive = false) {
+@@ -4147,7 +4395,7 @@ function printIfStatement(node, path, options, print, directive = false) {
  				),
  			);
  		} else {
@@ -374,7 +568,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  		}
  	}
  
-@@ -4170,8 +4282,7 @@ function printForInStatement(node, path, options, print) {
+@@ -4170,8 +4418,7 @@ function printForInStatement(node, path, options, print) {
  	parts.push(' in ');
  	parts.push(path.call(print, 'right'));
  
@@ -384,7 +578,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  
  	return parts;
  }
-@@ -4204,8 +4315,7 @@ function printForOfStatement(node, path, options, print, directive = false) {
+@@ -4204,8 +4451,7 @@ function printForOfStatement(node, path, options, print, directive = false) {
  		parts.push(path.call(print, 'key'));
  	}
  
@@ -394,7 +588,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  	if (node.empty) {
  		parts.push(directive ? ' @empty ' : ' empty ');
  		parts.push(path.call(print, 'empty'));
-@@ -4246,8 +4356,7 @@ function printForStatement(node, path, options, print) {
+@@ -4246,8 +4492,7 @@ function printForStatement(node, path, options, print) {
  		parts.push(path.call(print, 'update'));
  	}
  
@@ -404,7 +598,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  
  	return parts;
  }
-@@ -4275,8 +4384,7 @@ function printWhileStatement(node, path, options, print) {
+@@ -4275,8 +4520,7 @@ function printWhileStatement(node, path, options, print) {
  
  	parts.push('while (');
  	parts.push(test);
@@ -414,7 +608,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  
  	return parts;
  }
-@@ -4298,8 +4406,7 @@ function printDoWhileStatement(node, path, options, print) {
+@@ -4298,8 +4542,7 @@ function printDoWhileStatement(node, path, options, print) {
  
  	/** @type {Doc[]} */
  	const parts = [];
@@ -424,7 +618,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50
  
  	// Print leading comments from test node before 'while' keyword
  	const commentParts = extractAndPrintLeadingComments(testNode);
-@@ -5691,6 +5798,93 @@ function printContinueStatement(node, path, options, print) {
+@@ -5691,6 +5934,93 @@ function printContinueStatement(node, path, options, print) {
  	return parts;
  }
  
