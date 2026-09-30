@@ -256,6 +256,24 @@ export function Panel(props) @{
 }
 ```
 
+A hook after an early return keeps its state for as long as the component stays
+mounted: the return skips the rest of that render, and leaves the hook's state in
+place. Effects follow the current render instead. The effect in `Panel` is cleaned
+up while `hidden` is true, and runs again once a render gets past the return.
+
+Directive arms work the same way. State declared after an arm's `return;` or
+`continue;` lasts as long as the arm, which for an `@for` row is as long as its
+key stays in the list. Taking the exit removes only the arm's output.
+
+```jsx
+@for (const item of props.items; key item.id) {
+	if (item.hidden) continue;
+	// Kept while `item` is hidden, so its row reopens as it was left.
+	const [open, setOpen] = useState(false);
+	<Row item={item} open={open} onToggle={() => setOpen(!open)} />
+}
+```
+
 The one rule that remains is enforced for you: a hook in a plain JS loop is a
 compile error, because every iteration would share one call-site slot. Loop with
 the keyed `@for` directive, where each item gets its own hook state, or extract a
@@ -279,12 +297,37 @@ the `@for` or `@switch`, is a compile error; render alternatives with
 `@if`/`@else`. These rules hold on DOM and universal renderers alike. A
 universal renderer compiles each arm to a function that could return a value,
 but it rejects one too, so arm exits never decide which renderers a component
-can target.
+can target. Hooks that the exit skips keep their state; see
+[Conditional hooks](#conditional-hooks).
 
 ```jsx
 @for (const item of props.items; key item.id) {
 	if (item.hidden) continue;
 	<li>{item.title as string}</li>
+}
+```
+
+A child `@{ … }` block is a nested template, not an arm, even when it is an
+arm's whole output, so nothing ends it early. `return` in a block is a parse
+error, and a `break` or `continue` that would leave the block is a compile
+error, whether it targets the `@for` or `@switch` around it, a plain loop, or a
+label. Loops, `switch` statements, and labels inside the block's own setup keep
+their jumps. To skip a row, `continue;` in the row's setup before its output. To
+leave out part of a block's output, render it from an `@if` arm, where
+`continue;` ends only that arm. An arm's labeled `break` or `continue` follows
+the same rule: it can only target a label inside that arm.
+
+```jsx
+@for (const item of props.items; key item.id) {
+	<li>
+		@{
+			const label = item.title.trim();
+			// `if (item.hidden) continue;` here would be a compile error.
+			@if (!item.hidden) {
+				<span>{label as string}</span>
+			}
+		}
+	</li>
 }
 ```
 

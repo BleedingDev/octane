@@ -77,7 +77,12 @@ import {
 	UNIVERSAL_THREAD_RUNTIME_IMPORTS,
 } from './compile-universal.js';
 import { compileValdi, VALDI_COMPILER_RUNTIME_IMPORTS } from './compile-valdi.js';
-import { ARM_BREAK_MESSAGE, ARM_VALUE_RETURN_MESSAGE, armJump } from './arm-exits.js';
+import {
+	ARM_BREAK_MESSAGE,
+	ARM_VALUE_RETURN_MESSAGE,
+	armJump,
+	assertTemplateJumps,
+} from './arm-exits.js';
 import { HOOK_NAMES, NATIVE_SIGNAL_HOOK_NAMES } from './hook-names.js';
 export { HOOK_NAMES } from './hook-names.js';
 import {
@@ -2780,7 +2785,7 @@ function collectComponentLocals(componentNode) {
 	for (const stmt of stmts) {
 		if (stmt.type === 'VariableDeclaration') {
 			for (const d of stmt.declarations || []) collectBindings(d.id, locals);
-		} else if (stmt.type === 'FunctionDeclaration') {
+		} else if (stmt.type === 'FunctionDeclaration' || stmt.type === 'ClassDeclaration') {
 			if (stmt.id) locals.add(stmt.id.name);
 		}
 	}
@@ -10005,6 +10010,7 @@ function compileAuthored(source, filename, options, bundlerMetadata) {
 		normalizeAuthoredJsxLiterals(parseModule(source, cleanFilename)),
 	);
 	analyzeTsrx(analyzedAst, cleanFilename);
+	assertTemplateJumps(analyzedAst, source, cleanFilename);
 	adoptParserAst(analyzedAst);
 	assertNoLegacyContextProviders(analyzedAst, source, cleanFilename);
 	options = nativeReadOptions(analyzedAst, options);
@@ -12728,10 +12734,7 @@ function ssrCompileBodyWithMapTemps(
 			? null
 			: () =>
 					inheritOriginLoc(
-						b.call(
-							requireRuntimeForContext(ctx, 'isRenderCall'),
-							node.params.length > 1 ? secondArgument(node) : b.id('__s'),
-						),
+						b.call(requireRuntimeForContext(ctx, 'isRenderCall'), b.id('__s')),
 						directCallRoot,
 					);
 
@@ -12830,13 +12833,22 @@ function ssrCompileBodyWithMapTemps(
 			inheritOriginLoc(b.if(b.unary('!', renderCallTest()), b.block(branch), null), directCallRoot),
 		);
 	}
-	// PROPS-FIRST ABI (matches the client): `(…userParams, __s, __extra)`. A leading
+	// PROPS-FIRST ABI (matches the client): `(props, __s, __extra)`. A leading
 	// `__props` placeholder stands in when there are no user params, so a verbatim
 	// `function Foo(props)` and a compiled component both bind props from arg 0.
-	const params =
-		node.params.length > 0
-			? [...node.params, b.id('__s'), b.id('__extra')]
-			: [b.id('__props'), b.id('__s'), b.id('__extra')];
+	// A synthetic sub-body (a statement array) is called by its construct instead,
+	// with its own leading arguments: `(item, index, __s, __extra)` for a @for
+	// item, `(error, reset, __s, __extra)` for a @catch arm.
+	const { params, bindings: paramBindings } = Array.isArray(node.body)
+		? {
+				params: [
+					...(node.params.length > 0 ? node.params : [b.id('__props')]),
+					b.id('__s'),
+					b.id('__extra'),
+				],
+				bindings: [],
+			}
+		: compiledBodyParams(node.params);
 	// Private loop items feed only HTML concatenation, so their serialized tail
 	// needs no carrier. Other bodies can cross a component/value boundary, where
 	// the carrier distinguishes compiled HTML from authored text returns. This
@@ -12860,14 +12872,11 @@ function ssrCompileBodyWithMapTemps(
 			: ([...(node.params || []), ...(Array.isArray(node.body) ? node.body : [])].find(
 					(part) => part?.loc != null,
 				) ?? ctx._moduleOrigin);
+	const scopedBody = ctx.nativeReads
+		? wrapNativeReadScope(body, b.id('__s'), nativeReadNames(ctx))
+		: body;
 	return inheritOriginLoc(
-		b.function_declaration(
-			b.id(name),
-			params,
-			b.block(
-				ctx.nativeReads ? wrapNativeReadScope(body, b.id('__s'), nativeReadNames(ctx)) : body,
-			),
-		),
+		b.function_declaration(b.id(name), params, b.block([...paramBindings, ...scopedBody])),
 		origin,
 	);
 }
@@ -16377,11 +16386,21 @@ function compileFunctionBody(node, ctx, name, parentNs = 'html', cssHash = null,
 	//               Keep the old split + rewriteEarlyExits path for these.
 	let statements;
 	let jsxNodes;
+	const previousComponentLocals = ctx.currentComponentLocals;
 	if (node.body && node.body.type === 'JSXCodeBlock') {
 		statements = node.body.body || [];
 		jsxNodes = node.body.render ? [node.body.render] : [];
 	} else {
 		const bodyRewritten = splitArmExits(unwrapOutputCodeBlock(node.body), ctx);
+		// The split can declare a name of its own (a hooked tail's handoff), which
+		// the arms nested in this body capture like any other local of it.
+		if (previousComponentLocals) {
+			const declared = new Set();
+			for (const statement of bodyRewritten) collectStatementBindings(statement, declared);
+			if ([...declared].some((name) => !previousComponentLocals.has(name))) {
+				ctx.currentComponentLocals = new Set([...previousComponentLocals, ...declared]);
+			}
+		}
 		statements = [];
 		jsxNodes = [];
 		for (const child of bodyRewritten) {
@@ -16922,11 +16941,10 @@ function compileFunctionBody(node, ctx, name, parentNs = 'html', cssHash = null,
 		);
 		presentationHostEnd++;
 	}
-	// PROPS-FIRST convention: `(…userProps, __s, __extra)`. The scope is the 2nd arg
+	// PROPS-FIRST convention: `(props, __s, __extra)`. The scope is the 2nd arg
 	// (a placeholder leads when there are no user params), so a plain function
 	// `App(props)` binds `props`, while compiled bodies still read `__s` by name.
-	const userParams = node.params && node.params.length > 0 ? node.params : [b.id('__props')];
-	const fnParams = [...userParams, b.id('__s'), b.id('__extra')];
+	const { params: fnParams, bindings: paramBindings } = compiledBodyParams(node.params ?? []);
 	ctx.currentAutoMemoOffset = prevAutoMemoOffset;
 	ctx.currentAutoMemoCacheName = prevAutoMemoCacheName;
 	ctx.currentAutoMemoCommittedName = prevAutoMemoCommittedName;
@@ -16935,6 +16953,7 @@ function compileFunctionBody(node, ctx, name, parentNs = 'html', cssHash = null,
 	ctx.currentHookMemoNames = prevHookMemoNames;
 	ctx.currentHookMemoOwnerSafe = prevHookMemoOwnerSafe;
 	ctx.currentMapTemps = prevMapTemps;
+	ctx.currentComponentLocals = previousComponentLocals;
 	// ONE FunctionDeclaration node — the caller prints it (once, with the full
 	// esrap map for top-level components) or embeds it in an enclosing body.
 	const presentationBody = preparePresentationHydration(
@@ -16945,14 +16964,14 @@ function compileFunctionBody(node, ctx, name, parentNs = 'html', cssHash = null,
 	);
 	ctx.scalarBindingClaims = previousScalarBindingClaims;
 	ctx.presentationHydration = previousPresentationHydration;
+	const scopedBody =
+		ctx.nativeReads && !isStaticHostComponent(node)
+			? wrapNativeReadScope(presentationBody, b.id('__s'), nativeReadNames(ctx))
+			: presentationBody;
 	const emittedFunction = b.function_declaration(
 		b.id(name, node.id ?? node),
 		fnParams,
-		b.block(
-			ctx.nativeReads && !isStaticHostComponent(node)
-				? wrapNativeReadScope(presentationBody, b.id('__s'), nativeReadNames(ctx))
-				: presentationBody,
-		),
+		b.block([...paramBindings, ...scopedBody]),
 	);
 	return inheritOriginLoc(
 		hookMemoOpaqueOwner
@@ -21163,6 +21182,58 @@ function collectFunctionScopeBindings(params, statements, into) {
 	};
 	for (const statement of statements) visit(statement, true);
 	return into;
+}
+
+// A compiled body's parameters. The runtime calls every body as
+// `body(props, scope, extra)`, so the body takes `(props, __s, __extra)`: its
+// first authored parameter, or a `__props` placeholder, then the scope and the
+// extra. Each later authored parameter is a leading `var` bound to the argument
+// at its authored position, so it holds what the returned-JSX form's parameter
+// holds: a direct call's own argument, and for a body call the scope, the extra,
+// and then nothing. A rest parameter binds every argument from its position
+// on. The slice names no global, which a module may shadow
+// (`import { Array } from 'effect'`). A TypeScript `this` parameter types the
+// receiver and takes no argument.
+function compiledBodyParams(authored) {
+	const receiver = authored[0]?.type === 'Identifier' && authored[0].name === 'this' ? 1 : 0;
+	const own = authored.slice(receiver);
+	const first = own.length > 0 && own[0].type !== 'RestElement' ? own[0] : null;
+	const params = [
+		...authored.slice(0, receiver),
+		first ?? b.id('__props'),
+		b.id('__s'),
+		b.id('__extra'),
+	];
+	const bindings = [];
+	for (let i = first === null ? 0 : 1; i < own.length; i++) {
+		const param = own[i];
+		const argument = () =>
+			i === 1
+				? b.id('__s')
+				: i === 2
+					? b.id('__extra')
+					: b.member(b.id('arguments'), b.literal(i), true);
+		let binding;
+		if (param.type === 'RestElement') {
+			const slice = b.member(b.member(b.array([]), 'slice'), 'call');
+			binding = b.declarator(
+				param.argument,
+				b.call(slice, b.id('arguments'), ...(i > 0 ? [b.literal(i)] : [])),
+			);
+		} else if (param.type === 'AssignmentPattern') {
+			binding = b.declarator(
+				param.left,
+				b.conditional(b.binary('===', argument(), b.void0), param.right, argument()),
+			);
+		} else {
+			binding = b.declarator(param, argument());
+		}
+		bindings.push({
+			...inheritOriginLoc(b.declaration('var', [binding]), param),
+			_octaneParamBinding: true,
+		});
+	}
+	return { params, bindings };
 }
 
 // Argument 1 of a function whose own parameters already reach it: the second
@@ -33877,6 +33948,8 @@ function rewriteEarlyExits(body, allowExplicitNull = false) {
  * returns through the generic value ABI.
  */
 function splitArmExits(body, ctx) {
+	const tail = hookedTailStart(body);
+	if (tail !== -1) return retainTailHookState(body, tail, ctx);
 	let out = null;
 	for (let i = 0; i < body.length; i++) {
 		const stmt = body[i];
@@ -33907,6 +33980,86 @@ function splitArmExits(body, ctx) {
 		if (out !== null) Array.isArray(lowered) ? out.push(...lowered) : out.push(lowered);
 	}
 	return rewriteEarlyExits(out ?? body, true);
+}
+
+/**
+ * Keep the state of hooks declared after an early exit. A hook's state lives
+ * as long as the component, `@for` row, or directive arm that calls it, and an
+ * exit only skips the rest of one render, exactly like a plain `if` around the
+ * hook, a custom hook that returns early, or a value-returning component. The
+ * guard-nested form would give the tail its own arm scope, which unmounts, and
+ * resets that state, whenever the exit is taken. So when a slot-keyed hook
+ * follows the first exit, only the tail's output moves into the guarded arm.
+ * Its setup stays in this body as ordinary guard-nested JavaScript and hands
+ * the output the tail names it reads:
+ *
+ *   if (x) return; const [s] = useState(0); <b>{s}</b>
+ *   ⇒
+ *   let __tail = false;
+ *   if (!x) { const [s] = useState(0); __tail = [s]; }
+ *   if (__tail) { const [s] = __tail; <b>{s}</b> }
+ *
+ * An effect the exit skips still disconnects and reconnects, like any effect
+ * whose call site a completed render does not reach. `first` is the index
+ * hookedTailStart found.
+ */
+function retainTailHookState(body, first, ctx) {
+	const setup = [];
+	const output = [];
+	for (let i = first; i < body.length; i++) (isJsxNode(body[i]) ? output : setup).push(body[i]);
+	const declared = new Set();
+	for (const statement of setup) collectStatementBindings(statement, declared);
+	const read = collectFreeIdentifiers(b.block(output), []);
+	const names = [...declared].filter((name) => read.has(name)).sort();
+	const tail = allocCompilerName(ctx, '__tail');
+	const origin = body[first];
+	const handoff = names.length === 0 ? b.literal(true, 'true') : b.array(names.map((n) => b.id(n)));
+	const lowered = splitArmExits(
+		[
+			...body.slice(0, first),
+			...setup,
+			inheritOriginLoc(b.stmt(b.assignment('=', b.id(tail), handoff)), origin),
+		],
+		ctx,
+	);
+	const unpack =
+		names.length === 0
+			? []
+			: [inheritOriginLoc(b.const(b.array_pattern(names.map((n) => b.id(n))), b.id(tail)), origin)];
+	return [
+		inheritOriginLoc(b.let(b.id(tail), b.literal(false, 'false')), origin),
+		...lowered,
+		inheritOriginLoc(b.if(b.id(tail), b.block([...unpack, ...output]), null), origin),
+	];
+}
+
+/**
+ * Index of the first statement that can exit the body when a slot-keyed hook
+ * call follows it in setup and output follows it too, or -1. Otherwise the
+ * guard-nested form already leaves every hook on the body's own scope.
+ *
+ * The tail's output must also follow its last exit. An authored arm or `@{}`
+ * body always ends in its one output node, but a statement list with output
+ * ahead of a later exit renders that output under only the exits before it:
+ * the guard-nested form expresses that, and one guarded output cannot.
+ */
+function hookedTailStart(body) {
+	const first = body.findIndex(
+		(statement) => !isJsxNode(statement) && ownsArmJump(statement, false, false),
+	);
+	if (first === -1) return -1;
+	let output = false;
+	let hook = false;
+	for (let i = first; i < body.length; i++) {
+		const statement = body[i];
+		if (isJsxNode(statement)) {
+			output = true;
+			continue;
+		}
+		if (output && ownsArmJump(statement, false, false)) return -1;
+		hook ||= containsHookCall(statement, true);
+	}
+	return output && hook ? first : -1;
 }
 
 /**
@@ -34013,6 +34166,9 @@ function armExitError(ctx, node, message) {
 function lowerNullishComponentExits(ast) {
 	const statements = ast.body || [];
 	let out = null;
+	// Compiler-name allocation for retainTailHookState, before the compile
+	// context exists. That context later collects these names from the AST.
+	let names = null;
 	for (let i = 0; i < statements.length; i++) {
 		const statement = statements[i];
 		let replacement = statement;
@@ -34022,7 +34178,15 @@ function lowerNullishComponentExits(ast) {
 		if (hasOnlyLowerableNullishExits(node)) {
 			const body = node.body;
 			const sequence = [...(body.body || []), ...(body.render ? [body.render] : [])];
-			const rewritten = rewriteEarlyExits(sequence, true);
+			const tail = hookedTailStart(sequence);
+			const rewritten =
+				tail === -1
+					? rewriteEarlyExits(sequence, true)
+					: retainTailHookState(
+							sequence,
+							tail,
+							(names ??= { usedCompilerNames: collectIdentifierNames(ast) }),
+						);
 			const renderIndex = rewritten.findIndex(isJsxNode);
 			if (renderIndex !== -1 && !rewritten.slice(renderIndex + 1).some(isJsxNode)) {
 				const loweredNode = {
@@ -34106,13 +34270,16 @@ function jsxArmRoot(node) {
  * separate scopes and excluded). Content that moves into an if/else ARM must
  * not call hooks: on the value path a hook behind an early return keeps its
  * slot-keyed state on the COMPONENT scope across branch flips, while an arm's
- * scope is torn down with the arm.
+ * scope is torn down with the arm. `slotKeyed` skips `use` and `useContext`,
+ * which are keyed by call order and context identity and hold no such state.
  */
-function containsHookCall(node) {
+function containsHookCall(node, slotKeyed = false) {
 	const seen = new WeakSet();
 	// The shared convention (HOOK_NAME_CONVENTION_RE) — covers `use`, `useX`,
 	// and the `unstable_`/`UNSTABLE_` prefixed forms.
-	const isHookName = isHookCalleeName;
+	const isHookName = slotKeyed
+		? (name) => name !== 'use' && name !== 'useContext' && isHookCalleeName(name)
+		: isHookCalleeName;
 	const walk = (value) => {
 		if (value == null || typeof value !== 'object') return false;
 		if (Array.isArray(value)) {
@@ -34333,15 +34500,18 @@ function collectModuleLevelBindings(moduleBody) {
 }
 
 function collectOctaneComponentWrapperLocals(moduleBody) {
+	return collectOctaneImportLocals(moduleBody, ['memo', 'lazy']);
+}
+
+// Local names of the given `octane` named imports.
+function collectOctaneImportLocals(moduleBody, importedNames) {
 	const names = new Set();
 	for (const stmt of moduleBody) {
 		if (stmt.type !== 'ImportDeclaration' || stmt.source?.value !== 'octane') continue;
 		for (const spec of stmt.specifiers || []) {
 			if (spec.type !== 'ImportSpecifier') continue;
 			const imported = spec.imported?.name ?? spec.imported?.value;
-			if ((imported === 'memo' || imported === 'lazy') && spec.local?.name) {
-				names.add(spec.local.name);
-			}
+			if (importedNames.includes(imported) && spec.local?.name) names.add(spec.local.name);
 		}
 	}
 	return names;
@@ -34523,59 +34693,107 @@ function lowerJsxReturnBranchComponents(ast) {
 /**
  * A `@{ … }` body is shorthand for returning JSX: `(v) => @{ …; <p /> }` means
  * `(v) => { …; return <p />; }`. A template function declared inside another
- * function normally compiles as a render body instead, which receives its
- * Scope as an argument and renders into it. That is sound only while the
- * runtime is the one calling it: a `{helper}` child, a `<Helper />` tag, or a
- * portal body. A direct call `helper(v)` passes no Scope, so the body reads
- * `__s.slots` of undefined.
+ * function, or written inline as an argument, normally compiles as a render
+ * body instead, which receives its Scope as an argument and renders into it.
+ * That is sound only while the runtime is the one calling it: a `{helper}`
+ * child, a `<Helper />` tag, a render prop, or a portal body. A direct call
+ * `helper(v)` passes no Scope, so the body reads `__s.slots` of undefined, and
+ * `rows.map(helper)` passes the row index where the Scope would go.
  *
- * When any code that can see the binding calls it directly, or hands it to
- * `.map`, lower the function to its returned-JSX form, so the call returns a
- * JSX value exactly as the `=> <jsx>` form does on the client and the server.
- * The runtime's own calls render that value too. A call through a shadowing
- * binding of the same name also lowers it, which costs only the template fast
- * path.
+ * Lower such a function to its returned-JSX form, so a call returns a JSX value
+ * exactly as the `=> <jsx>` form does on the client and the server, whenever
+ * other code may call it:
  *
- * Module-level template functions are components, which this pass leaves to
- * the component pipeline. Async and generator ones keep their bodies, because
- * their returned-JSX forms return a promise or an iterator instead of JSX.
+ * - a nested binding that code which can see it calls directly (`helper(v)`,
+ *   `helper.call(…)`), or passes to a call (`rows.map(helper)`, `run(helper)`);
+ * - an inline function passed straight to a call or `new`, at any depth,
+ *   module scope included: `rows.map((row) => @{ <li /> })`.
+ *
+ * The runtime's own calls render the lowered value too, so this costs only the
+ * template fast path. A call through a shadowing binding of the same name also
+ * lowers the helper. The runtime itself renders the function arguments of
+ * three calls, which keep that path: a `createPortal` body, matched by name as
+ * the portal lowering matches it, and the component or render-function child
+ * given to octane's `memo` or `createElement`.
+ *
+ * Module-level template bindings are components, which this pass leaves to
+ * the component pipeline. Async and generator functions keep their bodies,
+ * because their returned-JSX forms return a promise or an iterator instead of
+ * JSX.
  */
 function lowerDirectlyCalledTemplateFunctions(ast) {
-	// Template function node → [binding name, the function that declares it].
+	// Template function expressions, found anywhere.
+	const expressions = new Set();
+	// Nested template function node → [binding name, the function declaring it].
 	const candidates = new Map();
 	walkWithEnclosingFunctions(ast.body, (node, functions) => {
+		const type = node.type;
+		if (type === 'ArrowFunctionExpression' || type === 'FunctionExpression') {
+			if (isLowerableTemplateFunction(node)) expressions.add(node);
+			return;
+		}
 		if (functions.length === 0) return;
 		let fn = null;
 		let name;
-		if (node.type === 'FunctionDeclaration') {
+		if (type === 'FunctionDeclaration') {
 			fn = node;
 			name = node.id?.name;
-		} else if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier') {
+		} else if (type === 'VariableDeclarator' && node.id?.type === 'Identifier') {
 			const init = unwrapTsExpr(node.init);
 			if (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') {
 				fn = init;
 				name = node.id.name;
 			}
 		}
-		if (fn?.body?.type === 'JSXCodeBlock' && !fn.async && !fn.generator && name !== undefined) {
+		if (fn !== null && name !== undefined && isLowerableTemplateFunction(fn)) {
 			candidates.set(fn, [name, functions[functions.length - 1]]);
 		}
 	});
-	if (candidates.size === 0) return ast;
+	if (expressions.size === 0 && candidates.size === 0) return ast;
 
-	// Function node → candidate names that code inside it calls directly.
+	let renderingCallees = null;
+	// True when the runtime, not the callee, renders the call's function arguments.
+	const rendersArguments = (call) => {
+		const callee = unwrapTsExpr(call.callee);
+		if (callee?.type !== 'Identifier') return false;
+		if (callee.name === 'createPortal') return true;
+		renderingCallees ??= collectOctaneImportLocals(ast.body, ['memo', 'createElement']);
+		return renderingCallees.has(callee.name);
+	};
+	const lowered = new Set();
 	const names = new Set([...candidates.values()].map(([name]) => name));
+	// Function node → candidate names that code inside it calls or passes on.
 	const calledIn = new Map();
-	walkWithEnclosingFunctions(ast.body, (node, functions) => {
-		const name = directlyCalledName(node);
-		if (name === null || !names.has(name)) return;
+	const markCalled = (functions, name) => {
 		for (const fn of functions) {
 			let called = calledIn.get(fn);
 			if (called === undefined) calledIn.set(fn, (called = new Set()));
 			called.add(name);
 		}
+	};
+	walkWithEnclosingFunctions(ast.body, (node, functions) => {
+		const type = node.type;
+		if (
+			type !== 'CallExpression' &&
+			type !== 'OptionalCallExpression' &&
+			type !== 'NewExpression'
+		) {
+			return;
+		}
+		const name = directlyCalledName(node);
+		if (name !== null && names.has(name)) markCalled(functions, name);
+		// The callee calls a function passed to it, as `rows.map(fn)` does with
+		// the row index where a Scope would go.
+		const args = node.arguments;
+		for (let i = 0; i < args.length; i++) {
+			const arg = unwrapTsExpr(args[i]);
+			if (expressions.has(arg)) {
+				if (!rendersArguments(node)) lowered.add(arg);
+			} else if (arg?.type === 'Identifier' && names.has(arg.name) && !rendersArguments(node)) {
+				markCalled(functions, arg.name);
+			}
+		}
 	});
-	const lowered = new Set();
 	for (const [fn, [name, owner]] of candidates) {
 		if (calledIn.get(owner)?.has(name)) lowered.add(fn);
 	}
@@ -34583,6 +34801,10 @@ function lowerDirectlyCalledTemplateFunctions(ast) {
 	const lower = (node) =>
 		mapAst(node, (n) => (lowered.has(n) ? returnedJsxFunction(n, lower) : null));
 	return lower(ast);
+}
+
+function isLowerableTemplateFunction(fn) {
+	return fn.body?.type === 'JSXCodeBlock' && !fn.async && !fn.generator;
 }
 
 /**
@@ -34721,7 +34943,18 @@ function directCallGuard(node, ctx) {
 
 function withDirectCallGuard(fn, node, ctx) {
 	if (node._octaneDirectCall === undefined) return fn;
-	return { ...fn, body: { ...fn.body, body: [directCallGuard(node, ctx), ...fn.body.body] } };
+	// The guard passes the parameters on, so it follows the leading bindings of
+	// those that compiledBodyParams binds from the arguments.
+	const body = fn.body.body;
+	let bound = 0;
+	while (body[bound]?._octaneParamBinding === true) bound++;
+	return {
+		...fn,
+		body: {
+			...fn.body,
+			body: [...body.slice(0, bound), directCallGuard(node, ctx), ...body.slice(bound)],
+		},
+	};
 }
 
 /** Visit every node with the functions that enclose it, outermost first. */
