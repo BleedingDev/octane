@@ -1,8 +1,101 @@
 diff --git a/src/index.js b/src/index.js
-index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd6695465bd1 100644
+index d5cd8a4fff9d3036a2539f9809abeab6a871a366..090978c018116f418805e5fb46991a50f3cb5654 100644
 --- a/src/index.js
 +++ b/src/index.js
-@@ -1078,34 +1078,49 @@ function finishTsrxNode(node, parts, nodeContent) {
+@@ -465,17 +465,90 @@ function binaryExpressionNeedsParens(node, parent) {
+  * The cast binds at relational precedence, so lower-precedence operands parse
+  * differently without their parens: `a ?? b as string` is `a ?? (b as string)`,
+  * and mixing `??` with an unparenthesized cast operand is a TS syntax error.
++ * An object that starts an arrow body or a statement, and a function or class
++ * that starts a statement, need them so they do not begin a block or a
++ * declaration: `() => ({}) as T`. A tighter binary operand or an `await`
++ * keeps the parentheses written around it, as Prettier prints them:
++ * `(a + b) as T`.
+  * @param {AST.Node} expression - The cast operand
++ * @param {AstPath} path - The path to the cast
+  * @returns {boolean} - True if parentheses are required
+  */
+-function castOperandNeedsParens(expression) {
++function castOperandNeedsParens(expression, path) {
+ 	switch (expression.type) {
+ 		case 'LogicalExpression':
+ 		case 'ArrowFunctionExpression':
+ 		case 'YieldExpression':
+ 			return true;
+ 		case 'BinaryExpression':
+-			return getPrecedence(expression.operator) < PRECEDENCE['<'];
++			return (
++				getPrecedence(expression.operator) < PRECEDENCE['<'] ||
++				Boolean(expression.metadata?.parenthesized)
++			);
++		case 'AwaitExpression':
++			return Boolean(expression.metadata?.parenthesized);
++		case 'ObjectExpression':
++		case 'FunctionExpression':
++		case 'ClassExpression': {
++			// Climb the chain of casts this one is the operand of
++			let child = path.node;
++			for (let depth = 0; ; depth++) {
++				const parent = path.getParentNode(depth);
++				if (
++					(parent?.type === 'TSAsExpression' || parent?.type === 'TSSatisfiesExpression') &&
++					parent.expression === child
++				) {
++					child = parent;
++					continue;
++				}
++				return (
++					parent?.type === 'ExpressionStatement' ||
++					(parent?.type === 'ArrowFunctionExpression' &&
++						parent.body === child &&
++						expression.type === 'ObjectExpression')
++				);
++			}
++		}
++		default:
++			return false;
++	}
++}
++
++/**
++ * Check whether an `as`/`satisfies` cast keeps the parentheses written around
++ * it. It keeps them wherever Prettier's `needsParens` prints them. The cast
++ * binds at relational precedence, so in most of these places they are
++ * required: `'name' in (e.target as Element)` without them is
++ * `('name' in e.target) as Element`, `await (p as T)` casts the awaited value,
++ * and `new (X as any)()` does not parse. The source always has them there,
++ * since it would parse differently otherwise. Where Prettier adds them only
++ * for readability, as in `a && (b as T)`, the source's choice stands, as it
++ * does for binary operands. The member object, call callee, unary argument,
++ * `!` operand and assignment target print their own parentheses.
++ * @param {AST.Node} node - The cast
++ * @param {AST.Node | null} parent - The parent node
++ * @returns {boolean} - True if the cast prints inside parentheses
++ */
++function castNeedsParens(node, parent) {
++	if (!node.metadata?.parenthesized) {
++		return false;
++	}
++	switch (parent?.type) {
++		case 'BinaryExpression':
++		case 'LogicalExpression':
++		case 'ConditionalExpression':
++		case 'AwaitExpression':
++		case 'SpreadElement':
++		case 'JSXSpreadAttribute':
++		case 'TaggedTemplateExpression':
++		case 'TSInstantiationExpression':
++		case 'UpdateExpression':
++			return true;
++		case 'NewExpression':
++			return parent.callee === node;
++		case 'ClassDeclaration':
++		case 'ClassExpression':
++			return parent.superClass === node;
+ 		default:
+ 			return false;
+ 	}
+@@ -1078,34 +1151,49 @@ function finishTsrxNode(node, parts, nodeContent) {
  }
  
  /**
@@ -73,7 +166,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  				parts.push(hardline);
  
  				// Check if there should be blank lines between this comment and the next
-@@ -1114,44 +1129,44 @@ function printTsrxNode(node, path, options, print, args) {
+@@ -1114,44 +1202,44 @@ function printTsrxNode(node, path, options, print, args) {
  					if (blankLinesBetween > 0) {
  						parts.push(hardline);
  					}
@@ -94,13 +187,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
 +	}
 +	return parts;
 +}
- 
--				// Check if comment and node are on the same line (for inline JSDoc comments)
--				const isCommentInlineWithParen =
--					isLastComment && isCommentFollowedBySameLineParen(comment, options);
--				const isCommentOnSameLine =
--					isLastComment && comment.loc && node.loc && comment.loc.end.line === node.loc.start.line;
--				const shouldKeepOnSameLine = isCommentOnSameLine || isCommentInlineWithParen;
++
 +/**
 + * Main print function for TSRX AST nodes
 + * @param {AST.Node | AST.CSS.StyleSheet} node - The AST node to print
@@ -115,10 +202,19 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
 +		return String(node || '');
 +	}
  
--				if (!isInlineContext && !shouldKeepOnSameLine) {
--					parts.push(hardline);
+-				// Check if comment and node are on the same line (for inline JSDoc comments)
+-				const isCommentInlineWithParen =
+-					isLastComment && isCommentFollowedBySameLineParen(comment, options);
+-				const isCommentOnSameLine =
+-					isLastComment && comment.loc && node.loc && comment.loc.end.line === node.loc.start.line;
+-				const shouldKeepOnSameLine = isCommentOnSameLine || isCommentInlineWithParen;
 +	/** @type {Doc[]} */
 +	const parts = [];
+ 
+-				if (!isInlineContext && !shouldKeepOnSameLine) {
+-					parts.push(hardline);
++	const isInlineContext = args && args.isInlineContext;
++	const suppressLeadingComments = args && args.suppressLeadingComments;
  
 -					// Check if there should be blank lines between this comment and the next
 -					if (nextComment) {
@@ -138,16 +234,49 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
 -				}
 -			}
 -		}
-+	const isInlineContext = args && args.isInlineContext;
-+	const suppressLeadingComments = args && args.suppressLeadingComments;
-+
 +	// Handle leading comments
 +	if (node.leadingComments && !suppressLeadingComments) {
 +		parts.push(...printLeadingComments(node, node.leadingComments, options, isInlineContext));
  	}
  
  	// Handle inner comments (for nodes with no children to attach to)
-@@ -2099,6 +2114,10 @@ function printTsrxNode(node, path, options, print, args) {
+@@ -1930,13 +2018,16 @@ function printTsrxNode(node, path, options, print, args) {
+ 				'typeAnnotation',
+ 			);
+ 			const expressionDoc = path.call(print, 'expression');
+-			const operand = castOperandNeedsParens(node.expression)
++			const operand = castOperandNeedsParens(node.expression, path)
+ 				? ['(', expressionDoc, ')']
+ 				: expressionDoc;
+ 			nodeContent =
+ 				node.typeAnnotation.type !== 'TSTypeLiteral' && willBreak(typeAnnotation)
+ 					? [operand, ' as', indent([line, typeAnnotation])]
+ 					: [operand, ' as ', typeAnnotation];
++			if (castNeedsParens(node, path.getParentNode())) {
++				nodeContent = ['(', nodeContent, ')'];
++			}
+ 			break;
+ 		}
+ 
+@@ -1946,13 +2037,16 @@ function printTsrxNode(node, path, options, print, args) {
+ 				'typeAnnotation',
+ 			);
+ 			const expressionDoc = path.call(print, 'expression');
+-			const operand = castOperandNeedsParens(node.expression)
++			const operand = castOperandNeedsParens(node.expression, path)
+ 				? ['(', expressionDoc, ')']
+ 				: expressionDoc;
+ 			nodeContent =
+ 				node.typeAnnotation.type !== 'TSTypeLiteral' && willBreak(typeAnnotation)
+ 					? [operand, ' satisfies', indent([line, typeAnnotation])]
+ 					: [operand, ' satisfies ', typeAnnotation];
++			if (castNeedsParens(node, path.getParentNode())) {
++				nodeContent = ['(', nodeContent, ')'];
++			}
+ 			break;
+ 		}
+ 
+@@ -2099,6 +2193,10 @@ function printTsrxNode(node, path, options, print, args) {
  			nodeContent = printContinueStatement(node, path, options, print);
  			break;
  
@@ -158,7 +287,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  		case 'DebuggerStatement':
  			nodeContent = printDebuggerStatement(node, path, options);
  			break;
-@@ -2288,6 +2307,7 @@ function printTsrxNode(node, path, options, print, args) {
+@@ -2288,6 +2386,7 @@ function printTsrxNode(node, path, options, print, args) {
  						blockParent.type === 'TryStatement' ||
  						blockParent.type === 'CatchClause' ||
  						blockParent.type === 'SwitchCase' ||
@@ -166,7 +295,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  						blockParent.type === 'JSXIfExpression' ||
  						blockParent.type === 'JSXForExpression' ||
  						blockParent.type === 'JSXTryExpression' ||
-@@ -2879,11 +2899,15 @@ function printTsrxNode(node, path, options, print, args) {
+@@ -2879,11 +2978,15 @@ function printTsrxNode(node, path, options, print, args) {
  			nodeContent = ['@', path.call(print, 'expression')];
  			break;
  
@@ -187,7 +316,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  	}
  
  	// Decorators have runtime effects, so every decorated node prints them —
-@@ -4078,6 +4102,18 @@ function extractAndPrintLeadingComments(node) {
+@@ -4078,6 +4181,18 @@ function extractAndPrintLeadingComments(node) {
  	return parts;
  }
  
@@ -206,7 +335,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  /**
   * Print an if statement
   * @param {AST.IfStatement} node - The if statement node
-@@ -4111,15 +4147,11 @@ function printIfStatement(node, path, options, print, directive = false) {
+@@ -4111,15 +4226,11 @@ function printIfStatement(node, path, options, print, directive = false) {
  	parts.push(testDoc);
  
  	// Handle the consequent
@@ -224,7 +353,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  	}
  
  	// Handle the alternate
-@@ -4131,9 +4163,10 @@ function printIfStatement(node, path, options, print, directive = false) {
+@@ -4131,9 +4242,10 @@ function printIfStatement(node, path, options, print, directive = false) {
  			parts.push(' ');
  		}
  
@@ -236,7 +365,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  				path.call(
  					(alternatePath) =>
  						printIfStatement(
-@@ -4147,7 +4180,7 @@ function printIfStatement(node, path, options, print, directive = false) {
+@@ -4147,7 +4259,7 @@ function printIfStatement(node, path, options, print, directive = false) {
  				),
  			);
  		} else {
@@ -245,7 +374,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  		}
  	}
  
-@@ -4170,8 +4203,7 @@ function printForInStatement(node, path, options, print) {
+@@ -4170,8 +4282,7 @@ function printForInStatement(node, path, options, print) {
  	parts.push(' in ');
  	parts.push(path.call(print, 'right'));
  
@@ -255,7 +384,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  
  	return parts;
  }
-@@ -4204,8 +4236,7 @@ function printForOfStatement(node, path, options, print, directive = false) {
+@@ -4204,8 +4315,7 @@ function printForOfStatement(node, path, options, print, directive = false) {
  		parts.push(path.call(print, 'key'));
  	}
  
@@ -265,7 +394,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  	if (node.empty) {
  		parts.push(directive ? ' @empty ' : ' empty ');
  		parts.push(path.call(print, 'empty'));
-@@ -4246,8 +4277,7 @@ function printForStatement(node, path, options, print) {
+@@ -4246,8 +4356,7 @@ function printForStatement(node, path, options, print) {
  		parts.push(path.call(print, 'update'));
  	}
  
@@ -275,7 +404,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  
  	return parts;
  }
-@@ -4275,8 +4305,7 @@ function printWhileStatement(node, path, options, print) {
+@@ -4275,8 +4384,7 @@ function printWhileStatement(node, path, options, print) {
  
  	parts.push('while (');
  	parts.push(test);
@@ -285,7 +414,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  
  	return parts;
  }
-@@ -4298,8 +4327,7 @@ function printDoWhileStatement(node, path, options, print) {
+@@ -4298,8 +4406,7 @@ function printDoWhileStatement(node, path, options, print) {
  
  	/** @type {Doc[]} */
  	const parts = [];
@@ -295,7 +424,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..60f8675037f9fa2cf23452efbed9fd66
  
  	// Print leading comments from test node before 'while' keyword
  	const commentParts = extractAndPrintLeadingComments(testNode);
-@@ -5691,6 +5719,93 @@ function printContinueStatement(node, path, options, print) {
+@@ -5691,6 +5798,93 @@ function printContinueStatement(node, path, options, print) {
  	return parts;
  }
  

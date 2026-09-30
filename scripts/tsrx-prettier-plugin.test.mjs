@@ -8,11 +8,14 @@ import * as prettier from 'prettier';
 // The repository formats `.tsrx` with @tsrx/prettier-plugin, patched in
 // patches/@tsrx__prettier-plugin@0.4.10.patch. The printer re-emits every node
 // from scratch, so a statement it cannot print used to become a placeholder
-// comment, and an empty loop body used to vanish so the next statement became
-// the body. Both rewrites pass `prettier --check` once committed, so these
-// tests pin the output and compare the AST before and after formatting.
+// comment, an empty loop body used to vanish so the next statement became the
+// body, and the parentheses around an `as` cast were dropped so the cast took
+// in the surrounding operator. These rewrites pass `prettier --check` once
+// committed, so these tests pin the output and compare the AST before and
+// after formatting.
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/tsrx-prettier-statements.tsrx', import.meta.url));
+const CAST_FIXTURE = fileURLToPath(new URL('./fixtures/tsrx-prettier-casts.tsrx', import.meta.url));
 const IGNORE_FILE = fileURLToPath(new URL('../.prettierignore', import.meta.url));
 // Plugin names resolve from the working directory, so pass the module itself.
 const { plugins: configuredPlugins, ...config } = await prettier.resolveConfig(FIXTURE);
@@ -172,5 +175,97 @@ describe('@tsrx/prettier-plugin statements', () => {
 			}),
 			/@tsrx\/prettier-plugin has no printer for FutureStatement \(1:1\)/,
 		);
+	});
+});
+
+/**
+ * The AST of `source`, or its parse error.
+ * @param {string} source
+ */
+async function parseOutcome(source) {
+	try {
+		return withoutPositions(await parse(source));
+	} catch (error) {
+		return String(/** @type {Error} */ (error).message);
+	}
+}
+
+describe('@tsrx/prettier-plugin casts', () => {
+	test('keeps the committed fixture byte-identical under the repository config', async () => {
+		const info = await prettier.getFileInfo(CAST_FIXTURE, { ignorePath: IGNORE_FILE });
+		assert.deepEqual(info, { ignored: false, inferredParser: 'tsrx' });
+
+		const source = readFileSync(CAST_FIXTURE, 'utf8');
+		assert.equal(await format(source), source);
+		const ast = await parse(source);
+		assert.equal(countNodes(ast, 'TSAsExpression'), 15);
+		assert.equal(countNodes(ast, 'TSSatisfiesExpression'), 1);
+	});
+
+	test('keeps the parentheses a cast needs as an operand', async () => {
+		// Each pair is the source and the reading without the parentheses,
+		// which parses differently or not at all.
+		for (const [source, regrouped] of [
+			["x = 'name' in (e.target as Element);", "x = 'name' in e.target as Element;"],
+			['x = y < (z as number);', 'x = y < z as number;'],
+			['x = w instanceof (v as any);', 'x = w instanceof v as any;'],
+			['x = a + (b as number);', 'x = a + b as number;'],
+			['x = a * (b satisfies number);', 'x = a * b satisfies number;'],
+			['x = 2 ** (n as number);', 'x = 2 ** n as number;'],
+			['x = (n as number) ** 2;', 'x = n as number ** 2;'],
+			[
+				'f = async () => await (p as Promise<number>);',
+				'f = async () => await p as Promise<number>;',
+			],
+			['x = new (X as any)();', 'x = new X as any();'],
+			['x = (tag as any)`x`;', 'x = tag as any`x`;'],
+			['x = (f as any)<T>;', 'x = f as any<T>;'],
+			['(x as any)++;', 'x as any++;'],
+			['--(x as any);', '--x as any;'],
+			['class K extends (B as any) {}', 'class K extends B as any {}'],
+			['x = class extends (B as any) {};', 'x = class extends B as any {};'],
+		]) {
+			await assertFormats(source, source);
+			assert.notDeepEqual(await parseOutcome(regrouped), await parseOutcome(source), regrouped);
+		}
+	});
+
+	test('keeps the readability parentheses Prettier prints around a cast only where written', async () => {
+		// Each pair parses the same, so the source's choice stands.
+		for (const [source, bare] of [
+			['x = a && (b as T);', 'x = a && b as T;'],
+			['x = a ?? (b as T);', 'x = a ?? b as T;'],
+			['x = a === (b satisfies number);', 'x = a === b satisfies number;'],
+			['x = (a as number) + 1;', 'x = a as number + 1;'],
+			['x = c ? (a as T) : (b as T);', 'x = c ? a as T : b as T;'],
+			['x = (c as boolean) ? a : b;', 'x = c as boolean ? a : b;'],
+			['x = [...(xs as T[])];', 'x = [...xs as T[]];'],
+			['x = <div {...(p as object)} />;', 'x = <div {...p as object} />;'],
+			['x = (a + b) as T;', 'x = a + b as T;'],
+			['f = async () => (await p) as T;', 'f = async () => await p as T;'],
+		]) {
+			assert.deepEqual(await parseOutcome(bare), await parseOutcome(source), bare);
+			await assertFormats(source, source);
+			await assertFormats(bare, bare);
+		}
+	});
+
+	test('drops the parentheses Prettier drops around a cast', async () => {
+		await assertFormats('f((x as T));', 'f(x as T);');
+		await assertFormats('x = (y as T);', 'x = y as T;');
+		await assertFormats('x = (y as unknown) as T;', 'x = y as unknown as T;');
+		await assertFormats('x = { a: (y as T) };', 'x = { a: y as T };');
+	});
+
+	test('keeps a cast object that starts an arrow body or a statement an object', async () => {
+		await assertFormats('f = () => ({} as T);', 'f = () => ({}) as T;');
+		await assertFormats(
+			'f = () => ({ a: 1 }) satisfies T as U;',
+			'f = () => ({ a: 1 }) satisfies T as U;',
+		);
+		await assertFormats('({} as T);', '({}) as T;');
+		await assertFormats('(function () {}) as T;', '(function () {}) as T;');
+		await assertFormats('(class {}) as T;', '(class {}) as T;');
+		await assertFormats('f = () => ({} as T).a;', 'f = () => ({} as T).a;');
 	});
 });
