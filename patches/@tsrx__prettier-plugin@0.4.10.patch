@@ -91,7 +91,7 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..2c7078633f19d97b121daee992027e30
   * @param {AST.Node} expression - The cast operand
   * @returns {boolean} - True if parentheses are required
   */
-@@ -475,12 +491,196 @@ function castOperandNeedsParens(expression) {
+@@ -475,12 +491,202 @@ function castOperandNeedsParens(expression) {
  		case 'YieldExpression':
  			return true;
  		case 'BinaryExpression':
@@ -175,6 +175,8 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..2c7078633f19d97b121daee992027e30
 +		case 'TSNonNullExpression':
 +		case 'TSInstantiationExpression':
 +			return 'expression';
++		case 'SequenceExpression':
++			return 'expressions';
 +		default:
 +			return null;
 +	}
@@ -279,7 +281,11 @@ index d5cd8a4fff9d3036a2539f9809abeab6a871a366..2c7078633f19d97b121daee992027e30
 +				return child !== node && node.type !== 'ObjectExpression';
 +		}
 +		const key = getLeftmostChildKey(parent);
-+		if (!key || /** @type {Record<string, unknown>} */ (parent)[key] !== child) {
++		if (!key) {
++			return false;
++		}
++		const leftmost = /** @type {Record<string, unknown>} */ (parent)[key];
++		if ((Array.isArray(leftmost) ? leftmost[0] : leftmost) !== child) {
 +			return false;
 +		}
 +		child = parent;
