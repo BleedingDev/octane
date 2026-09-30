@@ -85,6 +85,143 @@ export function App() @{
 	});
 });
 
+describe('Strong asynchronous effect updates', () => {
+	const app = (setup: string) =>
+		component(`const [data, setData] = useState(null); ${setup}`).replace(
+			"from 'octane';",
+			"from 'octane';\nimport { api } from './api';\nimport axios from 'axios';",
+		);
+
+	it.each([
+		['an imported client', `useEffect(() => { api.get(props.id).then(setData); });`],
+		[
+			'a default-imported client',
+			`useEffect(() => { axios.get('/x/' + props.id).then(r => setData(r.data)); });`,
+		],
+		['a rejection handler', `useEffect(() => { api.get(props.id).catch(setData); });`],
+		['a combined promise', `useEffect(() => { Promise.all([api.a(), api.b()]).then(setData); });`],
+		[
+			'an awaited request',
+			`useEffect(() => { (async () => { const value = await api.get(props.id); setData(value); })(); });`,
+		],
+		['an async effect callback', `useEffect(async () => { setData(await api.get(props.id)); });`],
+		[
+			'a promise-like value from a shadowed Promise',
+			`useEffect(() => { const Promise = props.Promise; Promise.resolve().then(() => setData(1)); });`,
+		],
+		[
+			'a settled promise whose value may be pending',
+			`useEffect(() => { Promise.resolve(props.value).then(setData); });`,
+		],
+	])('rejects a state update in %s without cleanup', (_label, setup) => {
+		rejects(app(setup), FETCH);
+	});
+
+	it.each([
+		['an empty cleanup', `api.get(props.id).then(setData); return () => {};`],
+		[
+			'a flag the update never checks',
+			`let ignore = false; api.get(props.id).then(value => setData(value)); return () => { ignore = true; };`,
+		],
+		[
+			'a flag checked with the wrong polarity',
+			`let ignore = false; api.get(props.id).then(value => { if (ignore) setData(value); }); return () => { ignore = true; };`,
+		],
+		[
+			'a flag checked before the last await',
+			`let ignore = false; (async () => { if (ignore) return; const value = await api.get(props.id); setData(value); })(); return () => { ignore = true; };`,
+		],
+		[
+			'a flag checked before another await',
+			`let ignore = false; (async () => { const value = await api.get(props.id); if (!ignore) { await api.more(); setData(value); } })(); return () => { ignore = true; };`,
+		],
+		[
+			'a flag that cleanup sets to an unknown value',
+			`let ignore = false; api.get(props.id).then(value => { if (!ignore) setData(value); }); return () => { ignore = props.flag; };`,
+		],
+		[
+			'a disjunctive guard',
+			`let ignore = false; api.get(props.id).then(value => { if (!ignore || props.force) setData(value); }); return () => { ignore = true; };`,
+		],
+		[
+			'an update passed directly to then',
+			`let ignore = false; api.get(props.id).then(setData); return () => { ignore = true; };`,
+		],
+		[
+			'a controller whose signal never reaches the request',
+			`const controller = new AbortController(); api.get(props.id).then(setData); return () => controller.abort();`,
+		],
+		[
+			'a signal whose controller is never aborted',
+			`const controller = new AbortController(); api.get(props.id, { signal: controller.signal }).then(setData); return () => {};`,
+		],
+		[
+			'a different controller',
+			`const first = new AbortController(); const second = new AbortController(); api.get(props.id, { signal: first.signal }).then(setData); return () => second.abort();`,
+		],
+		['an opaque cleanup', `api.get(props.id).then(setData); return props.unsubscribe;`],
+		[
+			'a sequence ending in an empty cleanup',
+			`return (api.get(props.id).then(setData), () => {});`,
+		],
+	])('rejects a cleanup that does not cancel or ignore the result: %s', (_label, body) => {
+		rejects(app(`useEffect(() => { ${body} });`), FETCH);
+	});
+
+	it.each([
+		['a component-scoped flag', `let active = true;`, 'active'],
+		['a ref flag', `const active = useRef(true);`, 'active.current'],
+	])('rejects %s shared by every effect run', (_label, declaration, flag) => {
+		const source = app(
+			`${declaration} useEffect(() => { api.get(props.id).then(value => { if (${flag}) setData(value); }); return () => { ${flag} = false; }; });`,
+		);
+		rejects(source, FETCH);
+	});
+
+	it.each([
+		`let active = true; api.get(props.id).then(value => { if (active) setData(value); }); return () => { active = false; };`,
+		`let ignore = false; (async () => { const value = await api.get(props.id); if (ignore) return; setData(value); })(); return () => { ignore = true; };`,
+		`let ignore = false; api.get(props.id).then(value => ignore || setData(value)); return () => { ignore = true; };`,
+		`let ignore = false; api.get(props.id).then(value => !ignore && setData(value)); return () => { ignore = true; };`,
+		`let ignore = false; api.get(props.id).then(value => { if (!ignore && props.enabled) setData(value); }); return () => { ignore = true; };`,
+		`let ignore = false; api.get(props.id).then(value => { if (ignore === false) setData(value); }); return () => { ignore = true; };`,
+		`let ignore = false; api.get(props.id).then(value => { if (ignore) return; setData(value); }).catch(error => { if (!ignore) setData(error); }); return () => { ignore = true; };`,
+		`let ignore = false; const stop = () => { ignore = true; }; api.get(props.id).then(value => { if (!ignore) setData(value); }); return stop;`,
+		`let ignore = false; api.get(props.id).then(value => { if (!ignore) setData(value); }); return () => stop(); function stop() { ignore = true; }`,
+		`const controller = new AbortController(); const { signal } = controller; api.get(props.id, { signal }).then(setData); return () => controller.abort();`,
+		`const controller = new AbortController(); api.get(props.id, { ...props.options, signal: controller.signal }).then(setData); return () => controller.abort();`,
+		`const controller = new AbortController(); const signal = controller.signal; (async () => { const r = await fetch('/api', { signal }); setData(await r.json()); })(); return () => controller.abort();`,
+		`const controller = new AbortController(); api.get(props.id).then(value => { if (!controller.signal.aborted) setData(value); }); return () => controller.abort();`,
+	])('accepts cleanup that cancels or ignores the result: %s', (body) => {
+		accepts(app(`useEffect(() => { ${body} });`));
+	});
+
+	it('follows signals and flags through same-module helpers', () => {
+		accepts(
+			app(`async function load(signal, set) { const r = await fetch('/api', { signal }); set(await r.json()); }
+function subscribeData(id, set) { let active = true; api.get(id).then(value => { if (active) set(value); }); return () => { active = false; }; }
+useEffect(() => { const controller = new AbortController(); load(controller.signal, setData); return () => controller.abort(); });
+useEffect(() => subscribeData(props.id, setData));`),
+		);
+		rejects(
+			app(`function subscribeData(id, set) { let active = true; api.get(id).then(set); return () => { active = false; }; }
+useEffect(() => subscribeData(props.id, setData));`),
+			FETCH,
+		);
+	});
+
+	it('names the replacement for async effect callbacks', () => {
+		const result = compileToVolarMappings(
+			app(`useEffect(async () => { setData(await api.get(props.id)); });`),
+			'/src/App.tsrx',
+			{ strong: true },
+		);
+		const error = result.diagnostics.find((diagnostic) => diagnostic.code === FETCH);
+		expect(error?.message).toContain('async effect callback returns a promise');
+		expect(error?.message).toContain('use()');
+	});
+});
+
 describe('Strong effect chains', () => {
 	it.each([
 		`${guardedWrite('setFirst(1)')} useEffect(() => { consume(first); });`,
@@ -286,13 +423,12 @@ describe('Strong effect review regressions', () => {
 		`for (;;) { return; }`,
 		`do { return; } while (props.active);`,
 		`done: { return; }`,
-	])('does not join a completed fetch branch through %s', (exit) => {
+	])('checks the other continuation after a branch exits through %s', (exit) => {
+		// Every awaited result needs cancellation, not only a fetch.
 		const setup = `useEffect(() => { (async () => { if (props.fetch) { await fetch('/telemetry'); ${exit} } await ready; setData(1); })(); });`;
-		expect(() =>
-			compile(component(`const [data, setData] = useState(null); ${setup}`), '/src/Review.tsrx', {
-				strong: true,
-			}),
-		).not.toThrow();
+		rejects(component(`const [data, setData] = useState(null); ${setup}`), FETCH);
+		const guarded = `useEffect(() => { let active = true; (async () => { if (props.fetch) { await fetch('/telemetry'); ${exit} } await ready; if (active) setData(1); })(); return () => { active = false; }; });`;
+		accepts(component(`const [data, setData] = useState(null); ${guarded}`));
 	});
 
 	it.each([
@@ -800,7 +936,7 @@ export function useWidth() {
 		expect(strong?.code).toBe(`"use strong"; ${standard!.code}`);
 	});
 
-	it('publishes the effect update code as a source-located editor error', () => {
+	it('publishes each new effect code as a source-located editor error', () => {
 		const result = compileToVolarMappings(
 			`"use strong";
 import { useState, useEffect, useRef } from 'octane';
@@ -819,7 +955,9 @@ export function App(props) @{
 		const lines = Object.fromEntries(
 			result.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.start.line]),
 		);
-		expect(lines).toEqual({ [UPDATE]: 7 });
-		expect(result.errors.map((error) => error.code)).toEqual(expect.arrayContaining([UPDATE]));
+		expect(lines).toEqual({ [UPDATE]: 7, [FETCH]: 8 });
+		expect(result.errors.map((error) => error.code)).toEqual(
+			expect.arrayContaining([UPDATE, FETCH]),
+		);
 	});
 });

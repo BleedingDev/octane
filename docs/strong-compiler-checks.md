@@ -10,7 +10,7 @@ support explicit dependencies, manual memo hooks, and ordinary raw HTML props.
 | Diagnostic | What it detects | Replacement |
 | --- | --- | --- |
 | `OCTANE_STRONG_EFFECT_STATE_UPDATE` | Effect setup calls a state updater synchronously. This includes updaters and callbacks returned by same-module custom hooks, and callbacks that run before the next paint: `startTransition`, a `useTransition` start function, `queueMicrotask`, `.then`/`.catch`/`.finally` on `Promise.resolve(value)` or `Promise.reject()`, `setTimeout` without a positive delay, and code after awaiting a value that is not a pending promise. | Derive the value during render, or use `useLinkedState` when state follows another value. `requestAnimationFrame`, timers with a positive delay, and external subscription callbacks remain event-driven. |
-| `OCTANE_STRONG_EFFECT_DATA_FETCH` | An effect starts a known fetch and invokes a known state updater in its asynchronous continuation, without returning cleanup. | Read asynchronous render data with `use()`, or implement a cancellable external synchronization with cleanup. |
+| `OCTANE_STRONG_EFFECT_DATA_FETCH` | A state update runs after an `await`, or in a `.then`, `.catch`, or `.finally` callback, of work the effect started, and the returned cleanup does not provably cancel or ignore it. An async effect callback returns a promise, so it cannot return cleanup. | Read asynchronous render data with `use()` or a query binding. For external synchronization, abort an `AbortController` whose `signal` is passed to the request, or set a flag declared in the effect from its cleanup and check it before the update. See [Effect cleanup](#effect-cleanup). |
 | `OCTANE_STRONG_EFFECT_CHAIN` | An effect reads state written by another effect's own execution or promise continuation in the same component. | Derive the value during render, use `useLinkedState`, or combine the external synchronization. External subscription and timer callbacks remain event-driven updates. |
 | `OCTANE_STRONG_UNLINKED_PROP_STATE` | An eager `useState` initializer or two-argument `useReducer` initial state is derived from component props. | Use `useLinkedState(source, reconcile)` for state that follows a source. Use `useState(() => initialValue)` or an explicit third `useReducer` initializer for a deliberate initial capture. |
 | `OCTANE_STRONG_EXPLICIT_DEPENDENCIES` | An explicit dependency argument differs from the compiler's inferred inputs, or cannot be proven equivalent. | Omit the dependency argument. An equivalent array produces a **hint**, not an error; its authored behavior is preserved. |
@@ -50,10 +50,8 @@ an eligible declaration in such a module reports
 These are bounded source checks. They follow supported local aliases, known
 callbacks, and state tuples, updaters, callbacks, and transition starts
 returned by same-module custom hooks. They do not prove arbitrary imported
-functions, mutable containers, or all asynchronous data flow. An effect
-returning cleanup still needs to cancel or ignore stale results correctly.
-External subscriptions, event-driven updates, and effect cleanup remain
-supported.
+functions or mutable containers. External subscriptions, event-driven updates,
+and effect cleanup remain supported.
 
 ```tsx
 "use strong";
@@ -66,6 +64,52 @@ export function Editor({ user }) {
   return <input value={name} onInput={event => setName(event.currentTarget.value)} />;
 }
 ```
+
+## Effect cleanup
+
+Returning a cleanup function is not enough. Strong checks what the cleanup
+does to the work that the effect started during that run.
+
+An asynchronous state update is cancelled or ignored when one of these holds:
+
+- The cleanup calls `abort()` on an `AbortController` created in the effect,
+  and the controller's `signal` reaches the request whose result the update
+  follows. The signal can be passed directly, through
+  `const { signal } = controller`, in an options object, or through a
+  same-module helper's parameter. `controller.signal.aborted` also works as a
+  guard.
+- The cleanup assigns a flag declared with `let` inside the effect, and the
+  update is guarded by that flag after the last `await` or at the start of the
+  promise callback. The guard can be `if (!ignore) setData(data)`,
+  `if (ignore) return;`, or `active && setData(data)`. A flag declared in the
+  component or module, or held in a ref, is shared by every run of the effect
+  and does not count.
+
+```tsx
+"use strong";
+import { useEffect, useState } from 'octane';
+import { api } from './api';
+
+export function Profile({ id }) {
+  const [profile, setProfile] = useState(null);
+  useEffect(() => {
+    let ignore = false;
+    api.profile(id).then((next) => {
+      if (!ignore) setProfile(next);
+    });
+    return () => {
+      ignore = true;
+    };
+  });
+  return <p>{profile?.name}</p>;
+}
+```
+
+The proofs stay bounded. A cleanup returned on any path counts, the cleanup's
+own conditions are not evaluated, and aborting a request does not stop its
+`.catch` handler from running: guard updates there with the flag or
+`signal.aborted`. A cleanup returned by an imported helper is opaque and does
+not count.
 
 ## Lists, host props, and compatibility APIs
 

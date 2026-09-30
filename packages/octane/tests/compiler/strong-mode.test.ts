@@ -19,6 +19,7 @@ const DIRECTIVE_PLACEMENT = 'OCTANE_STRONG_DIRECTIVE_PLACEMENT';
 const HOOK_LOCALITY = 'OCTANE_STRONG_HOOK_LOCALITY';
 const EVENT_HANDLER_LOCALITY = 'OCTANE_STRONG_EVENT_HANDLER_LOCALITY';
 const MANUAL_MEMO = 'OCTANE_STRONG_MANUAL_MEMO';
+const EFFECT_DATA_FETCH = 'OCTANE_STRONG_EFFECT_DATA_FETCH';
 
 describe('Strong mode immutable render inputs', () => {
 	const component = (
@@ -395,9 +396,9 @@ function expectYieldedUpdates(body: string) {
 	)}`;
 
 	expect(() => compile(render, '/src/Counter.tsrx')).not.toThrow();
-	// A pending load defers the update out of synchronous setup.
-	expect(() => compile(effect, '/src/Counter.tsrx')).not.toThrow();
-	expect(() => compile(asyncEffect, '/src/Counter.tsrx')).not.toThrow();
+	// Deferred, so not a setup update; uncancelled, so it needs cleanup.
+	expect(() => compile(effect, '/src/Counter.tsrx')).toThrow(EFFECT_DATA_FETCH);
+	expect(() => compile(asyncEffect, '/src/Counter.tsrx')).toThrow(EFFECT_DATA_FETCH);
 }
 
 describe('Strong mode template locality', () => {
@@ -3996,6 +3997,12 @@ export function useCounter() {
 			'setCount(count + 1); await load(signal);',
 		);
 		const rejected = compileToVolarMappings(synchronous, '/src/Counter.tsrx');
+		// An async effect callback returns a promise, so it cannot cancel its updates.
+		const uncancellable = compileToVolarMappings(
+			`"use strong";\n${pendingEffectComponent(`useEffect(async () => { ${pending('const next = await Promise.resolve(count + 1); setCount(next);')} });`)}`,
+			'/src/Counter.tsrx',
+		);
+
 		expect(result.diagnostics).toEqual([]);
 		expect(result.errors).toEqual([]);
 		expect(rejected.diagnostics).toContainEqual(
@@ -4004,6 +4011,9 @@ export function useCounter() {
 		expect(rejected.errors).toContainEqual(
 			expect.objectContaining({ code: EFFECT_STATE_UPDATE, type: 'usage' }),
 		);
+		expect(uncancellable.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
+			EFFECT_DATA_FETCH,
+		]);
 	});
 
 	it.each([

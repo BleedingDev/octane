@@ -9,17 +9,10 @@ import { analyzeNativeChangeDiagnostics } from './native-change-diagnostics.js';
 import { createStrongTemplatePolicy } from './strong-template-policy.js';
 import { createStrongEffectPolicy } from './strong-effects.js';
 
+export { STRONG_EFFECT_DATA_FETCH } from './strong-effects.js';
+
 const STATE_HOOKS = new Set(['useState', 'useReducer', 'useLinkedState']);
 const EFFECT_HOOKS = new Set(['useEffect', 'useLayoutEffect', 'useInsertionEffect']);
-const EFFECT_CONTROL_TYPES = new Set([
-	'ForStatement',
-	'ForInStatement',
-	'ForOfStatement',
-	'WhileStatement',
-	'DoWhileStatement',
-	'SwitchStatement',
-	'LabeledStatement',
-]);
 const ARRAY_MUTATORS = new Set([
 	'copyWithin',
 	'fill',
@@ -73,7 +66,6 @@ const OTHER_BINDING = { kind: 'other' };
 const SNAPSHOT_BINDING = { kind: 'snapshot' };
 const STATE_GETTER_BINDING = { kind: 'getter' };
 const PROP_BINDING = { kind: 'prop' };
-const FETCH_BINDING = { kind: 'fetch' };
 const TRANSITION_START_BINDING = { kind: 'transition-start' };
 const TRANSITION_TUPLE_BINDING = { kind: 'transition-tuple' };
 const UNDEFINED_BINDING = { kind: 'constant', value: UNDEFINED_VALUE, primitive: undefined };
@@ -184,7 +176,6 @@ export const STRONG_RETAINED_ROW_MUTATION = 'OCTANE_STRONG_RETAINED_ROW_MUTATION
 export const STRONG_RENDER_IMPURE_CALL = 'OCTANE_STRONG_RENDER_IMPURE_CALL';
 export const STRONG_RENDER_EFFECT_EVENT_CALL = 'OCTANE_STRONG_RENDER_EFFECT_EVENT_CALL';
 export const STRONG_EFFECT_EVENT_DEPENDENCY = 'OCTANE_STRONG_EFFECT_EVENT_DEPENDENCY';
-export const STRONG_EFFECT_DATA_FETCH = 'OCTANE_STRONG_EFFECT_DATA_FETCH';
 export const STRONG_EFFECT_CHAIN = 'OCTANE_STRONG_EFFECT_CHAIN';
 export const STRONG_UNLINKED_PROP_STATE = 'OCTANE_STRONG_UNLINKED_PROP_STATE';
 export const STRONG_DIRECTIVE_PLACEMENT = 'OCTANE_STRONG_DIRECTIVE_PLACEMENT';
@@ -1429,9 +1420,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 	let returnCollector = null;
 	let renderOwner = null;
 	let currentEffect = null;
-	let currentEffectControl = null;
 	let currentFunction = null;
-	let fetchContinuation = false;
 	let collectEffectReads = true;
 	let effectOwnsWrites = true;
 	const reportedDiagnostics = new WeakMap();
@@ -2198,6 +2187,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 
 	function visitStatements(statements, scope, phase) {
 		let executionPhase = phase;
+		const guards = currentEffect === null ? undefined : effectPolicy.saveGuards();
 		for (const statement of statements ?? []) {
 			visit(statement, scope, executionPhase);
 			if (
@@ -2209,6 +2199,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 			) {
 				break;
 			}
+			if (currentEffect !== null) effectPolicy.statementGuard(statement, branchAlwaysExits);
 			if (
 				currentFunctionIsAsync &&
 				executionPhase !== 'deferred' &&
@@ -2217,6 +2208,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				executionPhase = 'deferred';
 			}
 		}
+		if (guards !== undefined) effectPolicy.restoreGuards(guards);
 		return executionPhase;
 	}
 
@@ -2320,7 +2312,10 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 	function visitFunction(node, parentScope, phase, args = null) {
 		const enclosingFunction = currentFunction;
 		const enclosingOwner = renderOwner;
-		const enclosingFetchContinuation = fetchContinuation;
+		// A caller resumes synchronously when its callee first yields.
+		const enclosingFlow = effectPolicy.saveFlow();
+		if (currentEffect !== null && phase === 'effect')
+			effectPolicy.setupFunction(currentEffect, node);
 		currentFunction = node;
 		if (
 			(phase === 'render' && renderOwner === null) ||
@@ -2366,12 +2361,12 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				const executionPhase = visitStatements(body.body, functionScope, phase);
 				if (body.render) visit(body.render, functionScope, executionPhase);
 			} else {
+				visit(body, functionScope, phase);
 				// An expression body returns its value, so it can supply the cleanup
 				// exactly like a block body's return statement.
 				if (currentEffect !== null && effectCallbackIsCurrent(currentEffect.callback)) {
 					markEffectCleanup(body, functionScope);
 				}
-				visit(body, functionScope, phase);
 				if (returnCollector?.fn === node) {
 					returnCollector.shapes.push(returnShape(body, functionScope));
 				}
@@ -2379,7 +2374,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		} finally {
 			currentFunction = enclosingFunction;
 			renderOwner = enclosingOwner;
-			fetchContinuation = enclosingFetchContinuation;
+			effectPolicy.restoreFlow(enclosingFlow);
 			currentFunctionIsAsync = enclosingFunctionIsAsync;
 			currentFunctionChecksImpureCalls = enclosingFunctionChecksImpureCalls;
 			currentFunctionChecksRenderReads = enclosingFunctionChecksRenderReads;
@@ -2500,17 +2495,6 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		) {
 			bindTransitionPattern(declaration.id, scope, bind);
 			return;
-		}
-		if (declarationKind === 'const' || !isReassigned(declaration.id)) {
-			if (fetchFunction(initial, scope)) {
-				bind(declaration.id, FETCH_BINDING);
-				return;
-			}
-			const request = currentEffect === null ? null : fetchRequest(initial, scope);
-			if (request !== null) {
-				bind(declaration.id, { kind: 'fetch-request', request });
-				return;
-			}
 		}
 		const stateTuple = stateTupleBinding(initial, scope);
 		const snapshot =
@@ -3602,36 +3586,8 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		return states;
 	}
 
-	function fetchFunction(expression, scope) {
-		const node = unwrap(expression);
-		if (node?.type === 'Identifier') {
-			const value = resolve(scope, node.name);
-			return value === FETCH_BINDING || (node.name === 'fetch' && value === null);
-		}
-		if (node?.type !== 'MemberExpression') return false;
-		const object = ambientReference(node.object, scope);
-		return (
-			(object === GLOBAL_OBJECT_BINDING || object === AMBIENT_GLOBAL_BINDINGS.get('window')) &&
-			ambientPropertyKey(node, scope) === 'fetch'
-		);
-	}
-
-	function fetchRequest(expression, scope) {
-		const node = unwrap(expression);
-		if (node?.type === 'Identifier') return resolve(scope, node.name)?.request ?? null;
-		if (node?.type !== 'CallExpression') return null;
-		if (fetchFunction(node.callee, scope)) return node;
-		const callee = unwrap(node.callee);
-		if (callee?.type !== 'MemberExpression') return null;
-		const method = ambientPropertyKey(callee, scope);
-		return method === 'then' || method === 'catch' || method === 'finally'
-			? fetchRequest(callee.object, scope)
-			: null;
-	}
-
 	function visitEffect(node, scope) {
 		const enclosingEffect = currentEffect;
-		const enclosingContinuation = fetchContinuation;
 		const enclosingOwnsWrites = effectOwnsWrites;
 		const callback = callableValue(node.arguments?.[0], scope);
 		const record = {
@@ -3640,12 +3596,9 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 			callback,
 			reads: new Set(),
 			writes: new Set(),
-			started: new Set(),
-			cleanup: false,
-			fetchUpdater: null,
 		};
+		const enclosingPolicy = effectPolicy.enterEffect(record);
 		currentEffect = record;
-		fetchContinuation = false;
 		effectOwnsWrites = true;
 		effectRecords.push(record);
 		try {
@@ -3653,16 +3606,13 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 			visitCallable(callback, unwrap(node.arguments?.[0]), 'effect');
 		} finally {
 			currentEffect = enclosingEffect;
-			fetchContinuation = enclosingContinuation;
 			effectOwnsWrites = enclosingOwnsWrites;
+			effectPolicy.exitEffect(enclosingPolicy);
 		}
-		if (record.fetchUpdater !== null && !record.cleanup) {
-			report(
-				STRONG_EFFECT_DATA_FETCH,
-				record.fetchUpdater,
-				'Strong mode does not allow fetching data into state from an effect without cleanup. Read data with use() or a query binding; keep effects for external synchronization with cleanup.',
-			);
-		}
+		effectPolicy.finishEffect(
+			record,
+			callback?.kind === 'callback' && callback.node.async === true,
+		);
 	}
 
 	function visitExplicitStateDependencies(expression, scope, dependencies) {
@@ -3787,13 +3737,14 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		return !statementCompletions(statement).has('normal');
 	}
 
-	// A returned value counts as cleanup unless it is provably not callable: a
-	// fetch request or a known non-function value.
+	// A returned value is cleanup unless it is provably not callable. The effect
+	// policy inspects visible cleanup bodies; any other value stays opaque.
 	function markEffectCleanup(argument, scope) {
 		// Async callbacks return a Promise, even when their resolved value is a function.
 		if (currentFunctionIsAsync) return;
 		const value = unwrap(argument);
-		if (value?.type === 'CallExpression') {
+		if (value == null) return;
+		if (value.type === 'CallExpression') {
 			const callback = callableValue(value.callee, scope);
 			const callbacks =
 				callback?.kind === 'callback-choice' && callback.complete ? callback.values : [callback];
@@ -3803,14 +3754,27 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 			)
 				return;
 		}
-		if (
-			value != null &&
-			(callableValue(value, scope) !== null ||
-				(staticExpressionValue(value, scope) === UNKNOWN_VALUE &&
-					fetchRequest(value, scope) === null))
-		) {
-			currentEffect.cleanup = true;
+		let callback = callableValue(value, scope);
+		if (callback === null && isCallableValue(callShapes.get(value)))
+			callback = callShapes.get(value);
+		if (callback === null) {
+			if (staticExpressionValue(value, scope) === UNKNOWN_VALUE) {
+				effectPolicy.cleanup(currentEffect, null);
+			}
+			return;
 		}
+		effectPolicy.cleanup(currentEffect, cleanupFunctions(callback, []));
+		if (callback.kind === 'callback-choice' && !callback.complete) {
+			effectPolicy.cleanup(currentEffect, null);
+		}
+	}
+
+	function cleanupFunctions(value, functions) {
+		if (value?.kind === 'callback') functions.push(value.node);
+		else if (value?.kind === 'callback-choice') {
+			for (const callback of value.values) cleanupFunctions(callback, functions);
+		} else if (value?.kind === 'effect-event') cleanupFunctions(value.callback, functions);
+		return functions;
 	}
 
 	function effectCallbackIsCurrent(value) {
@@ -3838,9 +3802,10 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				}
 			}
 		} else if (value?.kind === 'setter') {
-			if (currentEffect !== null && effectOwnsWrites && value.state) {
-				currentEffect.writes.add(value.state);
-				if (fetchContinuation) currentEffect.fetchUpdater ??= origin;
+			if (currentEffect !== null && effectOwnsWrites) {
+				if (value.state) currentEffect.writes.add(value.state);
+				// Effect-owned deferred work resumes only from an await or a promise callback.
+				if (phase === 'deferred') effectPolicy.continuationWrite(currentEffect, origin);
 			}
 			if (phase === 'render' || phase === 'effect') reportSetter(origin, phase);
 		} else if (value?.kind === 'getter' && phase === 'render' && currentFunctionChecksRenderReads) {
@@ -4028,39 +3993,6 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 			return;
 		}
 		if (node.type?.startsWith('TS')) return;
-		if (
-			currentEffect !== null &&
-			EFFECT_CONTROL_TYPES.has(node.type) &&
-			currentEffectControl?.node !== node
-		) {
-			const parent = currentEffectControl;
-			const control = {
-				node,
-				parent,
-				loop: node.type !== 'SwitchStatement' && node.type !== 'LabeledStatement',
-				label:
-					node.type === 'LabeledStatement'
-						? node.label.name
-						: parent?.node.type === 'LabeledStatement' && parent.node.body === node
-							? parent.label
-							: null,
-				breakContinuation: false,
-				continueContinuation: false,
-			};
-			const before = fetchContinuation;
-			currentEffectControl = control;
-			try {
-				visit(node, scope, phase, readAccess);
-				if (fetchContinuation && control.loop && branchAlwaysExits(node.body))
-					fetchContinuation = before;
-				// Break and continue leave the current branch, but their asynchronous
-				// path can still reach an update after the target loop or switch.
-				fetchContinuation ||= control.breakContinuation || control.continueContinuation;
-			} finally {
-				currentEffectControl = parent;
-			}
-			return;
-		}
 		templatePolicy.visit(node, scope, readAccess);
 
 		switch (node.type) {
@@ -4072,24 +4004,8 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 			case 'Super':
 				return;
 			case 'BreakStatement':
-			case 'ContinueStatement': {
-				if (currentEffect !== null && fetchContinuation) {
-					const continuation = node.type === 'ContinueStatement';
-					for (let control = currentEffectControl; control !== null; control = control.parent) {
-						if (
-							node.label
-								? control.label !== node.label.name || (continuation && !control.loop)
-								: continuation
-									? !control.loop
-									: control.node.type === 'LabeledStatement'
-						)
-							continue;
-						control[continuation ? 'continueContinuation' : 'breakContinuation'] = true;
-						break;
-					}
-				}
+			case 'ContinueStatement':
 				return;
-			}
 			case 'Identifier':
 				if (readAccess && collectEffectReads && currentEffect !== null) {
 					const binding = resolve(scope, node.name);
@@ -4180,17 +4096,15 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 			}
 			case 'AwaitExpression': {
 				visit(node.argument, scope, phase);
-				if (currentEffect !== null) {
-					const request = fetchRequest(node.argument, scope);
-					if (request !== null && currentEffect.started.has(request)) fetchContinuation = true;
-				}
+				// Every await yields, so a flag checked before it may be stale after it.
+				if (currentEffect !== null) effectPolicy.continuation(node.argument);
 				return;
 			}
 			case 'ReturnStatement': {
+				visit(node.argument, scope, phase);
 				if (currentEffect !== null && effectCallbackIsCurrent(currentEffect.callback)) {
 					markEffectCleanup(node.argument, scope);
 				}
-				visit(node.argument, scope, phase);
 				if (returnCollector?.fn === currentFunction) {
 					returnCollector.shapes.push(returnShape(node.argument, scope));
 				}
@@ -4206,15 +4120,20 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 			}
 			case 'MethodDefinition':
 			case 'PropertyDefinition':
-			case 'AccessorProperty':
+			case 'AccessorProperty': {
 				visit(node.decorators, scope, phase);
 				if (node.computed) visit(node.key, scope, phase);
-				visit(
-					node.value,
-					scope,
-					node.type === 'MethodDefinition' || node.static ? phase : 'deferred',
-				);
+				const immediate = node.type === 'MethodDefinition' || node.static;
+				// Instance fields run at construction, not in an effect's promise flow.
+				const enclosingOwnsWrites = effectOwnsWrites;
+				if (!immediate) effectOwnsWrites = false;
+				try {
+					visit(node.value, scope, immediate ? phase : 'deferred');
+				} finally {
+					effectOwnsWrites = enclosingOwnsWrites;
+				}
 				return;
+			}
 			case 'BlockStatement':
 			case 'JSXCodeBlock': {
 				if (node.type === 'JSXCodeBlock') hasNestedCodeBlock = true;
@@ -4228,27 +4147,28 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				visit(node.test, scope, phase);
 				const branchPhase = phaseAfter(node.test, phase);
 				const branches = conditionalExpressionBranches(node, scope);
-				const before = fetchContinuation;
-				if ((branches & 1) !== 0) visit(node.consequent, scope, branchPhase);
-				const consequent =
-					(branches & 1) !== 0 &&
-					fetchContinuation &&
-					(node.type !== 'IfStatement' || !branchAlwaysExits(node.consequent));
-				fetchContinuation = before;
-				if ((branches & 2) !== 0) visit(node.alternate, scope, branchPhase);
-				// An abrupt branch cannot reach a later state update. Inspect all writes
-				// inside it (including finally) before excluding its continuation.
-				fetchContinuation =
-					consequent ||
-					((branches & 2) !== 0 &&
-						fetchContinuation &&
-						(node.type !== 'IfStatement' || !branchAlwaysExits(node.alternate)));
+				const guards = currentEffect === null ? undefined : effectPolicy.saveGuards();
+				if ((branches & 1) !== 0) {
+					if (guards !== undefined) effectPolicy.guard(node.test, true);
+					visit(node.consequent, scope, branchPhase);
+					if (guards !== undefined) effectPolicy.restoreGuards(guards);
+				}
+				if ((branches & 2) !== 0) {
+					if (guards !== undefined) effectPolicy.guard(node.test, false);
+					visit(node.alternate, scope, branchPhase);
+					if (guards !== undefined) effectPolicy.restoreGuards(guards);
+				}
 				return;
 			}
 			case 'LogicalExpression':
 				visit(node.left, scope, phase);
 				if ((logicalExpressionBranches(node, scope) & 2) !== 0) {
+					const guards =
+						currentEffect === null || node.operator === '??'
+							? undefined
+							: effectPolicy.guard(node.left, node.operator === '&&');
 					visit(node.right, scope, phaseAfter(node.left, phase));
+					if (guards !== undefined) effectPolicy.restoreGuards(guards);
 				}
 				return;
 			case 'BinaryExpression':
@@ -4348,32 +4268,11 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 			case 'LabeledStatement':
 				visit(node.body, scope, phase);
 				return;
-			case 'TryStatement': {
-				let pendingControls = null;
-				if (
-					currentEffect !== null &&
-					currentEffectControl !== null &&
-					branchAlwaysExits(node.finalizer)
-				) {
-					pendingControls = [];
-					for (let control = currentEffectControl; control !== null; control = control.parent)
-						pendingControls.push([
-							control,
-							control.breakContinuation,
-							control.continueContinuation,
-						]);
-				}
+			case 'TryStatement':
 				visit(node.block, scope, phase);
 				visit(node.handler, scope, phase);
-				// An abrupt finally replaces pending exits from try/catch. Restore the
-				// earlier paths before recording any new exits from finally itself.
-				for (const [control, breaks, continues] of pendingControls ?? []) {
-					control.breakContinuation = breaks;
-					control.continueContinuation = continues;
-				}
 				visit(node.finalizer, scope, phase);
 				return;
-			}
 			case 'JSXSwitchExpression': {
 				visit(node.discriminant, scope, phase);
 				let searchPhase = phaseAfter(node.discriminant, phase);
@@ -4407,10 +4306,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				const fallbackPhase = searchPhase;
 				searchPhase = initialPhase;
 				let fallthroughPhase = null;
-				const matchingContinuation = fetchContinuation;
-				let fallthroughContinuation = false;
 				for (const branch of branches) {
-					fetchContinuation = matchingContinuation || fallthroughContinuation;
 					if (currentFunctionIsAsync && searchPhase !== 'deferred' && alwaysAwaits(branch.test)) {
 						searchPhase = 'deferred';
 					}
@@ -4421,7 +4317,6 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 							? 'deferred'
 							: phase;
 					const executionPhase = visitStatements(branch.consequent, switchScope, branchPhase);
-					fallthroughContinuation = fetchContinuation && !branch.consequent.some(branchAlwaysExits);
 					const last = branch.consequent?.[branch.consequent.length - 1];
 					fallthroughPhase =
 						last?.type === 'BreakStatement' ||
@@ -4431,7 +4326,6 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 							? null
 							: executionPhase;
 				}
-				fetchContinuation = matchingContinuation || fallthroughContinuation;
 				return;
 			}
 			case 'VariableDeclaration': {
@@ -4563,7 +4457,6 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 					}
 				}
 				if (currentEffect !== null && hook === null) {
-					if (effectOwnsWrites && fetchFunction(callee, scope)) currentEffect.started.add(node);
 					const callback = callableValue(callee, scope);
 					if (callback === null) {
 						// Transitions, microtasks, zero-delay timers, and settled promises
@@ -4575,11 +4468,11 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 							!immediate &&
 							callee?.type === 'MemberExpression' &&
 							['then', 'catch', 'finally'].includes(ambientPropertyKey(callee, scope));
-						const request = promiseContinuation ? fetchRequest(callee.object, scope) : null;
-						const before = fetchContinuation;
 						const beforeOwnsWrites = effectOwnsWrites;
+						const beforeFlow = effectPolicy.saveFlow();
 						effectOwnsWrites &&= immediate !== false || promiseContinuation;
-						if (request !== null && currentEffect.started.has(request)) fetchContinuation = true;
+						if (promiseContinuation) effectPolicy.continuation(callee.object);
+						else if (immediate === 'yield') effectPolicy.continuation(null);
 						try {
 							for (const argument of node.arguments ?? [])
 								visitCallable(
@@ -4588,8 +4481,8 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 									immediate ? executionPhase : 'deferred',
 								);
 						} finally {
-							fetchContinuation = before;
 							effectOwnsWrites = beforeOwnsWrites;
+							effectPolicy.restoreFlow(beforeFlow);
 						}
 					}
 				}
@@ -4607,6 +4500,10 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 								? { fn: callback.node, shapes: [] }
 								: null;
 						returnCollector = collector;
+						const frame =
+							currentEffect !== null && callback.kind === 'callback'
+								? effectPolicy.enterCall(callback.node, node.arguments)
+								: undefined;
 						try {
 							visitCallable(
 								callback,
@@ -4618,6 +4515,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 							);
 						} finally {
 							returnCollector = enclosingCollector;
+							if (frame !== undefined) effectPolicy.exitCall(frame);
 						}
 						if (collector !== null && collector.shapes.length !== 0) {
 							const shape = mergeShapes(collector.shapes);
@@ -4651,7 +4549,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				if (inlineConstructor) {
 					visitCallback(callee, scope, executionPhase, argumentValues(node.arguments, scope));
 				} else if (
-					(executionPhase === 'render' || executionPhase === 'effect') &&
+					(executionPhase === 'render' || executionPhase === 'effect' || currentEffect !== null) &&
 					binding?.kind === 'callback' &&
 					(binding.node.type === 'FunctionExpression' ||
 						binding.node.type === 'FunctionDeclaration') &&
@@ -4676,6 +4574,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				if (
 					executionPhase === 'render' ||
 					executionPhase === 'effect' ||
+					currentEffect !== null ||
 					FUNCTION_TYPES.has(tag?.type)
 				) {
 					const substitutions = argumentValues(node.quasi?.expressions, scope);
@@ -4808,8 +4707,6 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 					executionPhase = 'deferred';
 				}
 				visit(node.body, loop, executionPhase);
-				if (currentEffectControl?.node === node)
-					fetchContinuation ||= currentEffectControl.continueContinuation;
 				visit(node.update, loop, executionPhase);
 				return;
 			}
@@ -4867,6 +4764,9 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 					}
 				}
 				visit(node.right, loop, phase);
+				if (currentEffect !== null && node.type === 'ForOfStatement' && node.await === true) {
+					effectPolicy.continuation(node.right);
+				}
 				const executionPhase =
 					currentFunctionIsAsync &&
 					phase !== 'deferred' &&
@@ -4895,8 +4795,6 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 			}
 			case 'DoWhileStatement': {
 				visit(node.body, scope, phase);
-				if (currentEffectControl?.node === node)
-					fetchContinuation ||= currentEffectControl.continueContinuation;
 				const executionPhase =
 					currentFunctionIsAsync &&
 					phase !== 'deferred' &&
