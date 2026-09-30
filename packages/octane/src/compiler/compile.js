@@ -76,6 +76,12 @@ import {
 	UNIVERSAL_THREAD_RUNTIME_IMPORTS,
 } from './compile-universal.js';
 import { compileValdi, VALDI_COMPILER_RUNTIME_IMPORTS } from './compile-valdi.js';
+import {
+	ARM_BREAK_MESSAGE,
+	ARM_VALUE_RETURN_MESSAGE,
+	armJump,
+	assertTemplateJumps,
+} from './arm-exits.js';
 import { HOOK_NAMES, NATIVE_SIGNAL_HOOK_NAMES } from './hook-names.js';
 export { HOOK_NAMES } from './hook-names.js';
 import {
@@ -10003,6 +10009,7 @@ function compileAuthored(source, filename, options, bundlerMetadata) {
 		normalizeAuthoredJsxLiterals(parseModule(source, cleanFilename)),
 	);
 	analyzeTsrx(analyzedAst, cleanFilename);
+	assertTemplateJumps(analyzedAst, source, cleanFilename);
 	adoptParserAst(analyzedAst);
 	assertNoLegacyContextProviders(analyzedAst, source, cleanFilename);
 	options = nativeReadOptions(analyzedAst, options);
@@ -12831,10 +12838,7 @@ function ssrCompileBodyWithMapTemps(
 	// PROPS-FIRST ABI (matches the client): `(…userParams, __s, __extra)`. A leading
 	// `__props` placeholder stands in when there are no user params, so a verbatim
 	// `function Foo(props)` and a compiled component both bind props from arg 0.
-	const params =
-		node.params.length > 0
-			? [...node.params, b.id('__s'), b.id('__extra')]
-			: [b.id('__props'), b.id('__s'), b.id('__extra')];
+	const { params, restBinding } = compiledBodyParams(node.params);
 	// Private loop items feed only HTML concatenation, so their serialized tail
 	// needs no carrier. Other bodies can cross a component/value boundary, where
 	// the carrier distinguishes compiled HTML from authored text returns. This
@@ -12858,13 +12862,14 @@ function ssrCompileBodyWithMapTemps(
 			: ([...(node.params || []), ...(Array.isArray(node.body) ? node.body : [])].find(
 					(part) => part?.loc != null,
 				) ?? ctx._moduleOrigin);
+	const scopedBody = ctx.nativeReads
+		? wrapNativeReadScope(body, b.id('__s'), nativeReadNames(ctx))
+		: body;
 	return inheritOriginLoc(
 		b.function_declaration(
 			b.id(name),
 			params,
-			b.block(
-				ctx.nativeReads ? wrapNativeReadScope(body, b.id('__s'), nativeReadNames(ctx)) : body,
-			),
+			b.block(restBinding === null ? scopedBody : [restBinding, ...scopedBody]),
 		),
 		origin,
 	);
@@ -16923,8 +16928,7 @@ function compileFunctionBody(node, ctx, name, parentNs = 'html', cssHash = null,
 	// PROPS-FIRST convention: `(…userProps, __s, __extra)`. The scope is the 2nd arg
 	// (a placeholder leads when there are no user params), so a plain function
 	// `App(props)` binds `props`, while compiled bodies still read `__s` by name.
-	const userParams = node.params && node.params.length > 0 ? node.params : [b.id('__props')];
-	const fnParams = [...userParams, b.id('__s'), b.id('__extra')];
+	const { params: fnParams, restBinding } = compiledBodyParams(node.params ?? []);
 	ctx.currentAutoMemoOffset = prevAutoMemoOffset;
 	ctx.currentAutoMemoCacheName = prevAutoMemoCacheName;
 	ctx.currentAutoMemoCommittedName = prevAutoMemoCommittedName;
@@ -16943,14 +16947,14 @@ function compileFunctionBody(node, ctx, name, parentNs = 'html', cssHash = null,
 	);
 	ctx.scalarBindingClaims = previousScalarBindingClaims;
 	ctx.presentationHydration = previousPresentationHydration;
+	const scopedBody =
+		ctx.nativeReads && !isStaticHostComponent(node)
+			? wrapNativeReadScope(presentationBody, b.id('__s'), nativeReadNames(ctx))
+			: presentationBody;
 	const emittedFunction = b.function_declaration(
 		b.id(name, node.id ?? node),
 		fnParams,
-		b.block(
-			ctx.nativeReads && !isStaticHostComponent(node)
-				? wrapNativeReadScope(presentationBody, b.id('__s'), nativeReadNames(ctx))
-				: presentationBody,
-		),
+		b.block(restBinding === null ? scopedBody : [restBinding, ...scopedBody]),
 	);
 	return inheritOriginLoc(
 		hookMemoOpaqueOwner
@@ -21161,6 +21165,39 @@ function collectFunctionScopeBindings(params, statements, into) {
 	};
 	for (const statement of statements) visit(statement, true);
 	return into;
+}
+
+// A compiled body's parameters, `(…authored, __s, __extra)`, with a `__props`
+// placeholder when no authored parameter takes an argument ahead of the scope.
+// A TypeScript `this` parameter types the receiver and takes none. A rest
+// parameter must be last, so it leaves the list and a leading `var` binds it
+// from `arguments` at its authored position. It then holds what the
+// returned-JSX form's rest parameter holds: a direct call's trailing
+// arguments, and for a body call `(props, scope, extra)` from that position
+// on. The slice names no global, which a module may shadow
+// (`import { Array } from 'effect'`).
+function compiledBodyParams(authored) {
+	const receiver = authored[0]?.type === 'Identifier' && authored[0].name === 'this' ? 1 : 0;
+	const last = authored.at(-1);
+	const rest = last?.type === 'RestElement' ? last : null;
+	const fixed = authored.slice(receiver, rest === null ? authored.length : -1);
+	const params = [
+		...authored.slice(0, receiver),
+		...(fixed.length > 0 ? fixed : [b.id('__props')]),
+		b.id('__s'),
+		b.id('__extra'),
+	];
+	if (rest === null) return { params, restBinding: null };
+	const slice = b.member(b.member(b.array([]), 'slice'), 'call');
+	const args =
+		fixed.length > 0 ? [b.id('arguments'), b.literal(fixed.length)] : [b.id('arguments')];
+	return {
+		params,
+		restBinding: inheritOriginLoc(
+			b.declaration('var', [b.declarator(rest.argument, b.call(slice, ...args))]),
+			rest,
+		),
+	};
 }
 
 // Argument 1 of a function whose own parameters already reach it: the second
@@ -33933,21 +33970,10 @@ function replaceArmExits(node, loop, breakable, ctx, exit) {
 	const jump = armJump(node, loop, breakable);
 	if (jump === 'exit') return exit(node);
 	if (jump === 'value') {
-		throw armExitError(
-			ctx,
-			node,
-			'A directive arm can only end early with `return;` or `return null;`. Its output is ' +
-				'the node it ends with, so a returned value has nothing to render in its place: ' +
-				'render the alternative from an `@if`/`@else` arm instead.',
-		);
+		throw armExitError(ctx, node, ARM_VALUE_RETURN_MESSAGE);
 	}
 	if (jump === 'break') {
-		throw armExitError(
-			ctx,
-			node,
-			'`break` cannot leave the `@for` or `@switch` around a directive arm. End the arm ' +
-				'early with `return;` instead, or filter the `@for` items to stop the list early.',
-		);
+		throw armExitError(ctx, node, ARM_BREAK_MESSAGE);
 	}
 	const innerLoop = loop || LOOP_TYPES.has(type);
 	const innerBreakable = breakable || innerLoop || type === 'SwitchStatement';
@@ -34004,26 +34030,6 @@ function isArmJumpBoundary(type) {
 		JSX_CHILDREN_BEARING_TYPES.has(type) ||
 		SETUP_VALUE_DIRECTIVE_TYPES.has(type)
 	);
-}
-
-/**
- * How a jump statement relates to the arm whose setup holds it: 'exit' ends
- * the arm, 'value' (a value return) and 'break' (one that targets the
- * directive) have no arm meaning, and null stays JavaScript. `loop` and
- * `breakable` say whether an unlabeled `continue`/`break` here targets a loop
- * or `switch` inside the arm; a labeled jump always targets a label inside it.
- */
-function armJump(node, loop, breakable) {
-	switch (node.type) {
-		case 'ReturnStatement':
-			return isEarlyExitStatement(node, true) ? 'exit' : 'value';
-		case 'ContinueStatement':
-			return node.label == null && !loop ? 'exit' : null;
-		case 'BreakStatement':
-			return node.label == null && !breakable ? 'break' : null;
-		default:
-			return null;
-	}
 }
 
 function armExitError(ctx, node, message) {
@@ -34366,15 +34372,18 @@ function collectModuleLevelBindings(moduleBody) {
 }
 
 function collectOctaneComponentWrapperLocals(moduleBody) {
+	return collectOctaneImportLocals(moduleBody, ['memo', 'lazy']);
+}
+
+// Local names of the given `octane` named imports.
+function collectOctaneImportLocals(moduleBody, importedNames) {
 	const names = new Set();
 	for (const stmt of moduleBody) {
 		if (stmt.type !== 'ImportDeclaration' || stmt.source?.value !== 'octane') continue;
 		for (const spec of stmt.specifiers || []) {
 			if (spec.type !== 'ImportSpecifier') continue;
 			const imported = spec.imported?.name ?? spec.imported?.value;
-			if ((imported === 'memo' || imported === 'lazy') && spec.local?.name) {
-				names.add(spec.local.name);
-			}
+			if (importedNames.includes(imported) && spec.local?.name) names.add(spec.local.name);
 		}
 	}
 	return names;
@@ -34556,59 +34565,107 @@ function lowerJsxReturnBranchComponents(ast) {
 /**
  * A `@{ … }` body is shorthand for returning JSX: `(v) => @{ …; <p /> }` means
  * `(v) => { …; return <p />; }`. A template function declared inside another
- * function normally compiles as a render body instead, which receives its
- * Scope as an argument and renders into it. That is sound only while the
- * runtime is the one calling it: a `{helper}` child, a `<Helper />` tag, or a
- * portal body. A direct call `helper(v)` passes no Scope, so the body reads
- * `__s.slots` of undefined.
+ * function, or written inline as an argument, normally compiles as a render
+ * body instead, which receives its Scope as an argument and renders into it.
+ * That is sound only while the runtime is the one calling it: a `{helper}`
+ * child, a `<Helper />` tag, a render prop, or a portal body. A direct call
+ * `helper(v)` passes no Scope, so the body reads `__s.slots` of undefined, and
+ * `rows.map(helper)` passes the row index where the Scope would go.
  *
- * When any code that can see the binding calls it directly, or hands it to
- * `.map`, lower the function to its returned-JSX form, so the call returns a
- * JSX value exactly as the `=> <jsx>` form does on the client and the server.
- * The runtime's own calls render that value too. A call through a shadowing
- * binding of the same name also lowers it, which costs only the template fast
- * path.
+ * Lower such a function to its returned-JSX form, so a call returns a JSX value
+ * exactly as the `=> <jsx>` form does on the client and the server, whenever
+ * other code may call it:
  *
- * Module-level template functions are components, which this pass leaves to
- * the component pipeline. Async and generator ones keep their bodies, because
- * their returned-JSX forms return a promise or an iterator instead of JSX.
+ * - a nested binding that code which can see it calls directly (`helper(v)`,
+ *   `helper.call(…)`), or passes to a call (`rows.map(helper)`, `run(helper)`);
+ * - an inline function passed straight to a call or `new`, at any depth,
+ *   module scope included: `rows.map((row) => @{ <li /> })`.
+ *
+ * The runtime's own calls render the lowered value too, so this costs only the
+ * template fast path. A call through a shadowing binding of the same name also
+ * lowers the helper. The runtime itself renders the function arguments of
+ * three calls, which keep that path: a `createPortal` body, matched by name as
+ * the portal lowering matches it, and the component or render-function child
+ * given to octane's `memo` or `createElement`.
+ *
+ * Module-level template bindings are components, which this pass leaves to
+ * the component pipeline. Async and generator functions keep their bodies,
+ * because their returned-JSX forms return a promise or an iterator instead of
+ * JSX.
  */
 function lowerDirectlyCalledTemplateFunctions(ast) {
-	// Template function node → [binding name, the function that declares it].
+	// Template function expressions, found anywhere.
+	const expressions = new Set();
+	// Nested template function node → [binding name, the function declaring it].
 	const candidates = new Map();
 	walkWithEnclosingFunctions(ast.body, (node, functions) => {
+		const type = node.type;
+		if (type === 'ArrowFunctionExpression' || type === 'FunctionExpression') {
+			if (isLowerableTemplateFunction(node)) expressions.add(node);
+			return;
+		}
 		if (functions.length === 0) return;
 		let fn = null;
 		let name;
-		if (node.type === 'FunctionDeclaration') {
+		if (type === 'FunctionDeclaration') {
 			fn = node;
 			name = node.id?.name;
-		} else if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier') {
+		} else if (type === 'VariableDeclarator' && node.id?.type === 'Identifier') {
 			const init = unwrapTsExpr(node.init);
 			if (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') {
 				fn = init;
 				name = node.id.name;
 			}
 		}
-		if (fn?.body?.type === 'JSXCodeBlock' && !fn.async && !fn.generator && name !== undefined) {
+		if (fn !== null && name !== undefined && isLowerableTemplateFunction(fn)) {
 			candidates.set(fn, [name, functions[functions.length - 1]]);
 		}
 	});
-	if (candidates.size === 0) return ast;
+	if (expressions.size === 0 && candidates.size === 0) return ast;
 
-	// Function node → candidate names that code inside it calls directly.
+	let renderingCallees = null;
+	// True when the runtime, not the callee, renders the call's function arguments.
+	const rendersArguments = (call) => {
+		const callee = unwrapTsExpr(call.callee);
+		if (callee?.type !== 'Identifier') return false;
+		if (callee.name === 'createPortal') return true;
+		renderingCallees ??= collectOctaneImportLocals(ast.body, ['memo', 'createElement']);
+		return renderingCallees.has(callee.name);
+	};
+	const lowered = new Set();
 	const names = new Set([...candidates.values()].map(([name]) => name));
+	// Function node → candidate names that code inside it calls or passes on.
 	const calledIn = new Map();
-	walkWithEnclosingFunctions(ast.body, (node, functions) => {
-		const name = directlyCalledName(node);
-		if (name === null || !names.has(name)) return;
+	const markCalled = (functions, name) => {
 		for (const fn of functions) {
 			let called = calledIn.get(fn);
 			if (called === undefined) calledIn.set(fn, (called = new Set()));
 			called.add(name);
 		}
+	};
+	walkWithEnclosingFunctions(ast.body, (node, functions) => {
+		const type = node.type;
+		if (
+			type !== 'CallExpression' &&
+			type !== 'OptionalCallExpression' &&
+			type !== 'NewExpression'
+		) {
+			return;
+		}
+		const name = directlyCalledName(node);
+		if (name !== null && names.has(name)) markCalled(functions, name);
+		// The callee calls a function passed to it, as `rows.map(fn)` does with
+		// the row index where a Scope would go.
+		const args = node.arguments;
+		for (let i = 0; i < args.length; i++) {
+			const arg = unwrapTsExpr(args[i]);
+			if (expressions.has(arg)) {
+				if (!rendersArguments(node)) lowered.add(arg);
+			} else if (arg?.type === 'Identifier' && names.has(arg.name) && !rendersArguments(node)) {
+				markCalled(functions, arg.name);
+			}
+		}
 	});
-	const lowered = new Set();
 	for (const [fn, [name, owner]] of candidates) {
 		if (calledIn.get(owner)?.has(name)) lowered.add(fn);
 	}
@@ -34616,6 +34673,10 @@ function lowerDirectlyCalledTemplateFunctions(ast) {
 	const lower = (node) =>
 		mapAst(node, (n) => (lowered.has(n) ? returnedJsxFunction(n, lower) : null));
 	return lower(ast);
+}
+
+function isLowerableTemplateFunction(fn) {
+	return fn.body?.type === 'JSXCodeBlock' && !fn.async && !fn.generator;
 }
 
 /**
