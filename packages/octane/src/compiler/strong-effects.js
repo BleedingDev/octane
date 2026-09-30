@@ -1,11 +1,13 @@
 // Strong effect lifecycle proofs. The Strong visitor owns execution phases and
 // state provenance; this policy owns the questions it asks about effect setup:
-// which platform calls run their callback before the next paint, and whether
-// an asynchronous state update is cancelled or ignored by the returned cleanup.
-// Identity comes from the shared lexical analysis, never from spelling. Nothing
-// here annotates the parser tree or changes emitted code.
+// which platform calls run their callback before the next paint, whether an
+// asynchronous state update is cancelled or ignored by the returned cleanup,
+// and which refs are plain values rather than attached instances. Identity
+// comes from the shared lexical analysis, never from spelling. Nothing here
+// annotates the parser tree or changes emitted code.
 
 export const STRONG_EFFECT_DATA_FETCH = 'OCTANE_STRONG_EFFECT_DATA_FETCH';
+export const STRONG_EFFECT_HIDDEN_DEPENDENCY = 'OCTANE_STRONG_EFFECT_HIDDEN_DEPENDENCY';
 
 const TRANSPARENT = new Set([
 	'ChainExpression',
@@ -34,8 +36,23 @@ const SKIP_KEYS = new Set([
 const CONTINUATIONS = new Set(['then', 'catch', 'finally']);
 // `window`, `self` and `globalThis` name one object in a browser.
 const GLOBAL_OBJECTS = new Set(['window', 'self', 'globalThis']);
+const DEPENDENCY_ARGUMENTS = new Map([
+	['useEffect', 1],
+	['useLayoutEffect', 1],
+	['useInsertionEffect', 1],
+	['useMemo', 1],
+	['useCallback', 1],
+	['useImperativeHandle', 2],
+]);
 const UNKNOWN = Symbol('unknown');
 
+const HIDDEN_MESSAGES = {
+	getter:
+		'Strong mode does not allow effect setup to call a state getter. The getter hides the state from dependency inference, so the effect does not re-run when it changes. Read the render snapshot instead, or move the non-reactive read into a useEffectEvent callback.',
+	ref: "Strong mode does not allow effect setup to read a value ref's current property. The ref hides the value from dependency inference, so the effect does not re-run when it changes. Read the render snapshot instead, or move the non-reactive read into a useEffectEvent callback. Octane never double-invokes effects, and an effect without reactive inputs runs once per mount, so first-run and didInit guards are unnecessary.",
+	module:
+		'Strong mode does not allow effect setup to read a reassigned module variable. The variable hides the value from dependency inference and is shared by every instance. Keep the value in state, a prop, or context and read its snapshot, or move the non-reactive read into a useEffectEvent callback. Octane never double-invokes effects, so didInit guards are unnecessary.',
+};
 const FETCH_MESSAGES = {
 	missing:
 		'Strong mode requires cleanup for a state update that runs after an await or promise callback in an effect. Read asynchronous render data with use() or a query binding. For external synchronization, pass an AbortController signal to the request and abort it in the returned cleanup, or set a flag in the cleanup and check it before this update.',
@@ -82,6 +99,7 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 	const { nodeScopes, declarators, functions } = analysis;
 	let declaratorInfo = null;
 	let functionNodes = null;
+	let references = null;
 	let flow = { segment: 0, sources: null };
 	let guards = null;
 	let segments = 0;
@@ -491,6 +509,117 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 		return false;
 	}
 
+	// --- ref provenance ------------------------------------------------------
+
+	// One module walk classifies every useRef binding: any use other than a
+	// property access, a stable alias, or a dependency list makes a ref an
+	// escaped instance.
+	function refs() {
+		if (references !== null) return references;
+		references = {
+			roots: new Set(),
+			aliases: new Map(),
+			declarations: new Map(),
+			escaped: new Set(),
+		};
+		const { roots, aliases, declarations } = references;
+		const names = new Set();
+		for (const { decl, bindings } of declarators) {
+			const init = unwrap(decl.init);
+			const binding = bindings[0]?.binding;
+			if (decl.id?.type === 'Identifier' && binding && !binding.reassigned) {
+				if (init?.type === 'CallExpression' && callNames.get(init) === 'useRef') {
+					roots.add(binding);
+					declarations.set(decl.id, binding);
+					names.add(binding.name);
+				}
+			}
+		}
+		// Stable aliases share their root's classification.
+		for (let changed = roots.size !== 0; changed;) {
+			changed = false;
+			for (const { decl, bindings } of declarators) {
+				const init = unwrap(decl.init);
+				const binding = bindings[0]?.binding;
+				if (
+					decl.id?.type !== 'Identifier' ||
+					!binding ||
+					binding.reassigned ||
+					aliases.has(binding) ||
+					roots.has(binding) ||
+					init?.type !== 'Identifier'
+				) {
+					continue;
+				}
+				const target = bindingOf(init);
+				const root = target && (aliases.get(target) ?? (roots.has(target) ? target : null));
+				if (root) {
+					aliases.set(binding, root);
+					declarations.set(decl.id, root);
+					names.add(binding.name);
+					changed = true;
+				}
+			}
+		}
+		const parents = [];
+		const visit = (node) => {
+			if (node == null || typeof node !== 'object') return;
+			if (Array.isArray(node)) {
+				for (const child of node) visit(child);
+				return;
+			}
+			if (node.type === 'Identifier' && names.has(node.name)) classify(node, parents);
+			parents.push(node);
+			for (const key in node) {
+				if (!SKIP_KEYS.has(key) && !key.startsWith('_octane')) visit(node[key]);
+			}
+			parents.pop();
+		};
+		visit(ast);
+		return references;
+	}
+
+	function classify(identifier, parents) {
+		const binding = bindingOf(identifier);
+		if (!binding) return;
+		const root =
+			references.aliases.get(binding) ?? (references.roots.has(binding) ? binding : null);
+		if (root === null) return;
+		let child = identifier;
+		let index = parents.length - 1;
+		while (index >= 0 && TRANSPARENT.has(parents[index].type)) child = parents[index--];
+		const parent = parents[index];
+		if (parent === undefined) return;
+		switch (parent.type) {
+			case 'MemberExpression':
+				// Reading or writing a property does not share the ref object.
+				if (parent.object === child || (parent.property === child && !parent.computed)) return;
+				break;
+			case 'Property':
+			case 'MethodDefinition':
+			case 'PropertyDefinition':
+				if (parent.key === child && !parent.computed && parent.shorthand !== true) return;
+				break;
+			case 'VariableDeclarator':
+				// A stable alias is classified with its root; destructuring reads properties.
+				if (parent.id === child || parent.id?.type === 'ObjectPattern') return;
+				if (references.declarations.has(parent.id)) return;
+				break;
+			case 'LabeledStatement':
+			case 'BreakStatement':
+			case 'ContinueStatement':
+				return;
+			case 'ArrayExpression': {
+				// A dependency list is not a use of the ref's identity.
+				const call = parents[index - 1];
+				const position = DEPENDENCY_ARGUMENTS.get(callNames.get(call));
+				if (position !== undefined && call.arguments?.[position] === parent) return;
+				break;
+			}
+		}
+		references.escaped.add(root);
+	}
+
 	return {
 		// Effect lifecycle state. Guards are structured; the flow segment and the
 		// promise sources change only at yields and are restored per function.
@@ -596,6 +725,16 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 		},
 		zeroDelayAwait(argument) {
 			return nonPromise(argument) || zeroDelayPromise(argument);
+		},
+		// A useRef whose identity never leaves property accesses and stable
+		// aliases holds a plain value, not an attached element or instance.
+		isValueRef(declaration) {
+			const info = refs();
+			const root = info.declarations.get(declaration);
+			return root !== undefined && !info.escaped.has(root);
+		},
+		hiddenDependency(node, kind) {
+			report(STRONG_EFFECT_HIDDEN_DEPENDENCY, node, HIDDEN_MESSAGES[kind]);
 		},
 	};
 }

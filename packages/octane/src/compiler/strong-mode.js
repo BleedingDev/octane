@@ -9,7 +9,7 @@ import { analyzeNativeChangeDiagnostics } from './native-change-diagnostics.js';
 import { createStrongTemplatePolicy } from './strong-template-policy.js';
 import { createStrongEffectPolicy } from './strong-effects.js';
 
-export { STRONG_EFFECT_DATA_FETCH } from './strong-effects.js';
+export { STRONG_EFFECT_DATA_FETCH, STRONG_EFFECT_HIDDEN_DEPENDENCY } from './strong-effects.js';
 
 const STATE_HOOKS = new Set(['useState', 'useReducer', 'useLinkedState']);
 const EFFECT_HOOKS = new Set(['useEffect', 'useLayoutEffect', 'useInsertionEffect']);
@@ -2529,7 +2529,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				initial?.type === 'CallExpression' &&
 				importedHook(initial.callee, scope) === 'useRef'
 			) {
-				bind(declaration.id, { kind: 'ref' });
+				bind(declaration.id, { kind: 'ref', declaration: declaration.id });
 			} else if (declarationKind === 'const' && transitionStart(initial, scope)) {
 				target.bindings.set(declaration.id.name, TRANSITION_START_BINDING);
 			} else if (declarationKind === 'const' && stateTupleUpdater(initial, scope)) {
@@ -2824,6 +2824,20 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		// Visiting a local call records what it returned; bind that provenance.
 		if (callShapes.has(unwrap(declaration.init))) {
 			bindDeclarationValue(declaration, declarationKind, scope);
+		}
+		if (
+			hiddenEffectRead(phase) &&
+			declaration.id?.type === 'ObjectPattern' &&
+			declaration.id.properties?.some(
+				(property) =>
+					property.type === 'RestElement' ||
+					(property.computed
+						? staticPrimitiveValue(property.key, scope)
+						: (property.key?.name ?? property.key?.value)) === 'current',
+			) &&
+			valueRefRead(declaration.init, scope)
+		) {
+			effectPolicy.hiddenDependency(unwrap(declaration.init), 'ref');
 		}
 		return visitPatternExpressions(
 			declaration.id,
@@ -3615,6 +3629,29 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		);
 	}
 
+	// Synchronous effect setup must not read inputs that dependency inference
+	// cannot see. Effect Events are the declared non-reactive escape.
+	function hiddenEffectRead(phase) {
+		return phase === 'effect' && currentEffect !== null && collectEffectReads;
+	}
+
+	// Compound assignments and updates read their target before writing it.
+	function reportHiddenUpdateRead(target, scope, phase) {
+		if (!hiddenEffectRead(phase)) return;
+		const node = unwrap(target);
+		if (node?.type === 'Identifier' && mutableModuleRead(node.name, scope)) {
+			effectPolicy.hiddenDependency(node, 'module');
+		} else if (readCurrentRef(node, scope) && valueRefRead(node.object, scope)) {
+			effectPolicy.hiddenDependency(node, 'ref');
+		}
+	}
+
+	function valueRefRead(object, scope) {
+		const node = unwrap(object);
+		const binding = node?.type === 'Identifier' ? resolve(scope, node.name) : null;
+		return binding?.kind === 'ref' && effectPolicy.isValueRef(binding.declaration);
+	}
+
 	function visitExplicitStateDependencies(expression, scope, dependencies) {
 		const node = unwrap(expression);
 		if (node?.type === 'ArrayExpression') {
@@ -3808,8 +3845,9 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				if (phase === 'deferred') effectPolicy.continuationWrite(currentEffect, origin);
 			}
 			if (phase === 'render' || phase === 'effect') reportSetter(origin, phase);
-		} else if (value?.kind === 'getter' && phase === 'render' && currentFunctionChecksRenderReads) {
-			reportStateGetterCall(origin);
+		} else if (value?.kind === 'getter') {
+			if (phase === 'render' && currentFunctionChecksRenderReads) reportStateGetterCall(origin);
+			else if (hiddenEffectRead(phase)) effectPolicy.hiddenDependency(origin, 'getter');
 		}
 	}
 
@@ -4028,6 +4066,9 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 					mutableModuleRead(node.name, scope)
 				) {
 					reportModuleStateRead(node);
+				}
+				if (readAccess && hiddenEffectRead(phase) && mutableModuleRead(node.name, scope)) {
+					effectPolicy.hiddenDependency(node, 'module');
 				}
 				return;
 			case 'JSXOpeningElement': {
@@ -4262,6 +4303,14 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				if (readAccess && collectEffectReads && currentEffect !== null) {
 					const snapshot = snapshotBinding(node, scope);
 					if (snapshot?.state) currentEffect.reads.add(snapshot.state);
+				}
+				if (
+					readAccess &&
+					hiddenEffectRead(phase) &&
+					readCurrentRef(node, scope) &&
+					valueRefRead(node.object, scope)
+				) {
+					effectPolicy.hiddenDependency(node, 'ref');
 				}
 				return;
 			}
@@ -4643,6 +4692,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				) {
 					reportModuleStateRead(unwrap(node.left));
 				}
+				if (node.operator !== '=') reportHiddenUpdateRead(node.left, scope, phase);
 				return;
 			}
 			case 'UpdateExpression':
@@ -4664,6 +4714,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 					reportModuleStateRead(unwrap(node.argument));
 				}
 				if (phase === 'render' && currentRef(node.argument, scope)) reportRef(node.argument);
+				reportHiddenUpdateRead(node.argument, scope, phase);
 				visit(node.argument, scope, phase, false);
 				if (phaseAfter(node.argument, phase, true) === 'render') {
 					reportSnapshotWrite(node.argument, scope);

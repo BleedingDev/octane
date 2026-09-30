@@ -7,6 +7,7 @@ const FETCH = 'OCTANE_STRONG_EFFECT_DATA_FETCH';
 const CHAIN = 'OCTANE_STRONG_EFFECT_CHAIN';
 const PROPS = 'OCTANE_STRONG_UNLINKED_PROP_STATE';
 const UPDATE = 'OCTANE_STRONG_EFFECT_STATE_UPDATE';
+const HIDDEN = 'OCTANE_STRONG_EFFECT_HIDDEN_DEPENDENCY';
 const component = (setup: string, params = 'props') => `
 import { useState, useReducer, useLinkedState, useEffect, useLayoutEffect, useInsertionEffect, useEffectEvent, useRef } from 'octane';
 export function App(${params}) @{
@@ -837,6 +838,13 @@ export function App(props) @{
 			app(hooks, `const [value, setValue] = useThing(); setValue(1);`),
 			'OCTANE_STRONG_RENDER_STATE_UPDATE',
 		);
+		rejects(
+			app(
+				hooks,
+				`const [value, setValue, getValue] = useThing(); useEffect(() => { props.log(getValue()); });`,
+			),
+			HIDDEN,
+		);
 	});
 
 	it.each([
@@ -881,6 +889,190 @@ function useThing() { return useState(0); }
 export function A({ v }) { const [x, setX] = useThing(); useEffect(() => { setX(v); }); return <p>{x}</p>; }`;
 		expect(() => compile(tsx, '/src/A.tsx')).toThrow(UPDATE);
 		expect(() => compile(tsx.replace('"use strong";', ''), '/src/A.tsx')).not.toThrow();
+	});
+});
+
+describe('Strong hidden effect dependencies', () => {
+	const app = (setup: string, output = '<div />', moduleSetup = '') => `
+import * as Octane from 'octane';
+import { useState, useEffect, useLayoutEffect, useInsertionEffect, useRef, useEffectEvent } from 'octane';
+import { measure } from './measure';
+${moduleSetup}
+export function App(props) @{
+  const [count, setCount, getCount] = useState(0);
+  ${setup}
+  ${output}
+}`;
+
+	it.each([
+		['a state getter', `useEffect(() => { props.log(getCount()); });`],
+		[
+			'a tuple getter index',
+			`const state = useState(0); useEffect(() => { props.log(state[2]()); });`,
+		],
+		['a getter alias', `const read = getCount; useEffect(() => { props.log(read()); });`],
+		[
+			'a getter in a helper',
+			`const read = () => getCount(); useEffect(() => { props.log(read()); });`,
+		],
+		[
+			'a getter in a zero-delay callback',
+			`useEffect(() => { queueMicrotask(() => props.log(getCount())); });`,
+		],
+		['a getter in a layout effect', `useLayoutEffect(() => { props.log(getCount()); });`],
+		['a getter in an insertion effect', `useInsertionEffect(() => { props.log(getCount()); });`],
+		[
+			'a previous-value ref',
+			`const last = useRef(0); useEffect(() => { props.log(last.current); last.current = count; });`,
+		],
+		[
+			'a first-run guard',
+			`const first = useRef(true); useEffect(() => { if (first.current) { first.current = false; return; } props.track(props.value); });`,
+		],
+		[
+			'a destructured ref',
+			`const last = useRef(0); useEffect(() => { const { current } = last; props.log(current); });`,
+		],
+		[
+			'a ref alias',
+			`const last = useRef(0); const alias = last; useEffect(() => { props.log(alias.current); });`,
+		],
+		[
+			'a ref read in a helper',
+			`const last = useRef(0); const read = () => last.current; useEffect(() => { props.log(read()); });`,
+		],
+		['a compound ref update', `const runs = useRef(0); useEffect(() => { runs.current += 1; });`],
+		['a ref increment', `const runs = useRef(0); useEffect(() => { runs.current++; });`],
+		[
+			'an optional ref read',
+			`const last = useRef(0); useEffect(() => { props.log(last?.current); });`,
+		],
+		[
+			'a computed ref read',
+			`const last = useRef(0); useEffect(() => { props.log(last['current']); });`,
+		],
+		[
+			'a namespace ref',
+			`const last = Octane.useRef(0); useEffect(() => { props.log(last.current); });`,
+		],
+	])('rejects %s in effect setup', (_label, setup) => {
+		rejects(app(setup), HIDDEN);
+	});
+
+	it.each([
+		[
+			'a didInit guard',
+			`useEffect(() => { if (didInit) return; didInit = true; props.init(); });`,
+			'let didInit = false;',
+		],
+		[
+			'a previous-value module variable',
+			`useEffect(() => { props.log(last); last = count; });`,
+			'let last = 0;',
+		],
+		['a module counter', `useEffect(() => { runs++; });`, 'let runs = 0;'],
+		[
+			'a module read in a helper',
+			`useEffect(() => { props.log(readLast()); });`,
+			'let last = 0; function readLast() { return last; } export function bump() { last++; }',
+		],
+	])('rejects %s in effect setup', (_label, setup, moduleSetup) => {
+		rejects(app(setup, '<div />', moduleSetup), HIDDEN);
+	});
+
+	it('does not treat a dependency list as attaching a ref', () => {
+		expect(
+			errors(app(`const last = useRef(0); useEffect(() => { props.log(last.current); }, [last]);`)),
+		).toContain(HIDDEN);
+	});
+
+	it.each([
+		['ref writes', `const last = useRef(0); useEffect(() => { last.current = count; });`],
+		[
+			'an element ref',
+			`const element = useRef(null); useEffect(() => { element.current.focus(); });`,
+			'<div ref={element} />',
+		],
+		[
+			'an element ref in an array',
+			`const element = useRef(null); useEffect(() => { props.log(element.current); });`,
+			'<div ref={[element, props.forwarded]} />',
+		],
+		[
+			'a ref passed to a component',
+			`const element = useRef(null); useEffect(() => { props.log(element.current); });`,
+			'<props.Input inputRef={element} />',
+		],
+		[
+			'a ref passed to a call',
+			`const element = useRef(null); useEffect(() => { measure(element); props.log(element.current); });`,
+		],
+		[
+			'a ref attached through a reassignable alias',
+			`const element = useRef(null); let target = element; if (props.other) target = props.other; useEffect(() => { props.log(element.current); });`,
+			'<div ref={target} />',
+		],
+		[
+			'a ref held in a container',
+			`const refs = [useRef(0)]; useEffect(() => { props.log(refs[0].current); });`,
+		],
+		[
+			'a ref read in cleanup',
+			`const last = useRef(0); useEffect(() => { return () => props.log(last.current); });`,
+		],
+		[
+			'a ref read in a subscription',
+			`const last = useRef(0); useEffect(() => props.subscribe(() => props.log(last.current)));`,
+		],
+		[
+			'a ref read in an Effect Event',
+			`const last = useRef(0); const report = useEffectEvent((next) => { props.log(last.current); last.current = next; }); useEffect(() => { report(count); });`,
+		],
+		[
+			'a getter in an Effect Event',
+			`const read = useEffectEvent(() => props.log(getCount())); useEffect(() => { read(); });`,
+		],
+		['a getter in cleanup', `useEffect(() => { return () => { props.log(getCount()); }; });`],
+		['a snapshot', `useEffect(() => { props.log(count); });`],
+		['a shadowed getter', `useEffect(() => { const getCount = () => 1; props.log(getCount()); });`],
+		[
+			'a local first-run flag',
+			`useEffect(() => { let didInit = false; if (didInit) return; didInit = true; });`,
+		],
+	])('keeps %s legal', (_label, setup, output = '<div />') => {
+		accepts(app(setup, output));
+	});
+
+	it.each([
+		['an unreassigned module let', 'let LIMIT = 10;'],
+		['a module constant', 'const LIMIT = 10;'],
+	])('keeps %s legal', (_label, moduleSetup) => {
+		accepts(app(`useEffect(() => { props.log(LIMIT); });`, '<div />', moduleSetup));
+	});
+
+	it('enforces TSX components and plain TypeScript custom hooks', () => {
+		const tsx = `"use strong";
+import { useState, useEffect, useRef } from 'octane';
+export function A({ log }) { const [c, setC] = useState(0); const last = useRef(0); useEffect(() => { log(last.current); last.current = c; }); return <button onClick={() => setC(c + 1)}>{c}</button>; }`;
+		expect(() => compile(tsx, '/src/A.tsx')).toThrow(HIDDEN);
+		const ts = `"use strong";
+import { useRef, useEffect } from 'octane';
+export function usePreviousLog(value, log) { const last = useRef(value); useEffect(() => { log(last.current); last.current = value; }); }`;
+		expect(() => slotHooks(ts, '/src/use-previous-log.ts')).toThrow(HIDDEN);
+	});
+
+	it('names the snapshot and Effect Event replacements', () => {
+		const result = compileToVolarMappings(
+			app(
+				`const first = useRef(true); useEffect(() => { if (first.current) { first.current = false; return; } props.track(props.value); });`,
+			),
+			'/src/App.tsrx',
+			{ strong: true },
+		);
+		const error = result.diagnostics.find((diagnostic) => diagnostic.code === HIDDEN);
+		expect(error?.message).toContain('useEffectEvent');
+		expect(error?.message).toContain('never double-invokes');
+		expect(error?.start.line).toBe(8);
 	});
 });
 
@@ -955,9 +1147,9 @@ export function App(props) @{
 		const lines = Object.fromEntries(
 			result.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.start.line]),
 		);
-		expect(lines).toEqual({ [UPDATE]: 7, [FETCH]: 8 });
+		expect(lines).toEqual({ [UPDATE]: 7, [FETCH]: 8, [HIDDEN]: 9 });
 		expect(result.errors.map((error) => error.code)).toEqual(
-			expect.arrayContaining([UPDATE, FETCH]),
+			expect.arrayContaining([UPDATE, FETCH, HIDDEN]),
 		);
 	});
 });
