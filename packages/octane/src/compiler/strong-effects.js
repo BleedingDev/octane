@@ -686,10 +686,14 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 			case 'ContinueStatement':
 				return;
 			case 'ArrayExpression': {
-				// A dependency list is not a use of the ref's identity.
-				const call = parents[index - 1];
+				// A dependency list is not a use of the ref's identity, even when it
+				// is parenthesized or cast.
+				let list = parent;
+				let at = index - 1;
+				while (at >= 0 && TRANSPARENT.has(parents[at].type)) list = parents[at--];
+				const call = parents[at];
 				const position = DEPENDENCY_ARGUMENTS.get(callNames.get(call));
-				if (position !== undefined && call.arguments?.[position] === parent) return;
+				if (position !== undefined && call.arguments?.[position] === list) return;
 				break;
 			}
 		}

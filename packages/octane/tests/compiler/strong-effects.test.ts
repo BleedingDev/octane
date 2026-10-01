@@ -1062,9 +1062,18 @@ export function App(props) @{
 		rejects(app(setup, '<div />', moduleSetup), HIDDEN);
 	});
 
-	it('does not treat a dependency list as attaching a ref', () => {
+	it.each([
+		['a dependency list', '[last]'],
+		['a parenthesized dependency list', '([last])'],
+		['a cast dependency list', '[last] as const'],
+		['a satisfies dependency list', '[last] satisfies unknown[]'],
+	])('does not treat %s as attaching a ref', (_label, dependencies) => {
 		expect(
-			errors(app(`const last = useRef(0); useEffect(() => { props.log(last.current); }, [last]);`)),
+			errors(
+				app(
+					`const last = useRef(0); useEffect(() => { props.log(last.current); }, ${dependencies});`,
+				),
+			),
 		).toContain(HIDDEN);
 	});
 
