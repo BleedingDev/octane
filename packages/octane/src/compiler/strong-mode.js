@@ -4614,7 +4614,8 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 					// Deferred code can reach a state update through a local helper, and
 					// any helper can write to a state value passed to it, directly or
 					// through its tuple. An Effect Event reads the latest committed
-					// values, so it is followed only for the state it receives.
+					// values, so it is followed only for the state it receives, and its
+					// body runs as a synchronous callback rather than deferred code.
 					let callback = callableValue(callee, scope);
 					const effectEvent = callback?.kind === 'effect-event';
 					if (effectEvent) callback = callback.callback;
@@ -4624,7 +4625,7 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 							(executionPhase === 'deferred' && !effectEvent) ||
 							args?.some((value) => value?.kind === 'snapshot' || value?.kind === 'state-tuple')
 						) {
-							visitCallable(callback, callee, executionPhase, args);
+							visitCallable(callback, callee, effectEvent ? 'event' : executionPhase, args);
 						}
 					}
 				}
