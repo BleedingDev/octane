@@ -252,6 +252,9 @@ A Strong module cannot:
 - Read a `useRef` object's `current` while rendering
   (`OCTANE_STRONG_RENDER_REF_READ`). Keep refs as `ref` props and read them in
   events or effects; use state for values that drive render output.
+- Write through a ref to children, a class, an attribute, or a `style` property
+  that the template sets on that element (`OCTANE_STRONG_MANAGED_DOM_WRITE`), or
+  write raw HTML to a rendered element (`OCTANE_STRONG_RAW_HTML_WRITE`).
 - Call a statically known `useEffectEvent` result during render
   (`OCTANE_STRONG_RENDER_EFFECT_EVENT_CALL`).
 - Include a statically known Effect Event in explicit hook dependencies
