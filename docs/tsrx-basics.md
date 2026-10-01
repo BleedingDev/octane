@@ -851,7 +851,8 @@ These patterns become compile errors:
   same-module custom hook, and callbacks that run before the next paint:
   `startTransition`, a `useTransition` start function, `queueMicrotask`,
   `Promise.resolve().then`, a `setTimeout` without a positive delay, and code
-  after awaiting a value that is not a pending promise.
+  after an `await` that resumes without waiting on any path, such as
+  `await (flag ? load() : null)`.
 - Calling a known third-tuple state getter during render
   (`OCTANE_STRONG_RENDER_STATE_GETTER_CALL`). Render from the first tuple member;
   read the latest scheduled state in an event, effect, or deferred callback.

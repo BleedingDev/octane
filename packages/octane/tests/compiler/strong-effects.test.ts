@@ -531,6 +531,43 @@ export function App(props) @{
 			'a conditional settled promise',
 			`useEffect(() => { (props.flag ? Promise.resolve() : Promise.reject()).catch(() => ${write}); });`,
 		],
+		// Like \`if (flag) await work;\`, one path that resumes before paint is enough.
+		[
+			'an await whose other branch is settled',
+			`useEffect(() => { (async () => { await (props.flag ? Promise.resolve() : props.pending); ${write}; })(); });`,
+		],
+		[
+			'an await of pending work or null',
+			`useEffect(() => { (async () => { await (props.flag ? props.pending : null); ${write}; })(); });`,
+		],
+		[
+			'an await whose other branch awaits',
+			`useEffect(() => { (async () => { await (props.flag ? await props.load() : null); ${write}; })(); });`,
+		],
+		[
+			'an await with a settled fallback',
+			`useEffect(() => { (async () => { await (props.pending || null); ${write}; })(); });`,
+		],
+		[
+			'a stored conditional value',
+			`useEffect(() => { (async () => { const ready = props.flag ? props.pending : null; await ready; ${write}; })(); });`,
+		],
+		[
+			'a promise that may already be settled',
+			`useEffect(() => { (props.flag ? Promise.resolve() : props.pending).then(() => ${write}); });`,
+		],
+		[
+			'an await that a literal operand settles',
+			`useEffect(() => { (async () => { await (null && props.pending); ${write}; })(); });`,
+		],
+		[
+			'an await that a literal test settles',
+			`useEffect(() => { (async () => { await (false ? props.pending : 0); ${write}; })(); });`,
+		],
+		[
+			'a settled promise of a literal operand',
+			`useEffect(() => { Promise.resolve(null && props.pending).then(() => ${write}); });`,
+		],
 		['an async effect callback', `useEffect(async () => { await null; ${write}; });`],
 		[
 			'a local deferral helper',
@@ -564,8 +601,12 @@ export function App(props) @{
 			`useEffect(() => { let active = true; (async () => { await (true ? await props.load() : null); if (active) ${write}; })(); return () => { active = false; }; });`,
 		],
 		[
-			'a conditional await that may be pending',
-			`useEffect(() => { (async () => { await (props.flag ? Promise.resolve() : props.pending); ${write}; })(); });`,
+			'an await that an undefined operand always runs',
+			`useEffect(() => { let active = true; (async () => { await (undefined ?? (await props.load())); if (active) ${write}; })(); return () => { active = false; }; });`,
+		],
+		[
+			'a conditional await whose every branch waits',
+			`useEffect(() => { let active = true; (async () => { await (props.flag ? await props.load() : props.pending); if (active) ${write}; })(); return () => { active = false; }; });`,
 		],
 		['a string timer', `useEffect(() => { setTimeout('tick()', 0); });`],
 		['an external subscription', `useEffect(() => props.subscribe(() => ${write}));`],
@@ -740,6 +781,21 @@ export function App(props) @{
 			`function useStart() { const [, start] = useTransition(); return start; }`,
 			`const [value, setValue] = useState(0); const start = useStart(); useEffect(() => { start(() => setValue(props.value)); });`,
 		],
+		[
+			'a returned transition tuple',
+			`function useStart() { return useTransition(); }`,
+			`const [value, setValue] = useState(0); const [, start] = useStart(); useEffect(() => { start(() => setValue(props.value)); });`,
+		],
+		[
+			'a returned transition tuple binding',
+			`function useStart() { const transition = useTransition(); return transition; }`,
+			`const [value, setValue] = useState(0); const transition = useStart(); useEffect(() => { transition[1](() => setValue(props.value)); });`,
+		],
+		[
+			'a direct returned transition index',
+			`function useStart() { return useTransition(); }`,
+			`const [value, setValue] = useState(0); useEffect(() => { useStart()[1](() => setValue(props.value)); });`,
+		],
 	])('follows %s', (_label, hooks, setup) => {
 		rejects(app(hooks, setup), UPDATE);
 	});
@@ -789,6 +845,43 @@ export function App(props) @{
 		],
 	])('does not invent state for %s', (_label, hooks, setup) => {
 		accepts(app(hooks, setup));
+	});
+
+	it('gives each call of a custom hook its own state', () => {
+		const counter = `function useCounter() { const [count, setCount] = useState(0); return [() => count, setCount]; }`;
+		const calls = (hook: string, write: string, read: string) =>
+			`const [readFirst, setFirst] = ${hook}(); const [readSecond, setSecond] = ${hook}(); ${guardedWrite(write)} useEffect(() => { consume(${read}()); });`;
+		expect(
+			errors(app(counter, calls('useCounter', 'setFirst(value)', 'readSecond'))),
+		).not.toContain(CHAIN);
+		expect(errors(app(counter, calls('useCounter', 'setFirst(value)', 'readFirst')))).toContain(
+			CHAIN,
+		);
+		const outer = `${counter} function useOuter() { return useCounter(); }`;
+		expect(errors(app(outer, calls('useOuter', 'setFirst(value)', 'readSecond')))).not.toContain(
+			CHAIN,
+		);
+		expect(errors(app(outer, calls('useOuter', 'setFirst(value)', 'readFirst')))).toContain(CHAIN);
+		// A value the hook received keeps the caller's state.
+		expect(
+			errors(
+				app(
+					`function usePass(update) { return update; }`,
+					`const [first, setFirst] = useState(0); const update = usePass(setFirst); ${guardedWrite('update(value)')} useEffect(() => { consume(first); });`,
+				),
+			),
+		).toContain(CHAIN);
+	});
+
+	it('keeps updater checks on custom-hook state', () => {
+		expect(
+			errors(
+				app(
+					`function useCount() { return useState(0); }`,
+					`const [count, setCount] = useCount(); const onClick = () => setCount((current) => { fetch('/log'); return current + 1; });`,
+				),
+			),
+		).toContain('OCTANE_STRONG_IMPURE_UPDATER');
 	});
 
 	it('follows same-module hooks in plain TypeScript and TSX', () => {
