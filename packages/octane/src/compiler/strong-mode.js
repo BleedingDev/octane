@@ -2297,8 +2297,10 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				const defaultValue = usesDefault
 					? expressionBinding(parameter.right, parameterScope)
 					: null;
+				// A default replaces only `undefined`; otherwise the parameter is the
+				// state value the updater, reducer, or helper received.
 				value =
-					value?.kind === 'prop'
+					value?.kind === 'prop' || value?.kind === 'snapshot'
 						? value
 						: value.kind === 'constant' && value.primitive === undefined
 							? defaultValue
@@ -2328,14 +2330,9 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				bindStateGetterPattern(parameter, value, parameterScope, bindGetter);
 				bindAmbientPattern(parameter, value, parameterScope, bindGetter);
 				if (value?.kind === 'prop') bindPropPattern(parameter, bindGetter);
-				if (value?.kind === 'snapshot' && parameter.type !== 'Identifier') {
-					bindSnapshotPattern(
-						parameter,
-						value,
-						bindGetter,
-						snapshotPatternProperty(parameterScope),
-					);
-				}
+			}
+			if (value?.kind === 'snapshot' && parameter.type !== 'Identifier') {
+				bindSnapshotPattern(parameter, value, bindGetter, snapshotPatternProperty(parameterScope));
 			}
 			if (parameter.type === 'Identifier' && !isReassigned(parameter)) {
 				parameterScope.bindings.set(parameter.name, value);
@@ -4561,11 +4558,15 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 						);
 					}
 				} else if (hook === null) {
-					// Any helper can write to a state value passed to it.
-					const callback = callableValue(callee, scope);
+					// Any helper can write to a state value passed to it, directly or
+					// through its tuple, including an Effect Event called outside render.
+					let callback = callableValue(callee, scope);
+					if (callback?.kind === 'effect-event') callback = callback.callback;
 					if (callback?.kind === 'callback' || callback?.kind === 'callback-choice') {
 						const args = argumentValues(node.arguments, scope);
-						if (args?.some((value) => value?.kind === 'snapshot')) {
+						if (
+							args?.some((value) => value?.kind === 'snapshot' || value?.kind === 'state-tuple')
+						) {
 							visitCallable(callback, callee, executionPhase, args);
 						}
 					}
