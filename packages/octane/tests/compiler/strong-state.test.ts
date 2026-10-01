@@ -3,8 +3,11 @@ import { compile } from '../../src/compiler/compile.js';
 import { slotHooks } from '../../src/compiler/slot-hooks.js';
 import { compileToVolarMappings } from '../../src/compiler/volar.js';
 
+const IMPURE_UPDATER = 'OCTANE_STRONG_IMPURE_UPDATER';
 const SNAPSHOT_MUTATION = 'OCTANE_STRONG_SNAPSHOT_MUTATION';
 const RENDER_SNAPSHOT_MUTATION = 'OCTANE_STRONG_RENDER_SNAPSHOT_MUTATION';
+const STALE_STATE_UPDATE = 'OCTANE_STRONG_STALE_STATE_UPDATE';
+const WRITE_ONLY_STATE = 'OCTANE_STRONG_WRITE_ONLY_STATE';
 
 const IMPORTS =
 	"import { useState, useReducer, useLinkedState, useEffect, useRef, useSyncExternalStore, useOptimistic, useEffectEvent } from 'octane';";
@@ -60,7 +63,7 @@ it('does not mistake receivers named after Object.prototype members for known gl
 			tsx(`export function A({ value }) {
   const [items, setItems] = useState([]);
   return (
-    <b onClick={() => { toString.call(items); hasOwnProperty.call(items, 'length'); setItems([...items]); }}>
+    <b onClick={() => { toString.call(items); hasOwnProperty.call(items, 'length'); setItems((current) => valueOf.call(current)); }}>
       {items.length}
       {String(value)}
     </b>
@@ -68,6 +71,237 @@ it('does not mistake receivers named after Object.prototype members for known gl
 }`),
 		),
 	).toBeNull();
+});
+
+describe('Strong pure updaters and reducers', () => {
+	it.each([
+		[
+			'fetch in an inline updater',
+			`export function A() { const [n, setN] = useState(0); return <button onClick={() => setN(p => { fetch('/log'); return p + Date.now(); })}>{n}</button>; }`,
+		],
+		[
+			'fetch in an inline reducer',
+			`export function A() { const [s, d] = useReducer((s, a) => { fetch('/log'); return { ...s, t: Date.now() }; }, {}); return <button onClick={() => d(1)}>{String(s.t)}</button>; }`,
+		],
+		[
+			'Date.now() in an inline updater',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => p + Date.now())}>{n}</b>; }`,
+		],
+		[
+			'Math.random() in an inline updater',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => p + Math.random())}>{n}</b>; }`,
+		],
+		[
+			'performance.now() in an inline updater',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => p + performance.now())}>{n}</b>; }`,
+		],
+		[
+			'new Date() in a reducer',
+			`export function A() { const [s, d] = useReducer((s, a) => ({ ...s, at: new Date() }), {}); return <b onClick={() => d(1)}>{String(s.at)}</b>; }`,
+		],
+		[
+			'a browser global read',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => p + window.innerWidth)}>{n}</b>; }`,
+		],
+		[
+			'a ref read',
+			`export function A() { const [n, setN] = useState(0); const ref = useRef(0); return <b onClick={() => setN((p) => p + ref.current)}>{n}</b>; }`,
+		],
+		[
+			'a ref write',
+			`export function A() { const [n, setN] = useState(0); const ref = useRef(0); return <b onClick={() => setN((p) => { ref.current = p; return p + 1; })}>{n}</b>; }`,
+		],
+		[
+			'a nested state update',
+			`export function A() { const [n, setN] = useState(0); const [m, setM] = useState(0); return <b onClick={() => setN((p) => { setM(p); return p + 1; })}>{n}{m}</b>; }`,
+		],
+		[
+			'another state setter passed as the updater',
+			`export function A() { const [n, setN] = useState(0); const [m, setM] = useState(0); return <b onClick={() => setN(setM)}>{n}{m}</b>; }`,
+		],
+		[
+			'a state getter call',
+			`export function A() { const [n, setN] = useState(0); const [m, , getM] = useState(0); return <b onClick={() => setN((p) => p + getM())}>{n}{m}</b>; }`,
+		],
+		[
+			'an Effect Event call',
+			`export function A() { const [n, setN] = useState(0); const read = useEffectEvent(() => 1); return <b onClick={() => setN((p) => p + read())}>{n}</b>; }`,
+		],
+		[
+			'a reassigned module variable read',
+			`let counter = 0; export function bump() { counter++; } export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => p + counter)}>{n}</b>; }`,
+		],
+		[
+			'a scheduled promise callback',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => { Promise.resolve().then(() => {}); return p + 1; })}>{n}</b>; }`,
+		],
+		[
+			'a same-module updater declaration',
+			`function bump(p) { return p + Math.random(); } export function A() { const [n, setN] = useState(0); return <b onClick={() => setN(bump)}>{n}</b>; }`,
+		],
+		[
+			'a component-local updater constant',
+			`export function A() { const [n, setN] = useState(0); const bump = (p) => p + Date.now(); return <b onClick={() => setN(bump)}>{n}</b>; }`,
+		],
+		[
+			'a same-module reducer declaration',
+			`function reducer(state, action) { return { ...state, at: Date.now() }; } export function A() { const [s, d] = useReducer(reducer, {}); return <b onClick={() => d(1)}>{String(s.at)}</b>; }`,
+		],
+		[
+			'a same-module reducer constant',
+			`const reducer = (state, action) => { fetch('/log'); return state; }; export function A() { const [s, d] = useReducer(reducer, {}); return <b onClick={() => d(1)}>{String(s)}</b>; }`,
+		],
+		[
+			'a useLinkedState updater',
+			`export function A(props) { const [n, setN] = useLinkedState(props.value, (v) => v); return <b onClick={() => setN((p) => p + Date.now())}>{n}</b>; }`,
+		],
+		[
+			'a useOptimistic reducer',
+			`export function A() { const [list] = useState([]); const [shown, add] = useOptimistic(list, (current, item) => { fetch('/log'); return [...current, item]; }); return <b onClick={() => add(1)}>{shown.length}</b>; }`,
+		],
+		[
+			'an updater passed from an effect',
+			`export function A() { const [n, setN] = useState(0); useEffect(() => { const id = setInterval(() => setN((p) => p + Math.random()), 100); return () => clearInterval(id); }); return <b>{n}</b>; }`,
+		],
+	])('rejects %s', (_label, body) => {
+		expect(rejected(body)).toBe(IMPURE_UPDATER);
+	});
+
+	it.each([
+		[
+			'a setter alias',
+			`const update = setN; return <b onClick={() => update((p) => p + Date.now())}>{n}</b>;`,
+		],
+		[
+			'a tuple index',
+			`const tuple = [n, setN]; return <b onClick={() => setN((p) => p + Date.now())}>{tuple[0]}</b>;`,
+		],
+		['an optional call', `return <b onClick={() => setN?.((p) => p + Date.now())}>{n}</b>;`],
+		[
+			'a conditional setter choice',
+			`const [m, setM] = useState(0); return <b onClick={() => (m > 0 ? setN : setM)((p) => p + Date.now())}>{n}</b>;`,
+		],
+	])('follows %s', (_label, rest) => {
+		expect(rejected(`export function A() { const [n, setN] = useState(0); ${rest} }`)).toBe(
+			IMPURE_UPDATER,
+		);
+	});
+
+	it.each([
+		["import { useState as useCell } from 'octane';", 'useCell(0)'],
+		["import * as Octane from 'octane';", 'Octane.useState(0)'],
+		["import * as Octane from 'octane';", 'Octane?.useState(0)'],
+	])('recognizes %s', (imports, hook) => {
+		const body = `export function A() { const [n, setN] = ${hook}; return <b onClick={() => setN((p) => p + Date.now())}>{n}</b>; }`;
+		expect(rejected(body, imports)).toBe(IMPURE_UPDATER);
+		const tuple = `export function A() { const tuple = ${hook}; return <b onClick={() => tuple[1]((p) => p + Date.now())}>{tuple[0]}</b>; }`;
+		expect(rejected(tuple, imports)).toBe(IMPURE_UPDATER);
+	});
+
+	// The likely agent rewrites after the diagnostic names fetch or Date.now().
+	it.each([
+		[
+			'moving fetch into a helper',
+			`function log() { fetch('/log'); } export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => { log(); return p + 1; })}>{n}</b>; }`,
+		],
+		[
+			'moving the clock into a helper',
+			`function stamp() { return Date.now(); } export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => p + stamp())}>{n}</b>; }`,
+		],
+		[
+			'calling fetch through globalThis',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => { globalThis.fetch('/log'); return p + 1; })}>{n}</b>; }`,
+		],
+		[
+			'calling fetch through window',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => { window.fetch('/log'); return p + 1; })}>{n}</b>; }`,
+		],
+		[
+			'aliasing fetch',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => { const send = fetch; send('/log'); return p + 1; })}>{n}</b>; }`,
+		],
+		[
+			'deferring fetch with a timer',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => { setTimeout(() => fetch('/log'), 0); return p + 1; })}>{n}</b>; }`,
+		],
+		[
+			'deferring fetch with a microtask',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => { queueMicrotask(() => fetch('/log')); return p + 1; })}>{n}</b>; }`,
+		],
+	])('rejects the rewrite %s', (_label, body) => {
+		expect(rejected(body)).toBe(IMPURE_UPDATER);
+	});
+
+	it('keeps pure updaters, side effects in the handler, and shadowed names legal', () => {
+		expect(
+			strongCode(
+				tsx(`export function A({ step }) {
+  const [n, setN] = useState(0);
+  const [s, dispatch] = useReducer((state, action) => (typeof action === 'function' ? action(state) : action), 0);
+  return (
+    <b
+      onClick={() => {
+        fetch('/log');
+        const now = Date.now();
+        setN((p) => p + step + now);
+        setN((p) => { console.log(p); const fetch = () => 1; return p + fetch(); });
+        dispatch(() => Date.now());
+        const setLocal = (fn) => fn(0);
+        setLocal(() => Date.now());
+      }}
+    >
+      {n}
+      {s}
+    </b>
+  );
+}`),
+			),
+		).toBeNull();
+	});
+
+	it('checks .tsrx components and plain .ts custom hooks', () => {
+		const tsrx = `"use strong";
+import { useState } from 'octane';
+export function A() @{
+  const [n, setN] = useState(0);
+  <button onClick={() => setN((p) => p + Math.random())}>{n as string}</button>
+}`;
+		const hook = `"use strong";
+import { useReducer } from 'octane';
+export function useLog() {
+  const [entries, append] = useReducer((list, entry) => [...list, { entry, at: Date.now() }], []);
+  return [entries, append];
+}`;
+		expect(strongCode(tsrx, '/src/A.tsrx')).toBe(IMPURE_UPDATER);
+		expect(() => slotHooks(hook, '/src/useLog.ts')).toThrow(IMPURE_UPDATER);
+		expect(() => slotHooks(hook.replace('"use strong";\n', ''), '/src/useLog.ts')).not.toThrow();
+	});
+
+	it('explains the replay and names the replacement', () => {
+		const source = tsx(
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => setN((p) => p + Date.now())}>{n}</b>; }`,
+			IMPORTS,
+			true,
+		);
+		const diagnostic = volarDiagnostic(source, '/src/App.tsx', IMPURE_UPDATER);
+		expect(diagnostic.start.offset).toBe(source.indexOf('Date.now'));
+		expect(diagnostic.message).toContain('replay');
+		expect(diagnostic.message).toContain(
+			'const now = Date.now(); setValue((current) => current + now)',
+		);
+	});
+
+	it('preserves emitted client and server code for valid updaters and reducers', () => {
+		expectUnchangedOutput(
+			tsx(`function reducer(state, action) { return action.type === 'add' ? [...state, action.item] : state; }
+export function A({ step }) {
+  const [n, setN] = useState(0);
+  const [items, dispatch] = useReducer(reducer, []);
+  return <b onClick={() => { setN((p) => p + step); dispatch({ type: 'add', item: n }); }}>{items.length}</b>;
+}`),
+			'/src/App.tsx',
+		);
+	});
 });
 
 describe('Strong state mutation outside render', () => {
@@ -148,6 +382,22 @@ describe('Strong state mutation outside render', () => {
 			'a linked-state array',
 			`export function A(props) { const [items, setItems] = useLinkedState(props.id, () => []); return <b onClick={() => { items.push(1); setItems([...items]); }}>{items.length}</b>; }`,
 		],
+		[
+			'an updater that mutates the state it receives',
+			`export function A() { const [items, setItems] = useState([]); return <b onClick={() => setItems((prev) => { prev.push(1); return prev; })}>{items.length}</b>; }`,
+		],
+		[
+			'a destructured updater parameter',
+			`export function A() { const [s, setS] = useState({ list: [] }); return <b onClick={() => setS(({ list }) => { list.push(1); return { list }; })}>{s.list.length}</b>; }`,
+		],
+		[
+			'a reducer that mutates its state',
+			`function reducer(state, action) { state.list.push(action); return { ...state }; } export function A() { const [s, d] = useReducer(reducer, { list: [] }); return <b onClick={() => d(1)}>{s.list.length}</b>; }`,
+		],
+		[
+			'a useOptimistic reducer that mutates its base state',
+			`export function A() { const [s] = useState({ list: [] }); const [shown, add] = useOptimistic(s, (current, item) => { current.list.push(item); return current; }); return <b onClick={() => add(1)}>{shown.list.length}</b>; }`,
+		],
 	])('rejects %s', (_label, body) => {
 		expect(rejected(body)).toBe(SNAPSHOT_MUTATION);
 	});
@@ -169,6 +419,10 @@ describe('Strong state mutation outside render', () => {
 		[
 			'a helper that returns the mutated argument',
 			`function add(list, item) { list.push(item); return list; } export function A() { const [items, setItems] = useState([]); return <b onClick={() => setItems([...add(items, 1)])}>{items.length}</b>; }`,
+		],
+		[
+			'an updater that returns the same object',
+			`export function A() { const [items, setItems] = useState([]); return <b onClick={() => setItems((current) => { current.push(1); return current; })}>{items.length}</b>; }`,
 		],
 		[
 			'an optional call',
@@ -283,6 +537,325 @@ export function useList() {
 			tsx(`export function A() {
   const [items, setItems] = useState([]);
   return <b onClick={() => { setItems([...items, 1]); setItems((current) => current.concat(2)); }}>{items.length}</b>;
+}`),
+			'/src/App.tsx',
+		);
+	});
+});
+
+describe('Strong stale deferred state updates', () => {
+	it.each([
+		[
+			'an update after await',
+			`export function A({ save }) { const [n, setN] = useState(0); return <button onClick={async () => { await save(); setN(n + 1); }}>{n}</button>; }`,
+		],
+		[
+			'a timer callback',
+			`export function A() { const [n, setN] = useState(0); return <button onClick={() => setTimeout(() => setN(n + 1), 500)}>{n}</button>; }`,
+		],
+		[
+			'an object spread after await',
+			`export function A({ save }) { const [s, setS] = useState({ done: false }); return <b onClick={async () => { await save(); setS({ ...s, done: true }); }}>{String(s.done)}</b>; }`,
+		],
+		[
+			'a promise continuation',
+			`export function A({ load }) { const [items, setItems] = useState([]); return <b onClick={() => load().then((item) => setItems([...items, item]))}>{items.length}</b>; }`,
+		],
+		[
+			'a promise rejection handler',
+			`export function A({ load }) { const [errors, setErrors] = useState([]); return <b onClick={() => load().catch((error) => setErrors(errors.concat(error)))}>{errors.length}</b>; }`,
+		],
+		[
+			'an interval started by an effect',
+			`export function A() { const [n, setN] = useState(0); useEffect(() => { const id = setInterval(() => setN(n + 1), 1000); return () => clearInterval(id); }); return <b>{n}</b>; }`,
+		],
+		[
+			'an animation frame',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => requestAnimationFrame(() => setN(n + 1))}>{n}</b>; }`,
+		],
+		[
+			'a microtask',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => queueMicrotask(() => setN(n + 1))}>{n}</b>; }`,
+		],
+		[
+			'window.setTimeout',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => window.setTimeout(() => setN(n + 1), 500)}>{n}</b>; }`,
+		],
+		[
+			'a named timer callback',
+			`export function A() { const [n, setN] = useState(0); const tick = () => setN(n + 1); return <b onClick={() => setTimeout(tick, 500)}>{n}</b>; }`,
+		],
+		[
+			'a helper called after await',
+			`export function A({ save }) { const [n, setN] = useState(0); const bump = () => setN(n + 1); return <b onClick={async () => { await save(); bump(); }}>{n}</b>; }`,
+		],
+		[
+			'a helper receiving the snapshot after await',
+			`export function A({ save }) { const [n, setN] = useState(0); function apply(value) { setN(value + 1); } return <b onClick={async () => { await save(); apply(n); }}>{n}</b>; }`,
+		],
+		[
+			'an async effect continuation',
+			`export function A({ load }) { const [items, setItems] = useState([]); useEffect(() => { (async () => { const item = await load(); setItems([...items, item]); })(); }); return <b>{items.length}</b>; }`,
+		],
+		[
+			'a reducer dispatch after await',
+			`export function A({ save }) { const [s, d] = useReducer((s, a) => a, 0); return <b onClick={async () => { await save(); d(s + 1); }}>{s}</b>; }`,
+		],
+		[
+			'a setter alias with an optional call',
+			`export function A({ save }) { const [n, setN] = useState(0); const update = setN; return <b onClick={async () => { await save(); update?.(n + 1); }}>{n}</b>; }`,
+		],
+		[
+			'a tuple index',
+			`export function A({ save }) { const tuple = useState(0); return <b onClick={async () => { await save(); tuple[1](tuple[0] + 1); }}>{tuple[0]}</b>; }`,
+		],
+	])('rejects %s', (_label, body) => {
+		expect(rejected(body)).toBe(STALE_STATE_UPDATE);
+	});
+
+	// The likely rewrites after the diagnostic points at `n` after an await.
+	it.each([
+		['computing the next value before the await', `const next = n + 1; await save(); setN(next);`],
+		[
+			'copying the snapshot before the await',
+			`const current = n; await save(); setN(current + 1);`,
+		],
+		['an updater that ignores its argument', `await save(); setN(() => n + 1);`],
+		['an updater that adds the snapshot', `await save(); setN((p) => p + n);`],
+	])('rejects the rewrite %s', (_label, handler) => {
+		expect(
+			rejected(
+				`export function A({ save }) { const [n, setN] = useState(0); return <b onClick={async () => { ${handler} }}>{n}</b>; }`,
+			),
+		).toBe(STALE_STATE_UPDATE);
+	});
+
+	it.each([
+		["import { useState as useCell } from 'octane';", 'useCell(0)'],
+		["import * as Octane from 'octane';", 'Octane.useState(0)'],
+	])('recognizes %s', (imports, hook) => {
+		const body = `export function A() { const [n, setN] = ${hook}; return <b onClick={() => setTimeout(() => setN(n + 1))}>{n}</b>; }`;
+		expect(rejected(body, imports)).toBe(STALE_STATE_UPDATE);
+	});
+
+	it('keeps synchronous updates, updaters, getters, and fresh values legal', () => {
+		expect(
+			strongCode(
+				tsx(`export function A({ save, maybe, subscribe }) {
+  const [n, setN, getN] = useState(0);
+  const [m, setM] = useState(0);
+  useEffect(() => subscribe(() => setN(n + 1)));
+  return (
+    <b
+      onClick={async () => {
+        setN(n + 1);
+        [1, 2].forEach((step) => setN(n + step));
+        { const setTimeout = (fn) => fn(); setTimeout(() => setN(n + 1)); }
+        if (maybe) await save();
+        setN(n + 1);
+        const data = await save();
+        setN((p) => p + 1);
+        setN(getN() + 1);
+        setN(data);
+        setM(n + 1);
+        setTimeout(() => setN((p) => p + 1));
+      }}
+    >
+      {n}
+      {m}
+    </b>
+  );
+}`),
+			),
+		).toBeNull();
+	});
+
+	it('checks .tsrx components and plain .ts custom hooks', () => {
+		const tsrx = `"use strong";
+import { useState } from 'octane';
+export function A(props) @{
+  const [n, setN] = useState(0);
+  <button onClick={async () => { await props.save(); setN(n + 1); }}>{n as string}</button>
+}`;
+		const hook = `"use strong";
+import { useState } from 'octane';
+export function useSave(save) {
+  const [n, setN] = useState(0);
+  return [n, async () => { await save(); setN(n + 1); }];
+}`;
+		expect(strongCode(tsrx, '/src/A.tsrx')).toBe(STALE_STATE_UPDATE);
+		expect(() => slotHooks(hook, '/src/useSave.ts')).toThrow(STALE_STATE_UPDATE);
+		expect(() => slotHooks(hook.replace('"use strong";\n', ''), '/src/useSave.ts')).not.toThrow();
+	});
+
+	it('locates the snapshot read and names both replacements', () => {
+		const source = tsx(
+			`export function A({ save }) { const [n, setN] = useState(0); return <button onClick={async () => { await save(); setN(n + 1); }}>{n}</button>; }`,
+			IMPORTS,
+			true,
+		);
+		const diagnostic = volarDiagnostic(source, '/src/App.tsx', STALE_STATE_UPDATE);
+		expect(diagnostic.start.offset).toBe(source.indexOf('n + 1'));
+		expect(diagnostic.message).toContain('setValue((current) => current + 1)');
+		expect(diagnostic.message).toContain('state getter');
+		const reducer = tsx(
+			`export function A({ save }) { const [s, d] = useReducer((s, a) => a, 0); return <b onClick={async () => { await save(); d(s + 1); }}>{s}</b>; }`,
+			IMPORTS,
+			true,
+		);
+		expect(volarDiagnostic(reducer, '/src/App.tsx', STALE_STATE_UPDATE).message).toContain(
+			'in the reducer',
+		);
+	});
+
+	it('preserves emitted client and server code for deferred updaters', () => {
+		expectUnchangedOutput(
+			tsx(`export function A({ save }) {
+  const [n, setN] = useState(0);
+  return <b onClick={async () => { await save(); setN((p) => p + 1); setTimeout(() => setN((p) => p - 1)); }}>{n}</b>;
+}`),
+			'/src/App.tsx',
+		);
+	});
+});
+
+describe('Strong write-only state', () => {
+	it.each([
+		[
+			'an elided value with an updater',
+			`export function A({ store }) { const [, force] = useState(0); useEffect(() => store.subscribe(() => force(x => x + 1))); return <p>{store.value}</p>; }`,
+		],
+		[
+			'an unused value binding',
+			`export function A({ store }) { const [tick, force] = useState(0); useEffect(() => store.subscribe(() => force((x) => x + 1))); return <p>{store.value}</p>; }`,
+		],
+		[
+			'an unused getter',
+			`export function A({ store }) { const [, force, read] = useState(0); useEffect(() => store.subscribe(() => force((x) => x + 1))); return <p>{store.value}</p>; }`,
+		],
+		[
+			'a linked state tuple',
+			`export function A(props) { const [, force] = useLinkedState(props.id, () => 0); return <p onClick={() => force(1)}>{props.id}</p>; }`,
+		],
+	])('rejects %s', (_label, body) => {
+		expect(rejected(body)).toBe(WRITE_ONLY_STATE);
+	});
+
+	// The likely rewrites keep a value that nothing renders.
+	it.each([
+		[
+			'the useReducer force-update idiom',
+			`const [, forceUpdate] = useReducer((x) => x + 1, 0); useEffect(() => store.subscribe(forceUpdate));`,
+		],
+		[
+			'selecting the setter by index',
+			`const force = useState(0)[1]; useEffect(() => store.subscribe(() => force({})));`,
+		],
+		[
+			'object destructuring',
+			`const { 1: force } = useState(0); useEffect(() => store.subscribe(() => force({})));`,
+		],
+		[
+			'reading the value only to write it',
+			`const [tick, force] = useState(0); useEffect(() => store.subscribe(() => force(tick + 1)));`,
+		],
+	])('rejects the rewrite %s', (_label, setup) => {
+		expect(rejected(`export function A({ store }) { ${setup} return <p>{store.value}</p>; }`)).toBe(
+			WRITE_ONLY_STATE,
+		);
+	});
+
+	it.each([
+		["import { useState as useCell, useEffect } from 'octane';", 'useCell(0)'],
+		["import * as Octane from 'octane'; const { useEffect } = Octane;", 'Octane.useState(0)'],
+		["import * as Octane from 'octane'; const { useEffect } = Octane;", 'Octane?.useState(0)'],
+	])('recognizes %s', (imports, hook) => {
+		const body = `export function A({ store }) { const [, force] = ${hook}; useEffect(() => store.subscribe(() => force({}))); return <p>{store.value}</p>; }`;
+		expect(rejected(body, imports)).toBe(WRITE_ONLY_STATE);
+	});
+
+	it('keeps read values, getters, whole tuples, unused tuples, and shadowed hooks legal', () => {
+		expect(
+			strongCode(
+				tsx(`function useLocal() { return [0, () => {}]; }
+export function A({ store }) {
+  const [, setCount, getCount] = useState(0);
+  const [Icon, setIcon] = useState(() => 'i');
+  const [value, setValue] = useState('');
+  const [{ label }, setLabel] = useState({ label: 'a' });
+  const tuple = useState(0);
+  const [unused, setUnused] = useState(0);
+  const [, setLocal] = useLocal();
+  const [, setShadowed] = (() => { const useState = (value) => [value, () => {}]; return useState(0); })();
+  return (
+    <p
+      onClick={() => {
+        setCount(1);
+        console.log(getCount());
+        setIcon('b');
+        setValue('x');
+        setLabel({ label: 'b' });
+        tuple[1](2);
+        setLocal();
+        setShadowed();
+      }}
+    >
+      <Icon />
+      <input value={value} />
+      {label}
+    </p>
+  );
+}`),
+			),
+		).toBeNull();
+	});
+
+	it('checks .tsrx components and plain .ts custom hooks', () => {
+		const tsrx = `"use strong";
+import { useState, useEffect } from 'octane';
+export function A(props) @{
+  const [, force] = useState(0);
+  useEffect(() => props.store.subscribe(() => force((x) => x + 1)));
+  <p>{props.store.value as string}</p>
+}`;
+		const hook = `"use strong";
+import { useState } from 'octane';
+export function useForceUpdate() {
+  const [, force] = useState(0);
+  return () => force((x) => x + 1);
+}`;
+		const shorthand = `"use strong";
+import { useState } from 'octane';
+export function A() @{
+  const [value, setValue] = useState('');
+  <input {value} onInput={(event) => setValue(event.currentTarget.value)} />
+}`;
+		expect(strongCode(tsrx, '/src/A.tsrx')).toBe(WRITE_ONLY_STATE);
+		expect(strongCode(shorthand, '/src/A.tsrx')).toBeNull();
+		expect(() => slotHooks(hook, '/src/useForceUpdate.ts')).toThrow(WRITE_ONLY_STATE);
+		expect(() =>
+			slotHooks(hook.replace('"use strong";\n', ''), '/src/useForceUpdate.ts'),
+		).not.toThrow();
+	});
+
+	it('locates the tuple and names the replacement', () => {
+		const source = tsx(
+			`export function A({ store }) { const [, force] = useState(0); useEffect(() => store.subscribe(() => force(x => x + 1))); return <p>{store.value}</p>; }`,
+			IMPORTS,
+			true,
+		);
+		const diagnostic = volarDiagnostic(source, '/src/App.tsx', WRITE_ONLY_STATE);
+		expect(diagnostic.start.offset).toBe(source.indexOf('[, force]'));
+		expect(diagnostic.message).toContain(
+			'useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)',
+		);
+	});
+
+	it('preserves emitted client and server code for read state', () => {
+		expectUnchangedOutput(
+			tsx(`export function A() {
+  const [count, setCount] = useState(0);
+  return <b onClick={() => setCount(count + 1)}>{count}</b>;
 }`),
 			'/src/App.tsx',
 		);
