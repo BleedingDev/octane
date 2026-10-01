@@ -561,6 +561,14 @@ export function App(props) @{
 			`useEffect(() => { (async () => { const ready = props.flag ? props.pending : null; await ready; ${write}; })(); });`,
 		],
 		[
+			'an await of a condition and work',
+			`useEffect(() => { let active = true; (async () => { await (props.flag && props.load()); if (active) ${write}; })(); return () => { active = false; }; });`,
+		],
+		[
+			'a settled promise of a condition and pending work',
+			`useEffect(() => { Promise.resolve(props.flag && props.pending).then(() => ${write}); });`,
+		],
+		[
 			'a stored await whose other branch awaits',
 			`useEffect(() => { (async () => { const ready = props.flag ? await props.load() : null; await ready; ${write}; })(); });`,
 		],
@@ -651,6 +659,10 @@ export function App(props) @{
 		[
 			'an await of each var in a loop',
 			`useEffect(() => { let active = true; (async () => { for (var ready of props.pending) { await ready; if (active) ${write}; } })(); return () => { active = false; }; });`,
+		],
+		[
+			'an await of pending work or a fallback request',
+			`useEffect(() => { let active = true; (async () => { await (props.pending || props.load()); if (active) ${write}; })(); return () => { active = false; }; });`,
 		],
 		[
 			'a stored await whose every branch waits',
@@ -880,6 +892,16 @@ export function App(props) @{
 			'an alias of a stored object member',
 			`function useThing() { const [value, setValue] = useState(0); return { value, setValue }; }`,
 			`const thing = useThing(); const setValue = thing.setValue; ${update}`,
+		],
+		[
+			'an alias of a stored hook result',
+			`function useThing() { const [value, setValue] = useState(0); return { value, setValue }; }`,
+			`const thing = useThing(); const alias = thing; useEffect(() => { alias.setValue(props.value); });`,
+		],
+		[
+			'a stored hook result passed to a helper',
+			`function useThing() { const [value, setValue] = useState(0); return [value, setValue]; } function apply(pair, next) { pair[1](next); }`,
+			`const thing = useThing(); useEffect(() => { apply(thing, props.value); });`,
 		],
 		[
 			'a stored transition start member',

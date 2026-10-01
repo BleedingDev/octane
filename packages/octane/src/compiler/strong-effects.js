@@ -219,8 +219,12 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 			case 'SequenceExpression':
 				return maySettle(node.expressions?.at(-1), depth);
 			case 'ConditionalExpression':
-			case 'LogicalExpression':
 				return someResult(node, maySettle, depth);
+			case 'LogicalExpression':
+				// A falsy left operand of `&&` is the value, and it is never a thenable.
+				return (
+					(node.operator === '&&' && selected(node) === null) || someResult(node, maySettle, depth)
+				);
 			case 'CallExpression':
 				return settledPromise(node);
 			default:

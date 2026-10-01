@@ -1965,6 +1965,9 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		if (node?.type === 'ConditionalExpression' || node?.type === 'LogicalExpression') {
 			const only = effectPolicy.selected(node);
 			if (only !== null) return awaitYields(only);
+			// A falsy left operand of `&&` is the awaited value, and it is never a
+			// thenable: that path resumes in a microtask.
+			if (node.operator === '&&') return false;
 			return node.type === 'ConditionalExpression'
 				? awaitYields(node.consequent) && awaitYields(node.alternate)
 				: awaitYields(node.left) && awaitYields(node.right);
@@ -2672,7 +2675,9 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 					value?.kind === 'linked-key' ||
 					value?.kind === 'constant' ||
 					value?.kind === 'transition-start' ||
-					value?.kind === 'transition-tuple'
+					value?.kind === 'transition-tuple' ||
+					value?.kind === 'returned-array' ||
+					value?.kind === 'returned-object'
 				) {
 					target.bindings.set(declaration.id.name, value);
 				} else if (value == null && initial.name === 'undefined') {
@@ -3630,7 +3635,10 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 				binding?.kind === 'state-tuple' ||
 				binding?.kind === 'constant' ||
 				binding?.kind === 'linked-key' ||
-				binding?.kind === 'transition-start'
+				binding?.kind === 'transition-start' ||
+				binding?.kind === 'transition-tuple' ||
+				binding?.kind === 'returned-array' ||
+				binding?.kind === 'returned-object'
 			) {
 				return binding;
 			}
