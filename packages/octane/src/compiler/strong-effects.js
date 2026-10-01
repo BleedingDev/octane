@@ -220,6 +220,8 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 			case 'FunctionExpression':
 			case 'ClassExpression':
 			case 'ArrayExpression':
+			// Awaiting unwraps thenables, so an await result is never one.
+			case 'AwaitExpression':
 				return true;
 			case 'ObjectExpression':
 				return (node.properties ?? []).every(
@@ -247,15 +249,44 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 	// A promise that settles without waiting on anything else.
 	function zeroDelayPromise(expression, depth = 0) {
 		const node = unwrap(expression);
-		if (node?.type === 'Identifier') {
-			return depth < 8 && zeroDelayPromise(stableInitOf(node), depth + 1);
+		switch (node?.type) {
+			case 'Identifier':
+				return depth < 8 && zeroDelayPromise(stableInitOf(node), depth + 1);
+			case 'SequenceExpression':
+				return zeroDelayPromise(node.expressions?.at(-1), depth);
+			case 'ConditionalExpression':
+				return zeroDelayPromise(node.consequent, depth) && zeroDelayPromise(node.alternate, depth);
+			case 'LogicalExpression':
+				return zeroDelayPromise(node.left, depth) && zeroDelayPromise(node.right, depth);
+			case 'CallExpression': {
+				const callee = unwrap(node.callee);
+				if (callee?.type !== 'MemberExpression' || keyOf(callee.object) !== 'g:Promise')
+					return false;
+				const method = memberName(callee);
+				if (method === 'reject') return true;
+				return method === 'resolve' && nonPromise(node.arguments?.[0]);
+			}
+			default:
+				return false;
 		}
-		if (node?.type !== 'CallExpression') return false;
-		const callee = unwrap(node.callee);
-		if (callee?.type !== 'MemberExpression' || keyOf(callee.object) !== 'g:Promise') return false;
-		const method = memberName(callee);
-		if (method === 'reject') return true;
-		return method === 'resolve' && nonPromise(node.arguments?.[0]);
+	}
+
+	// Awaiting a settled value resumes in a microtask, before the next paint.
+	function settled(expression, depth = 0) {
+		const node = unwrap(expression);
+		switch (node?.type) {
+			case 'SequenceExpression':
+				return settled(node.expressions?.at(-1), depth);
+			case 'ConditionalExpression':
+				return settled(node.consequent, depth) && settled(node.alternate, depth);
+			case 'LogicalExpression':
+				return settled(node.left, depth) && settled(node.right, depth);
+			case 'Identifier': {
+				const init = depth < 8 ? stableInitOf(node) : null;
+				if (init !== null) return settled(init, depth + 1);
+			}
+		}
+		return nonPromise(node, depth) || zeroDelayPromise(node, depth);
 	}
 
 	function globalFunction(callee) {
@@ -595,7 +626,7 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 				: false;
 		},
 		zeroDelayAwait(argument) {
-			return nonPromise(argument) || zeroDelayPromise(argument);
+			return settled(argument);
 		},
 	};
 }

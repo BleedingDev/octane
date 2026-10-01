@@ -2723,9 +2723,33 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		return shapeMember(node, scope);
 	}
 
+	// Every return must agree. Each `return [value, update]` builds a fresh
+	// shape, so arrays and objects agree on the provenance values they share.
 	function mergeShapes(shapes) {
 		const [first] = shapes;
-		return first != null && shapes.every((shape) => shape === first) ? first : null;
+		if (first == null || shapes.some((shape) => shape?.kind !== first.kind)) return null;
+		if (shapes.every((shape) => shape === first)) return first;
+		if (first.kind === 'returned-array') {
+			const length = Math.min(...shapes.map((shape) => shape.elements.length));
+			const elements = [];
+			for (let index = 0; index < length; index++) {
+				const value = first.elements[index];
+				elements.push(shapes.every((shape) => shape.elements[index] === value) ? value : null);
+			}
+			return elements.some((element) => element !== null)
+				? { kind: 'returned-array', elements }
+				: null;
+		}
+		if (first.kind === 'returned-object') {
+			const properties = new Map();
+			for (const [key, value] of first.properties) {
+				if (value !== null && shapes.every((shape) => shape.properties.get(key) === value)) {
+					properties.set(key, value);
+				}
+			}
+			return properties.size === 0 ? null : { kind: 'returned-object', properties };
+		}
+		return null;
 	}
 
 	function bindReturnedShape(pattern, shape, bind) {

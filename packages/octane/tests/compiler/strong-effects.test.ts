@@ -636,6 +636,19 @@ export function App(props) @{
 			'await Promise.resolve()',
 			`useEffect(() => { (async () => { await Promise.resolve(); ${write}; })(); });`,
 		],
+		['a nested await', `useEffect(() => { (async () => { await (await null); ${write}; })(); });`],
+		[
+			'a sequence ending in a settled promise',
+			`useEffect(() => { (async () => { await (0, Promise.resolve()); ${write}; })(); });`,
+		],
+		[
+			'a conditional settled value',
+			`useEffect(() => { (async () => { await (props.flag ? Promise.resolve() : null); ${write}; })(); });`,
+		],
+		[
+			'a conditional settled promise',
+			`useEffect(() => { (props.flag ? Promise.resolve() : Promise.reject()).catch(() => ${write}); });`,
+		],
 		['an async effect callback', `useEffect(async () => { await null; ${write}; });`],
 		[
 			'a local deferral helper',
@@ -659,6 +672,10 @@ export function App(props) @{
 		[
 			'a timer with an unknown delay',
 			`useEffect(() => { setTimeout(() => ${write}, props.delay); });`,
+		],
+		[
+			'a conditional await that may be pending',
+			`useEffect(() => { (async () => { await (props.flag ? Promise.resolve() : props.pending); ${write}; })(); });`,
 		],
 		['a string timer', `useEffect(() => { setTimeout('tick()', 0); });`],
 		['an external subscription', `useEffect(() => props.subscribe(() => ${write}));`],
@@ -764,6 +781,16 @@ export function App(props) @{
 			`const [value, setValue] = useThing(); ${update}`,
 		],
 		[
+			'an array returned on several paths',
+			`function useThing(flag) { const [value, setValue] = useState(0); if (flag) return [value, setValue]; return [value, setValue]; }`,
+			`const [value, setValue] = useThing(props.flag); ${update}`,
+		],
+		[
+			'an object returned on several paths',
+			`function useThing(flag) { const [value, setValue] = useState(0); if (flag) return { value, setValue }; return { value: 0, setValue }; }`,
+			`const { setValue } = useThing(props.flag); ${update}`,
+		],
+		[
 			'a returned object',
 			`function useThing() { const [value, setValue] = useState(0); return { value, setValue }; }`,
 			`const { value, setValue } = useThing(); ${update}`,
@@ -863,6 +890,11 @@ export function App(props) @{
 		[
 			'a hook with different returns',
 			`function useThing(flag) { if (flag) return [0, () => {}]; return useState(0); }`,
+			`const [value, setValue] = useThing(props.flag); ${update}`,
+		],
+		[
+			'paths that return different updaters',
+			`function useThing(flag) { const [value, setValue] = useState(0); if (flag) return [value, () => {}]; return [value, setValue]; }`,
 			`const [value, setValue] = useThing(props.flag); ${update}`,
 		],
 	])('does not invent state for %s', (_label, hooks, setup) => {
