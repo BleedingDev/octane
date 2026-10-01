@@ -853,6 +853,10 @@ These patterns become compile errors:
   `Promise.resolve().then`, a `setTimeout` without a positive delay, and code
   after an `await` that resumes without waiting on any path, such as
   `await (flag ? load() : null)`.
+- Updating state after an `await` or in a promise callback started by an
+  effect, unless the returned cleanup aborts the request's `AbortController` or
+  sets a flag the update checks (`OCTANE_STRONG_EFFECT_DATA_FETCH`). Read
+  asynchronous render data with `use()` or a query binding.
 - Calling a known third-tuple state getter during render
   (`OCTANE_STRONG_RENDER_STATE_GETTER_CALL`). Render from the first tuple member;
   read the latest scheduled state in an event, effect, or deferred callback.
