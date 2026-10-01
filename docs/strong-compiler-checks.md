@@ -95,7 +95,9 @@ reaches, or inside a callback passed to an unshadowed `setTimeout`,
 computed from the render snapshot can overwrite a newer update. A synchronous
 handler such as `onClick={() => setCount(count + 1)}` remains valid, as do
 updates in subscription callbacks and other callbacks whose timing the compiler
-cannot prove.
+cannot prove. An Effect Event reads the latest committed values, so state it
+captures is current in its own body; a snapshot passed to it as an argument, or
+read in a timer or promise callback it creates, is still checked.
 
 These are bounded source checks. They follow supported aliases, namespace
 imports, optional calls, local closures, and same-module declarations. Imported
