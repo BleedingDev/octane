@@ -5,14 +5,18 @@ repository-owned `@octanejs/tanstack-start` package (native
 `StreamOptions.injection` stream path) as its Nitro `.output` deployment
 server; `octane-minimal` is the same Octane app built **without** Nitro
 (`octane/vite.config.minimal.ts`) behind `octane/serve.mjs`; `react` runs
-`@tanstack/react-start` from npm, pinned to the corresponding TanStack release
-family (react-start 1.168.28, react-router 1.170.18), behind
+`@tanstack/react-start` from npm, pinned to the September 30 TanStack patch releases
+(react-start 1.168.60, react-router 1.170.41), behind
 `react/serve.mjs`. The two `serve.mjs` hosts are line-for-line mirrors
 (node:http static fast-path + srvx `toNodeHandler`), so `octane-minimal` vs
 `react` isolates the Octane Start/renderer stack and `octane-nitro` vs
 `octane-minimal` isolates the deployment host. A correctness gate proves all
 targets render and behave as the same app; the perf suite then quantifies the
 differences.
+
+The Octane side retains its older core with the repository security patch
+until the router migration in #1478 lands. These results do not compare
+matching upstream release families.
 
 ## Provenance
 
