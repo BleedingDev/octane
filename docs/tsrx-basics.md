@@ -849,7 +849,17 @@ unless one of their own modules opts in with `"use strong"`.
 These patterns become compile errors:
 
 - Calling a `useState`, `useReducer`, or `useLinkedState` updater during render.
-- Calling one of those updaters synchronously while an effect is being set up.
+- Calling one of those updaters synchronously while an effect is being set up
+  (`OCTANE_STRONG_EFFECT_STATE_UPDATE`). This includes updaters returned by a
+  same-module custom hook, and callbacks that run before the next paint:
+  `startTransition`, a `useTransition` start function, `queueMicrotask`,
+  `Promise.resolve().then`, a `setTimeout` without a positive delay, and code
+  after an `await` that resumes without waiting on any path, such as
+  `await (flag ? load() : null)`.
+- Updating state after an `await` or in a promise callback started by an
+  effect, unless the returned cleanup aborts the request's `AbortController` or
+  sets a flag the update checks (`OCTANE_STRONG_EFFECT_DATA_FETCH`). Read
+  asynchronous render data with `use()` or a query binding.
 - Calling a known third-tuple state getter during render
   (`OCTANE_STRONG_RENDER_STATE_GETTER_CALL`). Render from the first tuple member;
   read the latest scheduled state in an event, effect, or deferred callback.
@@ -870,9 +880,26 @@ These patterns become compile errors:
   (`OCTANE_STRONG_RENDER_EFFECT_EVENT_CALL`).
 - Including a statically known Effect Event in an explicit hook dependency list
   (`OCTANE_STRONG_EFFECT_EVENT_DEPENDENCY`).
-- Mutating a provable state snapshot during render, including supported aliases
-  and array mutations on state initialized with an array literal
+- Mutating a provable state snapshot during render, including supported aliases,
+  `Object.assign` targets, array mutations on state initialized with an array
+  literal (or a nested array literal property), and `Map`/`Set` mutations on
+  state created with `new Map()` or `new Set()`
   (`OCTANE_STRONG_RENDER_SNAPSHOT_MUTATION`).
+- Mutating a state value outside render, in an event handler, effect, deferred
+  callback, updater, or reducer (`OCTANE_STRONG_SNAPSHOT_MUTATION`). Pass a new
+  value to the setter instead.
+- A side effect or nondeterministic read in a state updater or reducer
+  (`OCTANE_STRONG_IMPURE_UPDATER`). Octane may call them more than once; do the
+  work in the event handler and pass the result in.
+- A setter or dispatch argument computed from the same state's render snapshot
+  after an `await` or in a timer or promise callback
+  (`OCTANE_STRONG_STALE_STATE_UPDATE`). Use the updater form or the state
+  getter.
+- A state tuple whose value and getter are never read
+  (`OCTANE_STRONG_WRITE_ONLY_STATE`). Use `useSyncExternalStore` for external
+  data.
+- A `useSyncExternalStore` snapshot callback that returns a new object or array
+  on every call (`OCTANE_STRONG_UNCACHED_STORE_SNAPSHOT`).
 - Mutating a binding declared outside a retained keyed `@for` row from that row
   (`OCTANE_STRONG_RETAINED_ROW_MUTATION`). Fresh scratch data built in ordinary
   setup or owned entirely by one row remains valid.
