@@ -196,6 +196,56 @@ describe('Strong asynchronous effect updates', () => {
 		accepts(app(`useEffect(() => { ${body} });`));
 	});
 
+	const aborted = (body: string) =>
+		`useEffect(() => { const controller = new AbortController(); const { signal } = controller; (async () => { ${body} })(); return () => controller.abort(); });`;
+
+	it.each([
+		[
+			'a later request without the signal',
+			`const r = await fetch('/a', { signal }); const other = await api.get(props.id); setData(other);`,
+		],
+		[
+			'a zero-delay yield after the request',
+			`const r = await fetch('/a', { signal }); await null; setData(r);`,
+		],
+		[
+			'an exclusive branch with the signal',
+			`if (props.fast) { await fetch('/a', { signal }); } else { await api.get(props.id); } setData(1);`,
+		],
+		[
+			'an exclusive branch without the signal',
+			`if (props.fast) { await api.get(props.id); } else { await fetch('/a', { signal }); } setData(1);`,
+		],
+		[
+			'a later loop iteration',
+			`const r = await fetch('/a', { signal }); for (const id of props.ids) { setData(r); await api.get(id); }`,
+		],
+		[
+			'a catch handler after an unsigned request',
+			`try { await fetch('/a', { signal }); } catch { await api.get(props.id); } setData(1);`,
+		],
+	])('rejects an abort proof that does not cover %s', (_label, body) => {
+		rejects(app(aborted(body)), FETCH);
+	});
+
+	it.each([
+		[
+			'both branches',
+			`if (props.fast) { await fetch('/a', { signal }); } else { await fetch('/b', { signal }); } setData(1);`,
+		],
+		['a response body read', `const r = await fetch('/a', { signal }); setData(await r.json());`],
+		[
+			'the request after an exiting branch',
+			`if (props.skip) { await api.get(props.id); return; } const r = await fetch('/a', { signal }); setData(r);`,
+		],
+		[
+			'the latest request',
+			`await api.warm(); const r = await fetch('/a', { signal }); setData(r);`,
+		],
+	])('accepts an abort proof that covers %s', (_label, body) => {
+		accepts(app(aborted(body)));
+	});
+
 	it('follows signals and flags through same-module helpers', () => {
 		accepts(
 			app(`async function load(signal, set) { const r = await fetch('/api', { signal }); set(await r.json()); }
@@ -675,7 +725,7 @@ export function App(props) @{
 		],
 		[
 			'a conditional await that may be pending',
-			`useEffect(() => { (async () => { await (props.flag ? Promise.resolve() : props.pending); ${write}; })(); });`,
+			`useEffect(() => { let active = true; (async () => { await (props.flag ? Promise.resolve() : props.pending); if (active) ${write}; })(); return () => { active = false; }; });`,
 		],
 		['a string timer', `useEffect(() => { setTimeout('tick()', 0); });`],
 		['an external subscription', `useEffect(() => props.subscribe(() => ${write}));`],

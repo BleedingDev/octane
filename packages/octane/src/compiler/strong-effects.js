@@ -82,7 +82,7 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 	const { nodeScopes, declarators, functions } = analysis;
 	let declaratorInfo = null;
 	let functionNodes = null;
-	let flow = { segment: 0, sources: null };
+	let flow = { segment: 0, controllers: null };
 	let guards = null;
 	let segments = 0;
 	// Arguments of the local calls being visited, so a signal passed to a helper
@@ -354,11 +354,58 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 			if (callee?.type !== 'MemberExpression' || !CONTINUATIONS.has(memberName(callee))) break;
 			node = unwrap(callee.object);
 		}
+		if (depth < 8 && node?.type === 'AwaitExpression') return sourceOf(node.argument, depth + 1);
 		if (node?.type === 'Identifier' && depth < 8) {
 			const init = stableInitOf(node);
 			if (init !== null) return sourceOf(init, depth + 1);
 		}
 		return node?.type === 'CallExpression' || node?.type === 'NewExpression' ? node : null;
+	}
+
+	// Controllers whose abort rejects the promise a continuation follows: the
+	// request's own signal, or the signal of the request whose result it reads,
+	// as in `(await fetch(url, { signal })).json()`.
+	function requestControllers(expression, depth = 0) {
+		const source = depth > 8 ? null : sourceOf(expression);
+		if (source === null) return null;
+		let controllers = signalsIn(source.arguments, null);
+		const callee = unwrap(source.callee);
+		if (callee?.type === 'MemberExpression') {
+			const receiver = requestControllers(callee.object, depth + 1);
+			if (receiver !== null)
+				for (const controller of receiver) (controllers ??= new Set()).add(controller);
+		}
+		return controllers;
+	}
+
+	// Paths that meet keep only the proofs they share. If any path yielded, the
+	// joined code runs in a new segment, so earlier guards no longer hold.
+	function joinFlow(left, right) {
+		if (left === right) return left;
+		let controllers = null;
+		if (left.controllers !== null && right.controllers !== null) {
+			for (const controller of left.controllers) {
+				if (right.controllers.has(controller)) (controllers ??= new Set()).add(controller);
+			}
+		}
+		return { segment: left.segment === right.segment ? left.segment : ++segments, controllers };
+	}
+
+	function containsAwait(node) {
+		if (node == null || typeof node !== 'object') return false;
+		if (Array.isArray(node)) return node.some(containsAwait);
+		if (FUNCTIONS.has(node.type)) return false;
+		if (
+			node.type === 'AwaitExpression' ||
+			(node.type === 'ForOfStatement' && node.await === true)
+		) {
+			return true;
+		}
+		for (const key in node) {
+			if (!SKIP_KEYS.has(key) && !key.startsWith('_octane') && containsAwait(node[key]))
+				return true;
+		}
+		return false;
 	}
 
 	function guardTokens(test, truthy, tokens) {
@@ -412,11 +459,11 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 		else if (alternateExits && !consequentExits) pushGuard(statement.test, true);
 	}
 
-	function continue_(source) {
-		const controllers = source === null ? null : signalsIn(source.arguments, null);
+	// A yield resumes in a later segment, protected only by its own request.
+	function continue_(expression) {
 		flow = {
 			segment: ++segments,
-			sources: controllers === null ? flow.sources : { controllers, next: flow.sources },
+			controllers: expression == null ? null : requestControllers(expression),
 		};
 	}
 
@@ -514,24 +561,22 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 				return true;
 			}
 		}
-		for (let source = write.sources; source !== null; source = source.next) {
-			for (const controller of source.controllers) {
-				if (aborts(controller, cleanup, record)) return true;
-			}
+		for (const controller of write.controllers ?? []) {
+			if (aborts(controller, cleanup, record)) return true;
 		}
 		return false;
 	}
 
 	return {
-		// Effect lifecycle state. Guards are structured; the flow segment and the
-		// promise sources change only at yields and are restored per function.
+		// Effect lifecycle state. Guards are structured; the flow segment and its
+		// abort proof change at yields, join at branches, and restore per function.
 		enterEffect(record) {
 			record.continuations = [];
 			record.cleanupFunctions = [];
 			record.opaqueCleanup = false;
 			record.setupScopes = new Set();
 			const saved = { flow, guards };
-			flow = { segment: ++segments, sources: null };
+			flow = { segment: ++segments, controllers: null };
 			guards = null;
 			return saved;
 		},
@@ -544,6 +589,11 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 		},
 		restoreFlow(saved) {
 			flow = saved;
+		},
+		joinFlow,
+		// A loop body that yields may start after its previous iteration's yield.
+		enterLoopBody(body) {
+			if (containsAwait(body)) continue_(null);
 		},
 		saveGuards() {
 			return guards;
@@ -571,14 +621,14 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 		},
 		// A promise callback or an await resumes in a later task.
 		continuation(expression) {
-			continue_(sourceOf(expression));
+			continue_(expression);
 		},
 		continuationWrite(record, origin) {
 			record.continuations.push({
 				origin,
 				guards,
 				segment: flow.segment,
-				sources: flow.sources,
+				controllers: flow.controllers,
 			});
 		},
 		cleanup(record, callbacks) {
