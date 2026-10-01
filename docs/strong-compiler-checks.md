@@ -70,6 +70,7 @@ export function Editor({ user }) {
 | --- | --- | --- |
 | `OCTANE_STRONG_IMPURE_UPDATER` | A `useState` or `useLinkedState` updater, a `useReducer` reducer, or a `useOptimistic` reducer calls `fetch`, schedules a timer, microtask, or promise callback, updates state, calls a state getter or Effect Event, reads or writes `useRef.current`, reads a browser global or reassigned module variable, or calls `Date.now()`, `Math.random()`, `performance.now()`, or `new Date()`. Inline functions, local and same-module declarations, and synchronous helpers are followed. | Do the side effect or nondeterministic read in the event handler, effect, or Action, and pass its result in: `const now = Date.now(); setValue((current) => current + now)`. |
 | `OCTANE_STRONG_SNAPSHOT_MUTATION` | A state value is mutated outside render: in an event handler, effect, cleanup, deferred callback, or an updater or reducer's own state argument. Covers assignments, updates, `delete`, destructuring targets, `Object.assign` and `Reflect.set`-style targets, array mutators on state initialized with an array literal (including nested literal properties), and `Map`/`Set` mutators on state created with `new Map()` or `new Set()`. | Pass a new value, for example `setItems([...items, item])` or `setItems((current) => [...current, item])`. Keep mutable objects in `useRef`. |
+| `OCTANE_STRONG_STALE_STATE_UPDATE` | After an `await`, or in a timer or promise callback, a setter or dispatch argument reads the render snapshot of the same state, including through a local computed from it, a copied alias, or a closure. | Use the updater form, `setValue((current) => current + 1)`, compute from the state a reducer receives, or read the latest value with the state getter (the third tuple member). |
 
 Octane evaluates queued updaters and reducers while their owner renders, and it
 can run the same function more than once. A functional update staged by a
@@ -85,6 +86,16 @@ Passing a mutated array back to its setter is an `Object.is` no-op, so nothing
 re-renders. Copying only the outer object re-renders the owner, but consumers
 keyed on the inner identity, such as a `memo` child, stay stale, and the
 mutation rewrites the value that transitions and `useOptimistic` revert to.
+
+A state update is deferred when it runs after an `await` that every path
+reaches, or inside a callback passed to an unshadowed `setTimeout`,
+`setInterval`, `requestAnimationFrame`, `requestIdleCallback`, or
+`queueMicrotask` (including through `window` or `globalThis`), or to `.then()`,
+`.catch()`, or `.finally()`. Other state can change before it runs, so a value
+computed from the render snapshot can overwrite a newer update. A synchronous
+handler such as `onClick={() => setCount(count + 1)}` remains valid, as do
+updates in subscription callbacks and other callbacks whose timing the compiler
+cannot prove.
 
 These are bounded source checks. They follow supported aliases, namespace
 imports, optional calls, local closures, and same-module declarations. Imported

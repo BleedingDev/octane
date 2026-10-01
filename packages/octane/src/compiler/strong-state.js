@@ -1,13 +1,28 @@
 // Strong state purity checks that share the Strong visitor's lexical bindings
-// and execution phases: pure updaters and reducers, and immutable state values
-// in every phase.
+// and execution phases: pure updaters and reducers, immutable state values in
+// every phase, and deferred updates computed from a stale render snapshot.
 // Like the other Strong policies, this never annotates the parser tree or
 // changes the code emitted for a valid module.
 
 export const STRONG_IMPURE_UPDATER = 'OCTANE_STRONG_IMPURE_UPDATER';
 export const STRONG_SNAPSHOT_MUTATION = 'OCTANE_STRONG_SNAPSHOT_MUTATION';
+export const STRONG_STALE_STATE_UPDATE = 'OCTANE_STRONG_STALE_STATE_UPDATE';
 
 const FUNCTIONS = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression']);
+const SKIP_KEYS = new Set([
+	'type',
+	'start',
+	'end',
+	'loc',
+	'range',
+	'parent',
+	'metadata',
+	'comments',
+	'tokens',
+	'typeAnnotation',
+	'returnType',
+	'typeParameters',
+]);
 const TIMER_GLOBALS = new Set([
 	'setTimeout',
 	'setInterval',
@@ -80,11 +95,17 @@ const SCHEDULE_MESSAGE = `Strong mode does not allow scheduling work in a state 
 const UPDATER_MUTATION_MESSAGE = `Strong mode does not allow a state updater or reducer to mutate the state it receives. ${REPLAY} Return a new value instead, for example (current) => [...current, item].`;
 export const SNAPSHOT_MUTATION_MESSAGE =
 	'Strong mode does not allow mutating a state value outside render. Passing the same object back to its setter does not re-render, and the change rewrites the snapshot that transitions and useOptimistic revert to. Pass a new value instead, for example setItems([...items, item]) or setItems((current) => [...current, item]). Keep mutable objects in useRef.';
+const STALE_MESSAGE =
+	'Strong mode does not allow a deferred state update computed from the render snapshot of the same state. After an await, or in a timer or promise callback, other updates may already have changed it. Use the updater form, setValue((current) => current + 1), or read the latest value with the state getter (the third tuple member).';
+const STALE_REDUCER_MESSAGE =
+	'Strong mode does not allow a deferred dispatch computed from the render snapshot of the same reducer state. After an await, or in a timer or promise callback, other actions may already have changed it. Compute the next state in the reducer from the state it receives, or read the latest value with the state getter (the third tuple member).';
+
 /**
  * @param {{
  *   report: (code: string, node: any, message: string) => void,
  *   resolve: (scope: any, name: string) => any,
  *   unwrap: (node: any) => any,
+ *   createScope: (parent: any, kind: string, statements?: any[], params?: any[]) => any,
  *   snapshotBinding: (node: any, scope: any) => any,
  *   callableValue: (node: any, scope: any) => any,
  *   staticPrimitiveValue: (node: any, scope: any) => any,
@@ -99,6 +120,7 @@ export function createStrongStatePolicy(api) {
 		report,
 		resolve,
 		unwrap,
+		createScope,
 		snapshotBinding,
 		callableValue,
 		staticPrimitiveValue,
@@ -107,6 +129,7 @@ export function createStrongStatePolicy(api) {
 		fetchFunction,
 		hookOf,
 	} = api;
+	const asynchronousCallbacks = new WeakSet();
 
 	function unshadowed(node, scope, names) {
 		const value = unwrap(node);
@@ -163,6 +186,20 @@ export function createStrongStatePolicy(api) {
 	}
 
 	return {
+		/** Mark inline callbacks of a timer or promise continuation before they are visited. */
+		enterCall(node, callee, scope) {
+			if (!isAsynchronousCall(callee, scope)) return false;
+			for (const argument of node.arguments ?? []) {
+				const value = unwrap(argument);
+				if (FUNCTIONS.has(value?.type)) asynchronousCallbacks.add(value);
+			}
+			return true;
+		},
+
+		isAsynchronousCallback(node) {
+			return asynchronousCallbacks.has(node);
+		},
+
 		/** Setters whose single argument may be an updater function. */
 		updaterSetters(callee, scope) {
 			return setterValues(callableValue(callee, scope)).filter((setter) => {
@@ -248,7 +285,151 @@ export function createStrongStatePolicy(api) {
 			if (kind === 'array') return ARRAY_MUTATORS.has(method) ? member : null;
 			return COLLECTION_MUTATORS.get(kind)?.has(method) ? member : null;
 		},
+
+		/** Report a deferred setter or dispatch computed from its own render snapshot. */
+		checkStaleUpdate(callee, args, scope) {
+			for (const setter of setterValues(callableValue(callee, scope))) {
+				for (const argument of args ?? []) {
+					const read = readsState(argument, scope, setter.state, new Set());
+					if (read === null) continue;
+					report(
+						STRONG_STALE_STATE_UPDATE,
+						read,
+						hookOf(setter.state) === 'useReducer' ? STALE_REDUCER_MESSAGE : STALE_MESSAGE,
+					);
+					break;
+				}
+			}
+		},
 	};
+
+	function readsBinding(binding, state, active) {
+		if (binding?.kind === 'snapshot') return binding.state === state;
+		if (binding?.kind === 'derived-state') return binding.states.has(state);
+		// Calling or passing a local closure evaluates its captured snapshot reads.
+		if (binding?.kind === 'callback-choice') {
+			return binding.values.some((value) => readsBinding(value, state, active));
+		}
+		return (
+			binding?.kind === 'callback' &&
+			readsFunction(binding.node, binding.scope, state, active) !== null
+		);
+	}
+
+	function readsFunction(fn, scope, state, active) {
+		if (active.has(fn)) return null;
+		active.add(fn);
+		try {
+			const body = fn.body;
+			const block = body?.type === 'BlockStatement' || body?.type === 'JSXCodeBlock';
+			const inner = createScope(scope, 'function', block ? body.body : [], fn.params ?? []);
+			if (fn.type === 'FunctionExpression' && fn.id?.name) {
+				inner.bindings.set(fn.id.name, { kind: 'other' });
+			}
+			for (const parameter of fn.params ?? []) {
+				const read = readsPatternDefaults(parameter, inner, state, active);
+				if (read !== null) return read;
+			}
+			return (
+				readsState(block ? body.body : body, inner, state, active) ??
+				(block ? readsState(body.render, inner, state, active) : null)
+			);
+		} finally {
+			active.delete(fn);
+		}
+	}
+
+	function readsPatternDefaults(pattern, scope, state, active) {
+		if (pattern?.type === 'AssignmentPattern') {
+			return (
+				readsState(pattern.right, scope, state, active) ??
+				readsPatternDefaults(pattern.left, scope, state, active)
+			);
+		}
+		if (pattern?.type === 'ObjectPattern') {
+			for (const property of pattern.properties ?? []) {
+				const read =
+					(property.computed ? readsState(property.key, scope, state, active) : null) ??
+					readsPatternDefaults(property.value ?? property.argument, scope, state, active);
+				if (read !== null) return read;
+			}
+			return null;
+		}
+		if (pattern?.type === 'ArrayPattern') {
+			for (const element of pattern.elements ?? []) {
+				const read = readsPatternDefaults(element, scope, state, active);
+				if (read !== null) return read;
+			}
+			return null;
+		}
+		return pattern?.type === 'RestElement'
+			? readsPatternDefaults(pattern.argument, scope, state, active)
+			: null;
+	}
+
+	// The first expression in `node` that reads the render snapshot of `state`,
+	// including through derived locals and the bodies of local closures.
+	function readsState(value, scope, state, active) {
+		if (value == null || typeof value !== 'object') return null;
+		if (Array.isArray(value)) {
+			for (const child of value) {
+				const read = readsState(child, scope, state, active);
+				if (read !== null) return read;
+			}
+			return null;
+		}
+		const node = unwrap(value);
+		if (node == null || node.type?.startsWith('TS')) return null;
+		switch (node.type) {
+			case 'Identifier':
+				return readsBinding(resolve(scope, node.name), state, active) ? node : null;
+			case 'MemberExpression':
+				if (snapshotBinding(node, scope)?.state === state) return node;
+				return (
+					readsState(node.object, scope, state, active) ??
+					(node.computed ? readsState(node.property, scope, state, active) : null)
+				);
+			case 'Property':
+				return (
+					(node.computed ? readsState(node.key, scope, state, active) : null) ??
+					readsState(node.value, scope, state, active)
+				);
+			case 'FunctionExpression':
+			case 'ArrowFunctionExpression':
+			case 'FunctionDeclaration':
+				return readsFunction(node, scope, state, active);
+			case 'BlockStatement':
+				return readsState(node.body, createScope(scope, 'block', node.body), state, active);
+			case 'CatchClause':
+				return readsState(
+					node.body,
+					createScope(scope, 'block', [], node.param ? [node.param] : []),
+					state,
+					active,
+				);
+			case 'ForStatement':
+			case 'ForInStatement':
+			case 'ForOfStatement': {
+				const declaration = node.type === 'ForStatement' ? node.init : node.left;
+				const loop = createScope(
+					scope,
+					'block',
+					declaration?.type === 'VariableDeclaration' ? [declaration] : [],
+				);
+				for (const key of ['init', 'test', 'update', 'left', 'right', 'body']) {
+					const read = readsState(node[key], loop, state, active);
+					if (read !== null) return read;
+				}
+				return null;
+			}
+		}
+		for (const key in node) {
+			if (SKIP_KEYS.has(key) || key.startsWith('_octane')) continue;
+			const read = readsState(node[key], scope, state, active);
+			if (read !== null) return read;
+		}
+		return null;
+	}
 }
 
 const SHAPE_CONSTRUCTORS = new Set(['Map', 'Set', 'Array']);
