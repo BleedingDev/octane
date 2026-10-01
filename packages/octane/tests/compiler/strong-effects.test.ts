@@ -244,6 +244,18 @@ describe('Strong asynchronous effect updates', () => {
 			'a catch handler after an unsigned request',
 			`try { await fetch('/a', { signal }); } catch { await api.get(props.id); } setData(1);`,
 		],
+		[
+			'a switch case that breaks inside a branch after an unsigned request',
+			`switch (props.mode) { case 'a': await api.get(props.id); if (props.fast) break; await fetch('/b', { signal }); break; default: await fetch('/c', { signal }); } setData(1);`,
+		],
+		[
+			'a loop that breaks inside a branch after an unsigned request',
+			`await fetch('/a', { signal }); while (props.more) { await api.get(props.id); if (props.fast) break; await fetch('/b', { signal }); } setData(1);`,
+		],
+		[
+			'a loop that continues after an unsigned request',
+			`await fetch('/a', { signal }); for (const id of props.ids) { await api.get(id); if (props.skip) continue; await fetch('/b', { signal }); } setData(1);`,
+		],
 	])('rejects an abort proof that does not cover %s', (_label, body) => {
 		rejects(app(aborted(body)), FETCH);
 	});
@@ -284,6 +296,14 @@ describe('Strong asynchronous effect updates', () => {
 			`await api.warm(); try { await fetch('/a', { signal }); } catch { return; } finally { api.log(); } setData(1);`,
 		],
 		['a for test', `for (; await fetch('/a', { signal }); ) { setData(1); }`],
+		[
+			'a switch case that breaks inside a branch after a signed request',
+			`switch (props.mode) { case 'a': await fetch('/a', { signal }); if (props.fast) break; await fetch('/b', { signal }); break; default: await fetch('/c', { signal }); } setData(1);`,
+		],
+		[
+			'a request selected by a literal operand',
+			`await (null ?? fetch('/a', { signal })); setData(1);`,
+		],
 	])('accepts an abort proof that covers %s', (_label, body) => {
 		accepts(app(aborted(body)));
 	});
