@@ -64,6 +64,23 @@ export function Editor({ user }) {
 }
 ```
 
+## State values, updaters, and subscriptions
+
+| Diagnostic | What it detects | Replacement |
+| --- | --- | --- |
+| `OCTANE_STRONG_SNAPSHOT_MUTATION` | A state value is mutated outside render: in an event handler, effect, cleanup, deferred callback, or a local helper that receives it. Covers assignments, updates, `delete`, destructuring targets, `Object.assign` and `Reflect.set`-style targets, array mutators on state initialized with an array literal (including nested literal properties), and `Map`/`Set` mutators on state created with `new Map()` or `new Set()`. | Pass a new value, for example `setItems([...items, item])` or `setItems((current) => [...current, item])`. Keep mutable objects in `useRef`. |
+
+Mutation outside render has its own code because it fails differently from a
+render-time mutation, which keeps `OCTANE_STRONG_RENDER_SNAPSHOT_MUTATION`.
+Passing a mutated array back to its setter is an `Object.is` no-op, so nothing
+re-renders. Copying only the outer object re-renders the owner, but consumers
+keyed on the inner identity, such as a `memo` child, stay stale, and the
+mutation rewrites the value that transitions and `useOptimistic` revert to.
+
+These are bounded source checks. They follow supported aliases, namespace
+imports, optional calls, local closures, and same-module declarations. Imported
+functions and methods on arbitrary objects remain opaque.
+
 ## Lists, host props, and compatibility APIs
 
 | Diagnostic | What it detects | Replacement |
