@@ -1532,12 +1532,23 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		filename,
 		options,
 	});
-	// State values stay immutable in every phase, not only while rendering.
+	// Updaters and reducers run while their owner renders, and state values stay
+	// immutable in every phase.
+	let insidePureCallback = false;
 	const statePolicy = createStrongStatePolicy({
+		report,
 		resolve,
 		unwrap,
 		snapshotBinding,
+		callableValue,
 		staticPrimitiveValue,
+		ambientPropertyKey,
+		isGlobalObject(node, scope) {
+			const object = ambientReference(node, scope);
+			return object === GLOBAL_OBJECT_BINDING || object === AMBIENT_GLOBAL_BINDINGS.get('window');
+		},
+		fetchFunction,
+		hookOf: (call) => importedHook(call?.callee, moduleScope),
 	});
 
 	function predeclareHoistedVars(node, scope) {
@@ -1587,6 +1598,14 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 	predeclareHoistedVars(ast, moduleScope);
 
 	function report(code, node, message, suggestions = []) {
+		if (insidePureCallback) {
+			const pure = statePolicy.pureDiagnostic(code);
+			if (pure !== null) {
+				code = pure.code;
+				message = pure.message;
+				suggestions = [];
+			}
+		}
 		let codes = reportedDiagnostics.get(node);
 		if (codes?.has(code)) return;
 		if (codes === undefined) reportedDiagnostics.set(node, (codes = new Set()));
@@ -3739,6 +3758,52 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 		}
 	}
 
+	// Octane evaluates queued updaters and reducers while their owner renders and
+	// can replay them over held transition values, so their bodies follow the
+	// render checks. The state they receive is the owner's state value.
+	function visitPureCallback(value, origin, args) {
+		const enclosingPure = insidePureCallback;
+		const enclosingEffect = currentEffect;
+		const enclosingEffectControl = currentEffectControl;
+		const enclosingRetainedRowScope = currentRetainedRowScope;
+		const checkImpureCalls = currentFunctionChecksImpureCalls;
+		const checkRenderReads = currentFunctionChecksRenderReads;
+		insidePureCallback = true;
+		currentEffect = null;
+		currentEffectControl = null;
+		currentRetainedRowScope = null;
+		currentFunctionChecksImpureCalls = currentFunctionChecksRenderReads = true;
+		try {
+			visitCallable(value, origin, 'render', args);
+		} finally {
+			insidePureCallback = enclosingPure;
+			currentEffect = enclosingEffect;
+			currentEffectControl = enclosingEffectControl;
+			currentRetainedRowScope = enclosingRetainedRowScope;
+			currentFunctionChecksImpureCalls = checkImpureCalls;
+			currentFunctionChecksRenderReads = checkRenderReads;
+		}
+	}
+
+	function visitStateCallback(node, hook, index, setters, scope) {
+		const args = node.arguments ?? [];
+		if (args.slice(0, index + 1).some((argument) => argument.type === 'SpreadElement')) return;
+		const callback = callableValue(args[index], scope);
+		if (callback === null) return;
+		const origin = unwrap(args[index]);
+		if (hook === 'useReducer') {
+			visitPureCallback(callback, origin, [stateTupleBinding(node, scope).snapshot, OTHER_BINDING]);
+		} else if (hook === 'useOptimistic') {
+			const passthrough = snapshotBinding(args[0], scope) ?? OTHER_BINDING;
+			visitPureCallback(callback, origin, [passthrough, OTHER_BINDING]);
+		} else {
+			for (const setter of setters) {
+				const snapshot = stateTuples.get(setter.state)?.snapshot ?? OTHER_BINDING;
+				visitPureCallback(callback, origin, [snapshot]);
+			}
+		}
+	}
+
 	function containsEffectEvent(value) {
 		return (
 			value?.kind === 'effect-event' ||
@@ -4345,15 +4410,35 @@ export function analyzeStrongMode(ast, source, filename, options = {}) {
 							: hook === 'useState' || hook === 'useMemo' || EFFECT_HOOKS.has(hook)
 								? 0
 								: -1;
+				const updaterSetters =
+					hook === null && node.arguments?.length > 0
+						? statePolicy.updaterSetters(callee, scope)
+						: [];
+				const pureCallbackIndex =
+					hook === 'useReducer'
+						? 0
+						: hook === 'useOptimistic'
+							? 1
+							: updaterSetters.length !== 0
+								? 0
+								: -1;
 				for (let index = 0; index < (node.arguments?.length ?? 0); index++) {
 					const argument = node.arguments[index];
 					if (
-						(index !== synchronousCallbackIndex && !(index === 0 && component !== null)) ||
+						(index !== synchronousCallbackIndex &&
+							index !== pureCallbackIndex &&
+							!(index === 0 && component !== null)) ||
 						!FUNCTION_TYPES.has(unwrap(argument)?.type)
 					) {
 						visit(argument, scope, executionPhase);
 					}
 					executionPhase = phaseAfter(argument, executionPhase);
+				}
+				if (pureCallbackIndex !== -1) {
+					visitStateCallback(node, hook, pureCallbackIndex, updaterSetters, scope);
+				}
+				if (hook === null && insidePureCallback && executionPhase === 'render') {
+					statePolicy.checkPureCall(callee, scope);
 				}
 				const dependencyIndex =
 					hook === 'useImperativeHandle'

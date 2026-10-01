@@ -6,6 +6,10 @@
 import { describe, expect, it } from 'vitest';
 import { act, mount } from './_helpers';
 import { loadCompiledFixtureSource } from './_server-fixture.js';
+import {
+	TransitionUrgentEquality,
+	type EqualityControls,
+} from './_fixtures/transition-urgent-equality.tsrx';
 
 function fixture(body: string, strong = false) {
 	return loadCompiledFixtureSource(
@@ -27,6 +31,71 @@ function deferred<T = void>() {
 	});
 	return { promise, resolve, reject };
 }
+
+describe('state updaters and reducers can run more than once', () => {
+	for (const reducer of [false, true]) {
+		const kind = reducer ? 'reducer action' : 'state updater';
+
+		it(`replays an urgent ${kind} over a held transition value`, async () => {
+			let controls!: EqualityControls;
+			const wait = deferred();
+			const root = mount(TransitionUrgentEquality, {
+				reducer,
+				boundary: false,
+				wait: wait.promise,
+				bind: (value) => {
+					controls = value;
+				},
+			});
+			const seen: number[] = [];
+			try {
+				await act(() => controls.transition(2));
+				expect(root.find('b').textContent).toBe('true');
+				// One call. It is applied to the committed value, then rebased onto
+				// the value the suspended transition is still holding.
+				await act(() =>
+					controls.urgent((value) => {
+						seen.push(value);
+						return Math.max(value, 1);
+					}),
+				);
+				expect(seen).toContain(1);
+				expect(seen).toContain(2);
+			} finally {
+				wait.resolve();
+				await act(() => {});
+				root.unmount();
+			}
+		});
+
+		it(`evaluates a transition ${kind} eagerly and again when the transition renders`, async () => {
+			let controls!: EqualityControls;
+			const wait = deferred();
+			const root = mount(TransitionUrgentEquality, {
+				reducer,
+				boundary: true,
+				wait: wait.promise,
+				bind: (value) => {
+					controls = value;
+				},
+			});
+			let calls = 0;
+			try {
+				await act(() =>
+					controls.transition(((value: number) => {
+						calls++;
+						return value + 1;
+					}) as unknown as number),
+				);
+				expect(calls).toBeGreaterThan(1);
+			} finally {
+				wait.resolve();
+				await act(() => {});
+				root.unmount();
+			}
+		});
+	}
+});
 
 describe('mutating state outside render', () => {
 	it('does not re-render when the mutated array is passed back to its setter', async () => {

@@ -549,7 +549,8 @@ non-idempotent globals such as `Date.now()` and `Math.random()`
 synchronous helpers; they do not prove arbitrary method bodies or imported code
 pure. Lazy state initialization may obtain an initial timestamp or random value.
 State values stay immutable outside render too
-(`OCTANE_STRONG_SNAPSHOT_MUTATION`). See the
+(`OCTANE_STRONG_SNAPSHOT_MUTATION`), and updaters and reducers follow the render
+checks because Octane may replay them (`OCTANE_STRONG_IMPURE_UPDATER`). See the
 [Strong compiler check reference](./strong-compiler-checks.md#state-values-updaters-and-subscriptions).
 
 Reading unshadowed `window`, `document`, `localStorage`, `sessionStorage`,
