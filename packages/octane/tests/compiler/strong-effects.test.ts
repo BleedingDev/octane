@@ -8,11 +8,11 @@ const CHAIN = 'OCTANE_STRONG_EFFECT_CHAIN';
 const PROPS = 'OCTANE_STRONG_UNLINKED_PROP_STATE';
 const UPDATE = 'OCTANE_STRONG_EFFECT_STATE_UPDATE';
 const HIDDEN = 'OCTANE_STRONG_EFFECT_HIDDEN_DEPENDENCY';
-const component = (setup: string, params = 'props') => `
+const component = (setup: string, params = 'props', output = '<div />') => `
 import { useState, useReducer, useLinkedState, useEffect, useLayoutEffect, useInsertionEffect, useEffectEvent, useRef } from 'octane';
 export function App(${params}) @{
   ${setup}
-  <div />
+  ${output}
 }`;
 
 function rejects(source: string, code: string, filename = '/src/App.tsrx') {
@@ -74,7 +74,9 @@ export function App() @{
 		`useEffect(() => { return () => { fetch('/api').then(setData); }; });`,
 		`const onClick = () => { fetch('/api').then(setData); };`,
 	])('preserves cancelled requests, subscriptions and non-state work: %s', (setup) => {
-		accepts(component(`const [data, setData] = useState(null); ${setup}`));
+		accepts(
+			component(`const [data, setData] = useState(null); ${setup}`, 'props', '<div>{data}</div>'),
+		);
 	});
 
 	it('ignores a shadowed state updater', () => {
@@ -88,7 +90,11 @@ export function App() @{
 
 describe('Strong asynchronous effect updates', () => {
 	const app = (setup: string) =>
-		component(`const [data, setData] = useState(null); ${setup}`).replace(
+		component(
+			`const [data, setData] = useState(null); ${setup}`,
+			'props',
+			'<div>{data}</div>',
+		).replace(
 			"from 'octane';",
 			"from 'octane';\nimport { api } from './api';\nimport axios from 'axios';",
 		);
@@ -337,7 +343,11 @@ describe('Strong effect chains', () => {
 		`const value = first + 1; const read = useEffectEvent(() => consume(value)); ${guardedWrite('setFirst(value)')} useEffect(() => { let active = true; pending.then(() => { if (active) read(); }); return () => { active = false; }; });`,
 	])('preserves independent effects: %s', (setup) => {
 		accepts(
-			component(`const [first, setFirst] = useState(0); const [second] = useState(0); ${setup}`),
+			component(
+				`const [first, setFirst] = useState(0); const [second] = useState(0); ${setup}`,
+				'props',
+				'<div>{first as string}</div>',
+			),
 		);
 	});
 
@@ -513,7 +523,9 @@ describe('Strong effect review regressions', () => {
 		const setup = `useEffect(() => { (async () => { if (props.fetch) { await fetch('/telemetry'); ${exit} } await ready; setData(1); })(); });`;
 		rejects(component(`const [data, setData] = useState(null); ${setup}`), FETCH);
 		const guarded = `useEffect(() => { let active = true; (async () => { if (props.fetch) { await fetch('/telemetry'); ${exit} } await ready; if (active) setData(1); })(); return () => { active = false; }; });`;
-		accepts(component(`const [data, setData] = useState(null); ${guarded}`));
+		accepts(
+			component(`const [data, setData] = useState(null); ${guarded}`, 'props', '<div>{data}</div>'),
+		);
 	});
 
 	it.each([
@@ -534,9 +546,13 @@ describe('Strong effect review regressions', () => {
 	])('does not visit unreachable writes after %s', (exit) => {
 		const setup = `useEffect(() => { (async () => { await fetch('/telemetry'); ${exit} setData(1); })(); });`;
 		expect(() =>
-			compile(component(`const [data, setData] = useState(null); ${setup}`), '/src/Review.tsrx', {
-				strong: true,
-			}),
+			compile(
+				component(`const [data, setData] = useState(null); ${setup}`, 'props', '<div>{data}</div>'),
+				'/src/Review.tsrx',
+				{
+					strong: true,
+				},
+			),
 		).not.toThrow();
 	});
 
@@ -1238,7 +1254,7 @@ export function App(props) @{
     return () => observer.disconnect();
   });
   useEffect(() => { report(props.id); });
-  <div ref={element}>{width as string}</div>
+  <div ref={element}>{width as string}{data}</div>
 }`;
 
 	it.each(['client', 'server'] as const)('emits identical %s code', (mode) => {
