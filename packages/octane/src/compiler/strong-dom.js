@@ -162,7 +162,8 @@ function rendersChild(child) {
 	}
 	if (child.type === 'JSXExpressionContainer')
 		return child.expression?.type !== 'JSXEmptyExpression';
-	return true;
+	// Sibling-scoped <style> is extracted from the template, not rendered here.
+	return child.type !== 'JSXStyleElement';
 }
 
 /**
