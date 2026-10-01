@@ -3,7 +3,7 @@
  * compiles in compatibility mode here so the test observes what it actually
  * does; the replacement named by the diagnostic compiles under Strong.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { act, mount } from './_helpers';
 import { loadCompiledFixtureSource } from './_server-fixture.js';
 import {
@@ -30,6 +30,21 @@ function deferred<T = void>() {
 		reject = fail;
 	});
 	return { promise, resolve, reject };
+}
+
+function createStore(value: number) {
+	const listeners = new Set<() => void>();
+	return {
+		value,
+		subscribe(listener: () => void) {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
+		},
+		set(next: number) {
+			this.value = next;
+			for (const listener of listeners) listener();
+		},
+	};
 }
 
 describe('state updaters and reducers can run more than once', () => {
@@ -169,6 +184,86 @@ export function A() { const [s, setS] = useState({ list: [], n: 0 }); return <bu
 		try {
 			await act(() => {});
 			expect(root.find('p').textContent).toBe('0');
+		} finally {
+			root.unmount();
+		}
+	});
+});
+
+describe('deferred updates computed from a render snapshot', () => {
+	for (const [label, update, strong] of [
+		['the render snapshot', 'setN(n + 1)', false],
+		['the updater form', 'setN((current) => current + 1)', true],
+	] as const) {
+		it(`counts overlapping saves with ${label}`, async () => {
+			const { A } = fixture(
+				`export function A({ save }) { const [n, setN] = useState(0); return <button onClick={async () => { await save(); ${update}; }}>{n}</button>; }`,
+				strong,
+			);
+			const request = deferred();
+			const root = mount(A, { save: () => request.promise });
+			try {
+				root.click('button');
+				root.click('button');
+				await act(async () => {
+					request.resolve();
+					await request.promise;
+				});
+				expect(root.find('button').textContent).toBe(strong ? '2' : '1');
+			} finally {
+				root.unmount();
+			}
+		});
+
+		it(`counts overlapping timers with ${label}`, async () => {
+			vi.useFakeTimers();
+			const { A } = fixture(
+				`export function A() { const [n, setN] = useState(0); return <button onClick={() => setTimeout(() => ${update}, 500)}>{n}</button>; }`,
+				strong,
+			);
+			const root = mount(A);
+			try {
+				root.click('button');
+				root.click('button');
+				await act(() => {
+					vi.advanceTimersByTime(500);
+				});
+				expect(root.find('button').textContent).toBe(strong ? '2' : '1');
+			} finally {
+				root.unmount();
+				vi.useRealTimers();
+			}
+		});
+	}
+});
+
+describe('write-only state as a store subscription', () => {
+	const mutator = `function Mutator({ store }) { useLayoutEffect(() => { store.set(2); }); return null; }`;
+
+	it('misses a store change made before its passive subscription', async () => {
+		const { A } = fixture(
+			`${mutator}
+export function A({ store }) { const [, force] = useState(0); useEffect(() => store.subscribe(() => force((x) => x + 1))); return <p>{store.value}<Mutator store={store} /></p>; }`,
+		);
+		const root = mount(A, { store: createStore(1) });
+		try {
+			await act(() => {});
+			expect(root.find('p').textContent).toBe('1');
+		} finally {
+			root.unmount();
+		}
+	});
+
+	it('renders that change through useSyncExternalStore', async () => {
+		const { A } = fixture(
+			`${mutator}
+export function A({ store }) { const value = useSyncExternalStore(store.subscribe, () => store.value, () => 0); return <p>{value}<Mutator store={store} /></p>; }`,
+			true,
+		);
+		const root = mount(A, { store: createStore(1) });
+		try {
+			await act(() => {});
+			expect(root.find('p').textContent).toBe('2');
 		} finally {
 			root.unmount();
 		}

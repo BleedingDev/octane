@@ -6,6 +6,8 @@ import { compileToVolarMappings } from '../../src/compiler/volar.js';
 const IMPURE_UPDATER = 'OCTANE_STRONG_IMPURE_UPDATER';
 const SNAPSHOT_MUTATION = 'OCTANE_STRONG_SNAPSHOT_MUTATION';
 const RENDER_SNAPSHOT_MUTATION = 'OCTANE_STRONG_RENDER_SNAPSHOT_MUTATION';
+const STALE_STATE_UPDATE = 'OCTANE_STRONG_STALE_STATE_UPDATE';
+const WRITE_ONLY_STATE = 'OCTANE_STRONG_WRITE_ONLY_STATE';
 
 const IMPORTS =
 	"import { useState, useReducer, useLinkedState, useEffect, useRef, useSyncExternalStore, useOptimistic, useEffectEvent } from 'octane';";
@@ -543,6 +545,325 @@ export function useList() {
 			tsx(`export function A() {
   const [items, setItems] = useState([]);
   return <b onClick={() => { setItems([...items, 1]); setItems((current) => current.concat(2)); }}>{items.length}</b>;
+}`),
+			'/src/App.tsx',
+		);
+	});
+});
+
+describe('Strong stale deferred state updates', () => {
+	it.each([
+		[
+			'an update after await',
+			`export function A({ save }) { const [n, setN] = useState(0); return <button onClick={async () => { await save(); setN(n + 1); }}>{n}</button>; }`,
+		],
+		[
+			'a timer callback',
+			`export function A() { const [n, setN] = useState(0); return <button onClick={() => setTimeout(() => setN(n + 1), 500)}>{n}</button>; }`,
+		],
+		[
+			'an object spread after await',
+			`export function A({ save }) { const [s, setS] = useState({ done: false }); return <b onClick={async () => { await save(); setS({ ...s, done: true }); }}>{String(s.done)}</b>; }`,
+		],
+		[
+			'a promise continuation',
+			`export function A({ load }) { const [items, setItems] = useState([]); return <b onClick={() => load().then((item) => setItems([...items, item]))}>{items.length}</b>; }`,
+		],
+		[
+			'a promise rejection handler',
+			`export function A({ load }) { const [errors, setErrors] = useState([]); return <b onClick={() => load().catch((error) => setErrors(errors.concat(error)))}>{errors.length}</b>; }`,
+		],
+		[
+			'an interval started by an effect',
+			`export function A() { const [n, setN] = useState(0); useEffect(() => { const id = setInterval(() => setN(n + 1), 1000); return () => clearInterval(id); }); return <b>{n}</b>; }`,
+		],
+		[
+			'an animation frame',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => requestAnimationFrame(() => setN(n + 1))}>{n}</b>; }`,
+		],
+		[
+			'a microtask',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => queueMicrotask(() => setN(n + 1))}>{n}</b>; }`,
+		],
+		[
+			'window.setTimeout',
+			`export function A() { const [n, setN] = useState(0); return <b onClick={() => window.setTimeout(() => setN(n + 1), 500)}>{n}</b>; }`,
+		],
+		[
+			'a named timer callback',
+			`export function A() { const [n, setN] = useState(0); const tick = () => setN(n + 1); return <b onClick={() => setTimeout(tick, 500)}>{n}</b>; }`,
+		],
+		[
+			'a helper called after await',
+			`export function A({ save }) { const [n, setN] = useState(0); const bump = () => setN(n + 1); return <b onClick={async () => { await save(); bump(); }}>{n}</b>; }`,
+		],
+		[
+			'a helper receiving the snapshot after await',
+			`export function A({ save }) { const [n, setN] = useState(0); function apply(value) { setN(value + 1); } return <b onClick={async () => { await save(); apply(n); }}>{n}</b>; }`,
+		],
+		[
+			'an async effect continuation',
+			`export function A({ load }) { const [items, setItems] = useState([]); useEffect(() => { (async () => { const item = await load(); setItems([...items, item]); })(); }); return <b>{items.length}</b>; }`,
+		],
+		[
+			'a reducer dispatch after await',
+			`export function A({ save }) { const [s, d] = useReducer((s, a) => a, 0); return <b onClick={async () => { await save(); d(s + 1); }}>{s}</b>; }`,
+		],
+		[
+			'a setter alias with an optional call',
+			`export function A({ save }) { const [n, setN] = useState(0); const update = setN; return <b onClick={async () => { await save(); update?.(n + 1); }}>{n}</b>; }`,
+		],
+		[
+			'a tuple index',
+			`export function A({ save }) { const tuple = useState(0); return <b onClick={async () => { await save(); tuple[1](tuple[0] + 1); }}>{tuple[0]}</b>; }`,
+		],
+	])('rejects %s', (_label, body) => {
+		expect(rejected(body)).toBe(STALE_STATE_UPDATE);
+	});
+
+	// The likely rewrites after the diagnostic points at `n` after an await.
+	it.each([
+		['computing the next value before the await', `const next = n + 1; await save(); setN(next);`],
+		[
+			'copying the snapshot before the await',
+			`const current = n; await save(); setN(current + 1);`,
+		],
+		['an updater that ignores its argument', `await save(); setN(() => n + 1);`],
+		['an updater that adds the snapshot', `await save(); setN((p) => p + n);`],
+	])('rejects the rewrite %s', (_label, handler) => {
+		expect(
+			rejected(
+				`export function A({ save }) { const [n, setN] = useState(0); return <b onClick={async () => { ${handler} }}>{n}</b>; }`,
+			),
+		).toBe(STALE_STATE_UPDATE);
+	});
+
+	it.each([
+		["import { useState as useCell } from 'octane';", 'useCell(0)'],
+		["import * as Octane from 'octane';", 'Octane.useState(0)'],
+	])('recognizes %s', (imports, hook) => {
+		const body = `export function A() { const [n, setN] = ${hook}; return <b onClick={() => setTimeout(() => setN(n + 1))}>{n}</b>; }`;
+		expect(rejected(body, imports)).toBe(STALE_STATE_UPDATE);
+	});
+
+	it('keeps synchronous updates, updaters, getters, and fresh values legal', () => {
+		expect(
+			strongCode(
+				tsx(`export function A({ save, maybe, subscribe }) {
+  const [n, setN, getN] = useState(0);
+  const [m, setM] = useState(0);
+  useEffect(() => subscribe(() => setN(n + 1)));
+  return (
+    <b
+      onClick={async () => {
+        setN(n + 1);
+        [1, 2].forEach((step) => setN(n + step));
+        { const setTimeout = (fn) => fn(); setTimeout(() => setN(n + 1)); }
+        if (maybe) await save();
+        setN(n + 1);
+        const data = await save();
+        setN((p) => p + 1);
+        setN(getN() + 1);
+        setN(data);
+        setM(n + 1);
+        setTimeout(() => setN((p) => p + 1));
+      }}
+    >
+      {n}
+      {m}
+    </b>
+  );
+}`),
+			),
+		).toBeNull();
+	});
+
+	it('checks .tsrx components and plain .ts custom hooks', () => {
+		const tsrx = `"use strong";
+import { useState } from 'octane';
+export function A(props) @{
+  const [n, setN] = useState(0);
+  <button onClick={async () => { await props.save(); setN(n + 1); }}>{n as string}</button>
+}`;
+		const hook = `"use strong";
+import { useState } from 'octane';
+export function useSave(save) {
+  const [n, setN] = useState(0);
+  return [n, async () => { await save(); setN(n + 1); }];
+}`;
+		expect(strongCode(tsrx, '/src/A.tsrx')).toBe(STALE_STATE_UPDATE);
+		expect(() => slotHooks(hook, '/src/useSave.ts')).toThrow(STALE_STATE_UPDATE);
+		expect(() => slotHooks(hook.replace('"use strong";\n', ''), '/src/useSave.ts')).not.toThrow();
+	});
+
+	it('locates the snapshot read and names both replacements', () => {
+		const source = tsx(
+			`export function A({ save }) { const [n, setN] = useState(0); return <button onClick={async () => { await save(); setN(n + 1); }}>{n}</button>; }`,
+			IMPORTS,
+			true,
+		);
+		const diagnostic = volarDiagnostic(source, '/src/App.tsx', STALE_STATE_UPDATE);
+		expect(diagnostic.start.offset).toBe(source.indexOf('n + 1'));
+		expect(diagnostic.message).toContain('setValue((current) => current + 1)');
+		expect(diagnostic.message).toContain('state getter');
+		const reducer = tsx(
+			`export function A({ save }) { const [s, d] = useReducer((s, a) => a, 0); return <b onClick={async () => { await save(); d(s + 1); }}>{s}</b>; }`,
+			IMPORTS,
+			true,
+		);
+		expect(volarDiagnostic(reducer, '/src/App.tsx', STALE_STATE_UPDATE).message).toContain(
+			'in the reducer',
+		);
+	});
+
+	it('preserves emitted client and server code for deferred updaters', () => {
+		expectUnchangedOutput(
+			tsx(`export function A({ save }) {
+  const [n, setN] = useState(0);
+  return <b onClick={async () => { await save(); setN((p) => p + 1); setTimeout(() => setN((p) => p - 1)); }}>{n}</b>;
+}`),
+			'/src/App.tsx',
+		);
+	});
+});
+
+describe('Strong write-only state', () => {
+	it.each([
+		[
+			'an elided value with an updater',
+			`export function A({ store }) { const [, force] = useState(0); useEffect(() => store.subscribe(() => force(x => x + 1))); return <p>{store.value}</p>; }`,
+		],
+		[
+			'an unused value binding',
+			`export function A({ store }) { const [tick, force] = useState(0); useEffect(() => store.subscribe(() => force((x) => x + 1))); return <p>{store.value}</p>; }`,
+		],
+		[
+			'an unused getter',
+			`export function A({ store }) { const [, force, read] = useState(0); useEffect(() => store.subscribe(() => force((x) => x + 1))); return <p>{store.value}</p>; }`,
+		],
+		[
+			'a linked state tuple',
+			`export function A(props) { const [, force] = useLinkedState(props.id, () => 0); return <p onClick={() => force(1)}>{props.id}</p>; }`,
+		],
+	])('rejects %s', (_label, body) => {
+		expect(rejected(body)).toBe(WRITE_ONLY_STATE);
+	});
+
+	// The likely rewrites keep a value that nothing renders.
+	it.each([
+		[
+			'the useReducer force-update idiom',
+			`const [, forceUpdate] = useReducer((x) => x + 1, 0); useEffect(() => store.subscribe(forceUpdate));`,
+		],
+		[
+			'selecting the setter by index',
+			`const force = useState(0)[1]; useEffect(() => store.subscribe(() => force({})));`,
+		],
+		[
+			'object destructuring',
+			`const { 1: force } = useState(0); useEffect(() => store.subscribe(() => force({})));`,
+		],
+		[
+			'reading the value only to write it',
+			`const [tick, force] = useState(0); useEffect(() => store.subscribe(() => force(tick + 1)));`,
+		],
+	])('rejects the rewrite %s', (_label, setup) => {
+		expect(rejected(`export function A({ store }) { ${setup} return <p>{store.value}</p>; }`)).toBe(
+			WRITE_ONLY_STATE,
+		);
+	});
+
+	it.each([
+		["import { useState as useCell, useEffect } from 'octane';", 'useCell(0)'],
+		["import * as Octane from 'octane'; const { useEffect } = Octane;", 'Octane.useState(0)'],
+		["import * as Octane from 'octane'; const { useEffect } = Octane;", 'Octane?.useState(0)'],
+	])('recognizes %s', (imports, hook) => {
+		const body = `export function A({ store }) { const [, force] = ${hook}; useEffect(() => store.subscribe(() => force({}))); return <p>{store.value}</p>; }`;
+		expect(rejected(body, imports)).toBe(WRITE_ONLY_STATE);
+	});
+
+	it('keeps read values, getters, whole tuples, unused tuples, and shadowed hooks legal', () => {
+		expect(
+			strongCode(
+				tsx(`function useLocal() { return [0, () => {}]; }
+export function A({ store }) {
+  const [, setCount, getCount] = useState(0);
+  const [Icon, setIcon] = useState(() => 'i');
+  const [value, setValue] = useState('');
+  const [{ label }, setLabel] = useState({ label: 'a' });
+  const tuple = useState(0);
+  const [unused, setUnused] = useState(0);
+  const [, setLocal] = useLocal();
+  const [, setShadowed] = (() => { const useState = (value) => [value, () => {}]; return useState(0); })();
+  return (
+    <p
+      onClick={() => {
+        setCount(1);
+        console.log(getCount());
+        setIcon('b');
+        setValue('x');
+        setLabel({ label: 'b' });
+        tuple[1](2);
+        setLocal();
+        setShadowed();
+      }}
+    >
+      <Icon />
+      <input value={value} />
+      {label}
+    </p>
+  );
+}`),
+			),
+		).toBeNull();
+	});
+
+	it('checks .tsrx components and plain .ts custom hooks', () => {
+		const tsrx = `"use strong";
+import { useState, useEffect } from 'octane';
+export function A(props) @{
+  const [, force] = useState(0);
+  useEffect(() => props.store.subscribe(() => force((x) => x + 1)));
+  <p>{props.store.value as string}</p>
+}`;
+		const hook = `"use strong";
+import { useState } from 'octane';
+export function useForceUpdate() {
+  const [, force] = useState(0);
+  return () => force((x) => x + 1);
+}`;
+		const shorthand = `"use strong";
+import { useState } from 'octane';
+export function A() @{
+  const [value, setValue] = useState('');
+  <input {value} onInput={(event) => setValue(event.currentTarget.value)} />
+}`;
+		expect(strongCode(tsrx, '/src/A.tsrx')).toBe(WRITE_ONLY_STATE);
+		expect(strongCode(shorthand, '/src/A.tsrx')).toBeNull();
+		expect(() => slotHooks(hook, '/src/useForceUpdate.ts')).toThrow(WRITE_ONLY_STATE);
+		expect(() =>
+			slotHooks(hook.replace('"use strong";\n', ''), '/src/useForceUpdate.ts'),
+		).not.toThrow();
+	});
+
+	it('locates the tuple and names the replacement', () => {
+		const source = tsx(
+			`export function A({ store }) { const [, force] = useState(0); useEffect(() => store.subscribe(() => force(x => x + 1))); return <p>{store.value}</p>; }`,
+			IMPORTS,
+			true,
+		);
+		const diagnostic = volarDiagnostic(source, '/src/App.tsx', WRITE_ONLY_STATE);
+		expect(diagnostic.start.offset).toBe(source.indexOf('[, force]'));
+		expect(diagnostic.message).toContain(
+			'useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)',
+		);
+	});
+
+	it('preserves emitted client and server code for read state', () => {
+		expectUnchangedOutput(
+			tsx(`export function A() {
+  const [count, setCount] = useState(0);
+  return <b onClick={() => setCount(count + 1)}>{count}</b>;
 }`),
 			'/src/App.tsx',
 		);
