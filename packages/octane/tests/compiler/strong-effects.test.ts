@@ -300,6 +300,30 @@ useEffect(() => subscribeData(props.id, setData));`),
 		);
 	});
 
+	it('follows controllers passed to same-module helpers', () => {
+		const load = `async function load(controller, set) { const r = await fetch('/api', { signal: controller.signal }); set(await r.json()); }`;
+		const stop = `function stop(controller) { controller.abort(); }`;
+		accepts(
+			app(`${load} ${stop}
+useEffect(() => { const controller = new AbortController(); load(controller, setData); return () => stop(controller); });`),
+		);
+		accepts(
+			app(`function read(controller, set, id) { api.get(id).then((value) => { if (!controller.signal.aborted) set(value); }); }
+useEffect(() => { const controller = new AbortController(); const alias = controller; read(alias, setData, props.id); return () => { controller.abort(); }; });`),
+		);
+		// Aborting a different controller, or none, still leaves the update unguarded.
+		rejects(
+			app(`${load} ${stop}
+useEffect(() => { const controller = new AbortController(); const other = new AbortController(); load(controller, setData); return () => stop(other); });`),
+			FETCH,
+		);
+		rejects(
+			app(`${load} function stop(controller) { controller.signal; }
+useEffect(() => { const controller = new AbortController(); load(controller, setData); return () => stop(controller); });`),
+			FETCH,
+		);
+	});
+
 	it('names the replacement for async effect callbacks', () => {
 		const result = compileToVolarMappings(
 			app(`useEffect(async () => { setData(await api.get(props.id)); });`),
@@ -785,6 +809,10 @@ export function App(props) @{
 		[
 			'an await that a literal test settles',
 			`useEffect(() => { (async () => { await (false ? props.pending : 0); ${write}; })(); });`,
+		],
+		[
+			'a guarded update after a literal-settled await',
+			`useEffect(() => { let active = true; (async () => { await (null && props.pending); if (active) ${write}; })(); return () => { active = false; }; });`,
 		],
 		[
 			'a settled promise of a literal operand',

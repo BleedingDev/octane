@@ -78,8 +78,9 @@ An asynchronous state update is cancelled or ignored when one of these holds:
   `response.json()`. Where branches meet, every path must carry the signal. The
   signal can be passed directly, through
   `const { signal } = controller`, in an options object, or through a
-  same-module helper's parameter. `controller.signal.aborted` also works as a
-  guard.
+  same-module helper's parameter. The controller itself can also be passed to
+  a same-module helper that reads its `signal` or calls `abort()`.
+  `controller.signal.aborted` also works as a guard.
 - The cleanup assigns a flag declared with `let` inside the effect, and the
   update is guarded by that flag after the last `await` or at the start of the
   promise callback. The guard can be `if (!ignore) setData(data)`,

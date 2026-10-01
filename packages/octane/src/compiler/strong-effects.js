@@ -331,11 +331,37 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 		return info?.path.length === 0 ? signalController(init, depth + 1) : null;
 	}
 
-	function controllerOf(binding) {
-		const init = stableInit(binding);
-		return init?.type === 'NewExpression' && globalFunction(init.callee) === 'AbortController'
+	// The AbortController a binding holds: one created by `new AbortController()`,
+	// reached through stable aliases and the arguments of the helpers being visited.
+	function controllerOf(binding, depth = 0) {
+		if (binding == null || depth > 8) return null;
+		const argument = frameArgument(binding);
+		const source = unwrap(argument ?? stableInit(binding));
+		if (source?.type === 'Identifier') return controllerOf(bindingOf(source), depth + 1);
+		return argument === null &&
+			source?.type === 'NewExpression' &&
+			globalFunction(source.callee) === 'AbortController'
 			? binding
 			: null;
+	}
+
+	function parametersOf(fn) {
+		if (parameterLists === null) {
+			parameterLists = new Map();
+			for (const record of functions) parameterLists.set(record.node, record.parameters ?? []);
+		}
+		return parameterLists.get(fn) ?? [];
+	}
+
+	// A controller a cleanup aborts, or a parameter of `fn` that each call maps
+	// to its own argument.
+	function abortTarget(expression, fn) {
+		const node = unwrap(expression);
+		const binding = node?.type === 'Identifier' ? bindingOf(node) : null;
+		return (
+			controllerOf(binding) ??
+			(binding != null && parametersOf(fn).includes(binding) ? binding : null)
+		);
 	}
 
 	function signalsIn(node, into) {
@@ -500,13 +526,18 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 		return { flags: new Map(), aborted: new Set() };
 	}
 
-	function mergeCleanup(result, child) {
+	// `call` maps the parameters a helper aborted to the arguments of one call.
+	function mergeCleanup(result, child, call = null) {
 		for (const [binding, values] of child.flags) {
 			let target = result.flags.get(binding);
 			if (target === undefined) result.flags.set(binding, (target = new Set()));
 			for (const value of values) target.add(value);
 		}
-		for (const value of child.aborted) result.aborted.add(value);
+		for (const value of child.aborted) {
+			const index = call === null ? -1 : parametersOf(call.callee).indexOf(value);
+			const target = index === -1 ? value : abortTarget(call.args?.[index], call.caller);
+			if (target !== null) result.aborted.add(target);
+		}
 	}
 
 	function scan(fn) {
@@ -537,13 +568,14 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 				const callee = unwrap(node.callee);
 				const inline = functionOf(callee);
 				if (inline !== null && inline !== fn && inline.async !== true && !inline.generator) {
-					mergeCleanup(result, scan(inline));
+					const args = node.arguments?.some((argument) => argument.type === 'SpreadElement')
+						? null
+						: node.arguments;
+					mergeCleanup(result, scan(inline), { callee: inline, args, caller: fn });
 				}
 				if (callee?.type === 'MemberExpression' && memberName(callee) === 'abort') {
-					const receiver = unwrap(callee.object);
-					const controller =
-						receiver?.type === 'Identifier' ? controllerOf(bindingOf(receiver)) : null;
-					if (controller !== null) result.aborted.add(controller);
+					const target = abortTarget(callee.object, fn);
+					if (target !== null) result.aborted.add(target);
 				}
 			}
 			for (const key in node) {
@@ -630,12 +662,8 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 		guard: pushGuard,
 		statementGuard,
 		enterCall(fn, args) {
-			if (parameterLists === null) {
-				parameterLists = new Map();
-				for (const record of functions) parameterLists.set(record.node, record.parameters ?? []);
-			}
 			const saved = frames;
-			frames = { parameters: parameterLists.get(fn) ?? [], args, next: frames };
+			frames = { parameters: parametersOf(fn), args, next: frames };
 			return saved;
 		},
 		exitCall(saved) {
