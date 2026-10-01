@@ -542,6 +542,24 @@ list is also a compile error. Strong modules use normal const declarations for
 automatic memoization. Manual memo hooks and non-equivalent explicit dependencies
 are errors; equivalent arrays keep their behavior and produce a hint.
 
+Inside an async function, code after a guaranteed `await` is not synchronous. In
+effect work, an `await` that resumes without waiting, such as `await null`, does
+not count. A `catch` clause is synchronous only when its `try` block can throw,
+or can await a settled rejection, before its first guaranteed `await`. A
+`finally` clause, or code after the `try` statement, is synchronous only when
+the `try` or `catch` can finish before one. Calls, `new`, `throw`, and iteration
+can throw; property reads and operators do not count. The awaited call itself,
+and any call it chains from through `then`, `catch`, or `finally`, is trusted to
+report failure by rejecting. So is each call written as an element of an array
+literal passed to an awaited `Promise.all`, `Promise.allSettled`, `Promise.any`,
+or `Promise.race`, unless the module declares its own `Promise`. The callees and
+arguments of trusted calls still evaluate first. So in `try { const data = await
+Promise.all([api.a(id), api.b(id)]); if (!ignore) setData(data); } catch (error)
+{ if (!ignore) setError(error); }` the `catch` runs after a yield, while `await
+api.get(toKey(id))` or `await Promise.all(ids.map(load))` leaves it synchronous.
+An update after a yield in an effect still needs cleanup that cancels or ignores
+it (`OCTANE_STRONG_EFFECT_DATA_FETCH`).
+
 The compiler also rejects render-time writes through a provable state snapshot
 (`OCTANE_STRONG_RENDER_SNAPSHOT_MUTATION`) and direct calls to known
 non-idempotent globals such as `Date.now()` and `Math.random()`
@@ -579,7 +597,9 @@ Strong modules also keep the DOM that Octane renders under the template's
 control. A ref write to children, a class, an attribute, or a `style` property
 that the template sets on the same element reports
 `OCTANE_STRONG_MANAGED_DOM_WRITE`, and raw HTML written to a rendered element
-reports `OCTANE_STRONG_RAW_HTML_WRITE`. React accepts both.
+reports `OCTANE_STRONG_RAW_HTML_WRITE`. A document query for a literal `id` or
+class the same component renders reports `OCTANE_STRONG_OWN_MARKUP_QUERY`. React
+accepts all three.
 
 The directive is also an author assertion for production memoization, not just a
 request for diagnostics. Render output must not observe changing data through a
