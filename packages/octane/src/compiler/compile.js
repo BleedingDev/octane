@@ -26382,7 +26382,10 @@ function planJsx(
 		const flag = nsFlag(tplNs);
 		// A raw multi-root template passes its root count, which hydration reads
 		// without parsing the template to find where the roots it adopted end.
-		const fragArg = !single && (flag !== 0 || resolvedFrag) ? htmlIdx : 0;
+		// Pre-wrapped HTML multi-root templates (flag=0, !resolvedFrag) store the
+		// count as a negative number so templateRootCount can read it without
+		// parsing and parseTemplate knows the wrapper is already present.
+		const fragArg = single ? 0 : flag !== 0 || resolvedFrag ? htmlIdx : -htmlIdx;
 		let template = rootTemplate;
 		if (!single && flag === 0 && !resolvedFrag) {
 			template = templateElement(

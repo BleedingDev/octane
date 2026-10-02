@@ -18388,7 +18388,9 @@ interface LazyTemplateRecord {
 	ns: 0 | 1 | 2 | 3;
 	/**
 	 * Raw multi-root markup: the number of roots, as the compiler counts them.
-	 * 0 = one root, or HTML roots pre-wrapped in `<octane-frag>`.
+	 * 0 = one root. Positive = raw fragment (SVG/MathML/opaque resolved-HTML),
+	 * parseTemplate adds the wrapper. Negative = HTML roots pre-wrapped in
+	 * `<octane-frag>`, count is the absolute value, wrapper already in `html`.
 	 */
 	frag: number;
 	parsed: Array<Node | null>;
@@ -18434,7 +18436,7 @@ function parseTemplate(html: string, ns: 0 | 1 | 2, frag: number): Node {
 		// Fixed HTML multi-root templates arrive pre-wrapped by the compiler. Opaque
 		// multi-root templates carry raw markup because their eventual namespace is
 		// unknown, so add the equivalent wrapper only after HTML wins at clone time.
-		(STAGED_DOM?.view(t) ?? t).innerHTML = frag ? `<octane-frag>${html}</octane-frag>` : html;
+		(STAGED_DOM?.view(t) ?? t).innerHTML = frag > 0 ? `<octane-frag>${html}</octane-frag>` : html;
 		const root = getFirstChild(t.content) as Element;
 		// Multi-root HTML templates arrive wrapped in a synthetic <octane-frag>. The
 		// wrapper never exists in the server DOM (the roots render bare), so stamp it
@@ -18510,14 +18512,14 @@ function isLazyFragment(lazy: LazyTemplateRecord): boolean {
 
 /**
  * How many roots a multi-root template has. The compiler passes the count as
- * a raw fragment's `frag`; a parsed or pre-wrapped template counts its
- * children.
+ * a raw fragment's `frag` (positive) or a pre-wrapped HTML fragment's `frag`
+ * (negative, absolute value = count); a parsed template counts its children.
  */
 function templateRootCount(template: Node | LazyTemplateRecord): number {
 	let parsed: Node;
 	if ((template as Node).nodeType === undefined) {
 		const lazy = template as LazyTemplateRecord;
-		if (lazy.frag !== 0) return lazy.frag;
+		if (lazy.frag !== 0) return lazy.frag > 0 ? lazy.frag : -lazy.frag;
 		parsed = resolveLazyTemplate(lazy);
 	} else parsed = template as Node;
 	let count = 0;
@@ -18554,7 +18556,7 @@ function lazyRootMatches(server: Node, lazy: LazyTemplateRecord): boolean {
  */
 function lazyFragmentRootMatches(server: Node, lazy: LazyTemplateRecord): boolean {
 	const root =
-		lazy.frag !== 0
+		lazy.frag > 0
 			? lazyRootDescriptor(lazy)
 			: templateRootDescriptor(lazy.html, 13 /* '<octane-frag>'.length */);
 	if (root === 8) return true;
