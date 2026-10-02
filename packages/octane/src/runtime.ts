@@ -19548,22 +19548,23 @@ class HydrationCapability {
 	}
 
 	/**
-	 * First render of a renderable hole whose compiled walk found `anchor`, a
-	 * server node, where the hole's own placeholder is. Under a template that
-	 * adopted another component's markup in place (renderInPlace), the server
-	 * did not frame what it rendered there, as it frames every hole's value.
-	 * Frame it here and return the open marker, which the hole adopts as its
-	 * range. The walk counts one server node for a hole, and matched each root
+	 * The open marker of the server range that a renderable hole adopts on its
+	 * first render, at `anchor`, where its compiled walk found the server node
+	 * for its own placeholder. Under a template that adopted another
+	 * component's markup in place (renderInPlace), the server did not frame
+	 * what it rendered there, as it frames every hole's value, so frame it
+	 * here. The walk counts one server node for a hole, and matched each root
 	 * after it, so the frame holds `anchor`. A fragment's last root has no root
 	 * after it (inPlaceHole), so the frame holds `anchor` only when it is the
 	 * kind of node the value renders: text for a primitive, an element for an
 	 * object. Otherwise the server rendered nothing for the hole, and the
-	 * fragment's server nodes end before `anchor`. Elsewhere, or for an open
-	 * marker or a placeholder the hole shares (`ownEnd` unset), returns `anchor`.
+	 * fragment's server nodes end before `anchor`. Returns `anchor` when it is
+	 * the server's open marker, and null for any other node outside such a
+	 * template, or at a placeholder the hole shares (`ownEnd` unset).
 	 */
-	frameHole(anchor: Node | null | undefined, value: unknown, ownEnd?: boolean): Node | null {
-		if (this.inPlaceEnd === undefined || !ownEnd || anchor == null || isBlockOpen(anchor))
-			return anchor ?? null;
+	holeOpen(anchor: Node | null | undefined, value: unknown, ownEnd?: boolean): Comment | null {
+		if (isBlockOpen(anchor ?? null)) return anchor as Comment;
+		if (anchor == null || this.inPlaceEnd === undefined || !ownEnd) return null;
 		const last = anchor === this.inPlaceHole;
 		const object = value !== null && (typeof value === 'object' || typeof value === 'function');
 		const holds = !last || (anchor.nodeType === 3 ? !object : anchor.nodeType === 1 && object);
@@ -20445,7 +20446,7 @@ class HydrationCapability {
 			} else if (bounded === true && getNextSibling(expected) === null) {
 				// In place of another component's markup, the server may have
 				// rendered nothing for a last root that is a hole, and the node there
-				// follows the fragment. Only the hole's value tells (frameHole).
+				// follows the fragment. Only the hole's value tells (holeOpen).
 				this.inPlaceHole = actual;
 			}
 			actual = this.sibling(actual, 1);
@@ -36694,18 +36695,14 @@ export function childSlot(
 			end = null;
 		} else if (unframedComponentRoot) {
 			[start, end] = hydration!.wrapUnframedRoot(hydration!.node!);
-		} else if (
-			hydration !== null &&
-			hydration.isOpen((anchor = hydration.frameHole(anchor, value, ownEnd)))
-		) {
+		} else if (hydration !== null && (start = hydration.holeOpen(anchor, value, ownEnd))) {
 			// Hydration (nested hole): the anchor resolved via child/sibling to the
 			// server's `<!--[-->`. Adopt that `<!--[-->…<!--]-->` range as our markers
 			// and point the cursor at the first content node for the Block's clone()
 			// / the text adopt below. In a template adopted in place of another
-			// component's markup, frameHole gives the hole the range the server
+			// component's markup, holeOpen frames the server's node as the server
 			// would have.
-			start = anchor as Comment;
-			end = hydration.close(anchor as Node);
+			end = hydration.close(start);
 			if (parentBlock === hydration.rootBlock) hydration.claimRootRemainder(getNextSibling(end));
 			hydration.node = getNextSibling(start);
 			adoptedRange = true;
