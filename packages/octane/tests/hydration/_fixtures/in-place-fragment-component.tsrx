@@ -68,6 +68,21 @@ export function HoleShort(props: { on: boolean; x: string }) @{
 	</div>
 }
 
+// The server's arm continues after Pair's roots.
+export function Longer(props: { on: boolean }) @{
+	<div>
+		@if (props.on) {
+			<Pair />
+		} @else {
+			<>
+				<p>{label as string}</p>
+				<i>{'i' as string}</i>
+				<b>{'b' as string}</b>
+			</>
+		}
+	</div>
+}
+
 // The server's arm has the same roots, so the components adopt them.
 export function Same(props: { on: boolean }) @{
 	<div>

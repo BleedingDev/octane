@@ -175,6 +175,33 @@ describe.each([
 		},
 	);
 
+	it('discards the server arm after the roots it adopts', async () => {
+		const { host, serverNodes, recoverable } = await hydrate(
+			client,
+			'Longer',
+			{ on: false },
+			{ on: true },
+		);
+
+		expect(markup(host)).toBe('<p>p</p><i>i</i>');
+		expect([...host.children]).toEqual(serverNodes.slice(0, 2));
+		expect(recoverable).toEqual([expect.stringMatching(STRUCTURAL)]);
+		expect(warnings()).toEqual(
+			dev
+				? [
+						`Octane hydration mismatch at ${site('Longer', '@if (props.on) {')}: the client ` +
+							'expected the end of the branch but the server rendered <b>. The mismatched ' +
+							'subtree was rebuilt on the client.',
+					]
+				: [],
+		);
+
+		flushSync(() => root!.render(client.Longer, { on: false }));
+		expect(markup(host)).toBe('<p>p</p><i>i</i><b>b</b>');
+		flushSync(() => root!.render(client.Longer, { on: true }));
+		expect(markup(host)).toBe('<p>p</p><i>i</i>');
+	});
+
 	it.each([
 		{ name: 'Same', props: {}, html: '<p>p</p><i>i</i><em>e</em>' },
 		{ name: 'HoleSame', props: { x: 'h' }, html: '<p>p</p>h' },
