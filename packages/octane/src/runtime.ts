@@ -15806,11 +15806,8 @@ function createHydrateSlot(
 		hydration !== null &&
 		!hydration.isFresh(wrapper) &&
 		(STAGED_DOM?.view(wrapper) ?? wrapper).parentNode === parentNode;
-	if ((STAGED_DOM?.view(wrapper) ?? wrapper).parentNode !== parentNode)
-		(STAGED_DOM?.view(parentNode) ?? parentNode).insertBefore(
-			wrapper,
-			hydration ? hydration.rebuiltAt(wrapper, parentBlock) : parentBlock.endMarker,
-		);
+	if (hydration !== null) hydration.insertRoot(wrapper, parentBlock);
+	else (STAGED_DOM?.view(parentNode) ?? parentNode).insertBefore(wrapper, parentBlock.endMarker);
 	if (!(STAGED_DOM?.view(wrapper) ?? wrapper).hasAttribute(HYDRATE_ID_ATTR))
 		(STAGED_DOM?.view(wrapper) ?? wrapper).setAttribute(HYDRATE_ID_ATTR, boundaryId);
 	if (!(STAGED_DOM?.view(wrapper) ?? wrapper).hasAttribute(HYDRATE_WHEN_ATTR))
@@ -18946,7 +18943,7 @@ class HydrationCapability {
 	private rebuiltRoot: Node | null = null;
 	/**
 	 * The mismatched server node (or the range it opens) that rebuiltRoot
-	 * replaces. It stays in place until rebuiltRoot commits (rebuiltAt): an
+	 * replaces. It stays in place until rebuiltRoot commits (insertRoot): an
 	 * attempt that suspends first leaves the server DOM as it was, and its
 	 * retry rebuilds over the same node (resumeAt) without reporting it again.
 	 */
@@ -20605,7 +20602,7 @@ class HydrationCapability {
 				return this.freshClone(template);
 			}
 			// Step past the mismatched node, which stays until the rebuilt root
-			// commits in its place (rebuiltAt). Server nodes after it may still
+			// commits in its place (insertRoot). Server nodes after it may still
 			// belong to later client siblings, so the root goes before them rather
 			// than at its block's end.
 			this.node = getNextSibling(isBlockOpen(cursor) ? this.close(cursor) : cursor);
@@ -20795,30 +20792,35 @@ class HydrationCapability {
 	}
 
 	/**
-	 * Where a detached root goes in its block's parent. A root that mismatch
-	 * recovery rebuilt goes in place of the server node it replaces, which goes
-	 * now (first, since a Document holds one element), or else before the
-	 * server node that followed that one while it is still there. Any other
-	 * root goes at its block's end. A rebuilt root commits before any later
-	 * sibling can rebuild, since the subtree it holds no longer hydrates. Null
-	 * appends: the replaced node was its parent's last child, and the block's
-	 * end may be that very node (a single-root call anchors on the server node
-	 * its template's walk found).
+	 * Commit a template's root to its block's parent. clone() returns an
+	 * adopted server root already in place, and moving it before the block's
+	 * end would reorder it after any extra trailing server sibling just before
+	 * finishRoot removes the remainder. A root that mismatch recovery rebuilt
+	 * goes in place of the server node it replaces, which goes now (first,
+	 * since a Document holds one element), or else before the server node that
+	 * followed that one while it is still there. Any other root goes at its
+	 * block's end. A rebuilt root commits before any later sibling can rebuild,
+	 * since the subtree it holds no longer hydrates. When the replaced node was
+	 * its parent's last child the root is appended: the block's end may be that
+	 * very node (a single-root call anchors on the server node its template's
+	 * walk found).
 	 */
-	rebuiltAt(root: Node, block: Block): Node | null {
-		if (root !== this.rebuiltRoot) return block.endMarker;
+	insertRoot(root: Node, block: Block): void {
 		const parent = block.parentNode;
-		const replaced = this.replaced;
-		const next = this.rebuiltTail;
-		this.replaced = null;
-		if (replaced !== null && domNode(replaced).parentNode === parent) {
-			const last = isBlockOpen(replaced) ? this.close(replaced) : replaced;
-			const at = getNextSibling(last);
-			this.save(parent);
-			removeHydrationRange(replaced, last);
-			return at;
+		if ((STAGED_DOM?.view(root) ?? root).parentNode === parent) return;
+		let at = block.endMarker;
+		if (root === this.rebuiltRoot) {
+			const replaced = this.replaced;
+			const next = this.rebuiltTail;
+			this.replaced = null;
+			if (replaced !== null && domNode(replaced).parentNode === parent) {
+				const last = isBlockOpen(replaced) ? this.close(replaced) : replaced;
+				at = getNextSibling(last);
+				this.save(parent);
+				removeHydrationRange(replaced, last);
+			} else if (next !== null && domNode(next).parentNode === parent) at = next;
 		}
-		return next !== null && domNode(next).parentNode === parent ? next : block.endMarker;
+		(STAGED_DOM?.view(parent) ?? parent).insertBefore(root, at);
 	}
 
 	/**
@@ -21658,18 +21660,10 @@ function commitBag<T>(scope: Scope, root: Node | null, bag: T): T {
 	if (root !== null) {
 		const block = scope.block;
 		const hydration = activeHydration();
-		// clone() returns the already-attached server node during hydration. Moving
-		// that adopted root before the block anchor is usually a no-op, but with an
-		// extra trailing server sibling it would reorder the valid root after the
-		// stale node just before finishRoot removes the remainder. A detached
-		// mismatch replacement takes the place of the server node it replaces,
-		// which stays until now.
-		if (hydration === null || (STAGED_DOM?.view(root) ?? root).parentNode !== block.parentNode) {
+		if (hydration !== null) hydration.insertRoot(root, block);
+		else {
 			const parent = block.parentNode;
-			(STAGED_DOM?.view(parent) ?? parent).insertBefore(
-				root,
-				hydration ? hydration.rebuiltAt(root, block) : block.endMarker,
-			);
+			(STAGED_DOM?.view(parent) ?? parent).insertBefore(root, block.endMarker);
 		}
 	}
 	scope.slots[0] = bag;
