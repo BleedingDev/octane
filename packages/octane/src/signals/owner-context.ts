@@ -91,14 +91,12 @@ export function retireSignalOwnerIdentity(owner: SignalOwner): void {
 }
 
 /**
- * Whether a render with new inputs may keep this renderer owner's cells. A
- * query$ re-selects from the values its description captures, so its request
- * survives them; a writable signal's initial value and an asynchronous
- * derived$ result do not follow them.
+ * @internal Whether a render with new inputs may keep this renderer owner's
+ * cells. A query$ re-selects from the values its description captures, so its
+ * request survives them; a writable signal's initial value and an asynchronous
+ * derived$ result do not follow them. Unset until the facade loads.
  */
-export function signalOwnerFollowsInputs(owner: SignalOwner): boolean {
-	return ownerFollowsInputs?.(owner) === true;
-}
+export { ownerFollowsInputs as signalOwnerFollowsInputs };
 
 export function installSignalOwnerRetirement(
 	retire: (owner: SignalOwner) => void,

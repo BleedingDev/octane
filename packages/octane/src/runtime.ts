@@ -681,9 +681,6 @@ function retainSignalRetryScope(
 	root: Scope,
 	holder: { retrySignalOwners?: SignalRetryOwners },
 	subtree = false,
-	// Hand the owner to the cache now. A live tree's teardown may be deferred
-	// to its root's commit, after a replacement has claimed the same owner.
-	detach = false,
 ): void {
 	const owner = SCOPE_SIGNAL_OWNERS.get(scope);
 	if (owner) {
@@ -698,16 +695,21 @@ function retainSignalRetryScope(
 				cache.owners.delete(previous);
 				retireRendererSignalOwner(previous);
 			}
-			// An ownerless scope still records retirement when it is deleted.
-			if (detach) SCOPE_SIGNAL_OWNERS.set(scope, false);
 		}
 	}
 	if (subtree)
-		forEachSubtreeChild(scope, (child) =>
-			retainSignalRetryScope(child, root, holder, true, detach),
-		);
+		forEachSubtreeChild(scope, (child) => retainSignalRetryScope(child, root, holder, true));
 	else if (scope.children !== null)
 		for (const child of scope.children) retainSignalRetryScope(child.scope, root, holder);
+}
+
+// A root render defers a live tree's teardown to its commit, after a
+// replacement has claimed the owners the cache took from it. Leave those
+// scopes ownerless; an ownerless scope still records retirement when deleted.
+function detachSignalRetryScope(scope: Scope, cache: SignalRetryOwners): void {
+	const owner = SCOPE_SIGNAL_OWNERS.get(scope);
+	if (owner && cache.owners.has(owner)) SCOPE_SIGNAL_OWNERS.set(scope, false);
+	forEachSubtreeChild(scope, (child) => detachSignalRetryScope(child, cache));
 }
 
 function clearSignalRetryOwners(holder: { retrySignalOwners?: SignalRetryOwners }): void {
@@ -725,7 +727,7 @@ function supersedeSignalRetryOwners(holder: { retrySignalOwners?: SignalRetryOwn
 	const cache = holder.retrySignalOwners;
 	if (cache === undefined) return;
 	const retired: SignalRendererOwnerIdentity[] = [];
-	collectRetiredSignalRetryOwners(cache.paths, cache, retired, true);
+	collectRetiredSignalRetryOwners(cache.paths, cache, retired, signalOwnerFollowsInputs);
 	for (const owner of retired) retireRendererSignalOwner(owner);
 }
 
@@ -777,16 +779,16 @@ function collectRetiredSignalRetryOwners(
 	node: SignalRetryNode,
 	cache: SignalRetryOwners,
 	retired: SignalRendererOwnerIdentity[],
-	superseded = false,
+	keep?: (owner: SignalRendererOwnerIdentity) => boolean,
 ): void {
-	if (node.owner !== undefined && !(superseded && signalOwnerFollowsInputs(node.owner))) {
+	if (node.owner !== undefined && !keep?.(node.owner)) {
 		cache.owners.delete(node.owner);
 		retired.push(node.owner);
 		node.owner = undefined;
 	}
 	if (node.children !== undefined)
 		for (const child of node.children.values())
-			collectRetiredSignalRetryOwners(child, cache, retired, superseded);
+			collectRetiredSignalRetryOwners(child, cache, retired, keep);
 }
 
 function trackSignalRetryListKeys<T>(
@@ -39597,8 +39599,10 @@ function restartUncommittedTry(state: TrySlot): Block | null {
 	state.tryBlock = null;
 	// The replacement claims the abandoned primary's signal owners by path,
 	// like a retry of a discarded hydration attempt; see supersedeSignalRetryOwners.
-	if (signalDocumentEnabled || state.idState.renderOwner?.signalOwner !== undefined)
-		retainSignalRetryScope(old, old, state, true, true);
+	if (signalDocumentEnabled || state.idState.renderOwner?.signalOwner !== undefined) {
+		retainSignalRetryScope(old, old, state, true);
+		if (state.retrySignalOwners !== undefined) detachSignalRetryScope(old, state.retrySignalOwners);
+	}
 	supersedeSignalRetryOwners(state);
 	// Neither these refs nor the primary's captured effects ever committed.
 	// Its hook registrations still need real teardown (e.g. transition listeners).
