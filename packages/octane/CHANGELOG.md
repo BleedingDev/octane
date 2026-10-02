@@ -1,5 +1,529 @@
 # octane
 
+## 0.8.0
+
+### Minor Changes
+
+- 53db436: `'use dom bindings'` views can now drive whole islands without the renderer:
+
+  - Imported signal reads (`count$.get()`, `count$.latest(fallback)`) in projections, branch tests, lists and setup or block `const` declarations subscribe instead of raising an activation diagnostic. A pending read keeps the last DOM until its source changes.
+  - `@try`/`@pending`/`@catch` compile into binding programs, select their arm like the renderer, adopt whichever arm the server rendered, and claim a boundary that is still streaming.
+  - `useLayoutEffect(callback, [])` and `useEffect(callback, [])` run once after a view activates and clean up when it leaves.
+  - An independent `<Hydrate>` whose only child is a prop-less, zero-argument binding view imported from a `.tsrx` module activates through that view's program, so its chunk no longer loads the renderer. Other islands keep the renderer activator.
+  - A live binding over signals whose owner retires, as a document's signals do when the page is left, now stops quietly with its last DOM instead of throwing.
+- 3e3749d: Let `interaction({ events })` opt into `pointermove` and `pointercancel`, so a deferred boundary woken by a press can replay whether that press moved, was released, or was cancelled by the browser before hydration finished.
+
+  Both events only extend an interaction that another selected event already captured: they never start hydration or prefetch on their own, so selecting `pointermove` does not make a boundary hydrate on hover. Octane registers their document listeners only after a boundary that selects one captures intent, so pages that do not opt in never listen for pointer movement. The default `interaction()` events are unchanged.
+
+  Capture no longer cancels the native default of a captured `pointerup` or `pointermove`, matching how it already treats `pointerdown`.
+- dc4800b: Strong mode now requires state updaters and reducers to be pure
+  (`OCTANE_STRONG_IMPURE_UPDATER`). Octane evaluates queued updaters and reducers
+  while their owner renders and can call them more than once: a transition
+  update is evaluated when it is staged and again when the transition renders,
+  and an urgent update made while a transition is held is rebased onto the held
+  value. A `useState` or `useLinkedState` updater, a `useReducer` reducer, or a
+  `useOptimistic` reducer that calls `fetch`, schedules a timer, microtask, or
+  promise callback, updates state, calls a state getter or Effect Event, touches
+  `useRef.current`, reads a browser global or reassigned module variable, or
+  calls `Date.now()`, `Math.random()`, `performance.now()`, or `new Date()` is a
+  compile error. Inline functions, local and same-module declarations, and
+  synchronous helpers are followed. Mutating the state an updater or reducer
+  receives reports `OCTANE_STRONG_SNAPSHOT_MUTATION`. Do the work in the event
+  handler and pass the result in. Compatibility mode is unchanged.
+- dc4800b: Strong mode now rejects mutating a state value outside render
+  (`OCTANE_STRONG_SNAPSHOT_MUTATION`): in event handlers, effects, cleanup,
+  timer and promise callbacks, and local helpers that receive the value. Passing
+  a mutated array back to its setter does not re-render, and copying only the
+  outer object leaves identity-based consumers stale and rewrites the value that
+  transitions and `useOptimistic` revert to. Pass a new value instead, such as
+  `setItems([...items, item])`, or keep mutable objects in `useRef`. Array
+  mutators are now also recognized on nested literal properties and on state
+  initialized lazily or through `useReducer`, `Map` and `Set` mutators on state
+  created with `new Map()` or `new Set()`, and `Object.assign`-style targets;
+  render-time mutations keep `OCTANE_STRONG_RENDER_SNAPSHOT_MUTATION`.
+  Compatibility mode is unchanged.
+- dc4800b: Strong mode now rejects a deferred state update computed from the same state's
+  render snapshot (`OCTANE_STRONG_STALE_STATE_UPDATE`). After an `await`, or in a
+  `setTimeout`, `setInterval`, `requestAnimationFrame`, `requestIdleCallback`,
+  `queueMicrotask`, or promise callback, `setCount(count + 1)` can overwrite an
+  update that happened in between. Locals computed from the snapshot before the
+  `await`, copied aliases, and closures are followed. Use the updater form,
+  `setCount((current) => current + 1)`, or read the latest value with the state
+  getter. Synchronous handlers such as `onClick={() => setCount(count + 1)}`
+  remain valid. Compatibility mode is unchanged.
+- 752028d: Strong mode now rejects a `useSyncExternalStore` `getSnapshot` or
+  `getServerSnapshot` that provably returns a new object or array on every call
+  (`OCTANE_STRONG_UNCACHED_STORE_SNAPSHOT`), such as a literal, a spread copy,
+  `.map()`, `.filter()`, `Object.keys()`, a standard constructor, or a
+  same-module function or local constant that allocates. Snapshots are compared
+  with `Object.is`, so such a component warns in development and then renders
+  until the update-depth limit throws. Return a value the store keeps, or read
+  each field with its own `useSyncExternalStore` call. Compatibility mode is
+  unchanged.
+- dc4800b: Strong mode now rejects write-only state (`OCTANE_STRONG_WRITE_ONLY_STATE`): a
+  state tuple whose value is elided, unused, or read only to compute its own next
+  value, whose getter is unused, and whose setter is called or passed on. This is
+  the force-update pattern, including `useReducer((x) => x + 1, 0)` and
+  `useState(0)[1]`. It reads the external source during render and subscribes
+  afterwards, so a change in between is never rendered. Subscribe with
+  `useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)` instead.
+  Compatibility mode is unchanged.
+
+### Patch Changes
+
+- fbf6e40: Remove the server content left after a component's content during hydration. When the server rendered more in a component's range than the client renders there, the client adopted the matching prefix and kept the rest on screen without a report. This happened for a component whose identity differs on the client, for a hookless component in a renderable hole, and for a component that returns less on the client, including one rendered as a list item. Hydration now discards the stale remainder and reports it once through `onRecoverableError`, plus a located development warning. The nodes the client adopted keep their identity. To find where a multi-root template's roots end without parsing it in production, the compiler now passes the template's root count to `template()`.
+- a50b846: When hydration adopts an element whose children are all component calls but
+  the server rendered other content inside it, the first call now reports the
+  server node it found in place of its range once, the element's server children
+  are discarded, and the components are built inside the adopted element. A
+  single-root component used to compare its template with the element itself,
+  reporting that element, keeping the stale server children, and appending its
+  output after them; a lite component removed the adopted element entirely. Later
+  sibling calls in the same element no longer discard the rebuilt content of an
+  earlier one, and an element the server left empty reports "nothing".
+- 6ea582e: Hydrate a component call at a hole in an `@if` or `@switch` arm when the server rendered another arm with the same static roots, for a call that cannot render in place of one server node. The server node at the call's position is an element of the other arm, not the component's range. A keyed or dynamic call, or a component that renders several roots, a fragment, or nothing, left that element on screen. A call after one of the arm's adopted roots also deleted that root. A component with several roots in a development build lost the adopted node after the hole. The call now replaces exactly the server node at its position, the arm's adopted nodes keep their identity and keep updating, and hydration reports the mismatch once through `onRecoverableError`.
+- 52c9d33: Discard the server content left after a hydrated `@if` or `@switch` arm that ends with a `@try` whose body throws on the client. The boundary builds its catch arm and leaves the hydration cursor on its own close marker, so the server components the server's longer arm rendered after it stayed on screen with no report. Hydration now looks past that marker, removes them, and reports one structural `onRecoverableError`.
+- 8f8349b: Compile a bare-left `@for (item of items)` or `@for ({ id } of items)` header instead of crashing. Each row binds its own item, as a `let` header does, and shadows any outer name, on the DOM client, the server, hydration, split `<Hydrate>` boundaries, and the universal and Valdi renderers. A header that would assign an existing target, such as `@for (obj.x of items)`, now reports a located compile error.
+- 3ffd8cc: A `'use dom bindings'` view whose text leaf casts a signal handle to `number` (`{count$ as number}`, or a handle passed through props) now server-renders the handle's text, so `adoptBindings` can adopt its own SSR output instead of throwing a mismatched-topology error. The ordinary renderer hydrates the same output in place.
+- f03d812: `'use dom bindings'` views may now declare no props parameter. A view that reads only module-scope signal handles, such as an island's state, compiles for `adoptBindings`, `mountBindings` and server rendering like a view with props. Views with more than one parameter are still rejected.
+- f5896c6: Discard the server content that a hydrating `@if` or `@switch` arm leaves after its last component or nested branch. When the server rendered a longer arm, such as one with a trailing element after the same components, that trailing content used to stay on the page with nothing reported. Hydration now removes it, keeps every node the client adopted, and reports the mismatch once to `onRecoverableError`, with one development diagnostic at the branch.
+- 3770c1e: Discard the server elements and text that an `@if` or `@switch` arm leaves unclaimed during hydration. When the server rendered a longer arm, the client arm adopts the start of the server's range. Elements or text after the roots of the client arm's own template, or after the single root that a component in the arm adopts in place, stayed on screen with no report. Hydration now steps past those roots, removes the server content after them, and reports one structural `onRecoverableError`, with a development diagnostic at the directive. Every compiled multi-root template now carries its root count, so production hydration finds that end without parsing the template, including for a branch in a helper passed as a render prop.
+- 3994e1e: Discard the server content an `@if` or `@switch` arm leaves unclaimed during hydration. When the server rendered a different arm, the client arm adopts the server's range from its start. Server components or ranges left after the client arm's content stayed on screen until the next arm swap. Hydration now removes them and reports one structural `onRecoverableError`, with a development diagnostic at the directive. A dormant `<Hydrate>` boundary whose captures changed before activation discards them without a report.
+- 6c50c70: Read a component's signal and query declarations from its own `@try`, `@pending`,
+  `@catch`, `@if` and `@switch` arms and keyed `@for` rows without creating a second
+  cell. A query declared in setup and read again from one of those frames, directly
+  or through a local `derived$`, now starts one request on the client and resumes
+  the server's request during hydration, instead of starting another request per
+  arm or row. A component's own signal displayed in an arm also keeps its value
+  when that arm remounts.
+
+  An arm or row still owns the declarations it evaluates itself and resets them
+  when it is removed, and a child component that receives a handle as a prop still
+  resolves it in its own instance.
+- fbaf501: Release the remaining host ref array owners when a callback cleanup throws, including nested arrays, and preserve the first error for existing error delivery.
+- 70ee6a3: When hydration finds other server content in a range where the client renders
+  several siblings, such as server text in a `{hole}` whose client value is a
+  component that renders two components, the development console now logs one
+  hydration mismatch diagnostic for that recovery instead of one per sibling.
+  Once a recovery reaches the end of the range, by discarding the server content
+  before it or by rebuilding a single-root clone over the last server node,
+  later sibling components, fragment clones, and single-root clones that find
+  that end build on the client without a second "the server rendered the end of
+  the parent block" diagnostic. A mismatch in a separate range still reports on
+  its own.
+- ab2798e: Mount and update every component without allocating a closure context. The hydration path for a component inside a client-rebuilt subtree now calls a separate helper, so ordinary component calls no longer capture their arguments up front. Rendering behavior is unchanged.
+- 95421bb: A `signal$`, `derived$`, or `query$` declared inside a custom hook now belongs to each call of that hook. Calling `useUser$(a)` and `useUser$(b)` in one component previously shared one cell, so the second call showed the first call's data and never ran its own loader. Each call now owns its cells, a call skipped by a condition keeps its own, and server and browser builds key them identically for SSR seeds and streamed results. Call sites are keyed in modules with a runtime signals import and for hooks named with `$`.
+- 9168bf6: Fix a runtime host element (from `createElement`) duplicating its children when
+  hydration retries after suspending. When the server rendered other children than
+  the client's, the first attempt built the client's children inside the adopted
+  host; the retry then built a second copy beside them. The retry now replaces the
+  earlier attempt's children, and a root that retries restores the server's.
+  A child host element that replaces server content now calls `onRecoverableError`
+  once across retries, and in development warns once at the hole that renders the
+  runtime host.
+- 92495b9: A `@catch` parameter written as an object or array pattern, such as `@catch ({ message }: Error, retry)`, now binds its names on the client. Previously the client error arm threw a `ReferenceError` or read a component local with the same name, while server rendering showed the error, so client render and hydration disagreed with SSR. Pattern defaults may read component locals, as in `@catch ({ message = fallback })`.
+- c016c2d: Discard and report the server's `@if`/`@switch` arm when the client's arm renders nothing during hydration. An `@if` with no client arm already discarded the server content and reported it as an empty branch, but a client arm with an empty body, such as `@else { <></> }`, left the server's other arm on screen with no report. Hydration now removes that content and reports one structural `onRecoverableError`, with a development diagnostic at the directive. When the server arm starts with an element or text node rather than a range, it is still kept.
+- 21c3bfe: When hydration rebuilds an `@for` that the server rendered with no items because
+  the client has items, the development diagnostic says the server rendered
+  `an empty list (@empty)` only when the server rendered that arm. A list without
+  an `@empty` arm now reports `an empty list`.
+- da9b1e4: Preserve the first script or stylesheet preload's options when equivalent calls are deduplicated, so a later preinit inherits the original integrity and connection metadata. Explicit preinit options continue to take precedence.
+- 4ab33b6: The compiler now rejects `for…in` and C-style `@for` headers on every target.
+  `@for (const k in object)` used to compile as `for…of` over the object on the
+  DOM client, server, and universal renderers, rendering its values or nothing
+  instead of its keys. `@for (let i = 0; i < n; i++)` crashed the DOM compiler
+  with an internal `TypeError`. Each now reports a diagnostic at the directive
+  that suggests the `for…of` spelling, such as
+  `@for (const name of Object.keys(object); key name)`.
+- 6bb20ac: Keep the server nodes that a `@switch` or `@if` arm adopted when the arm
+  suspends inside a deferred `<Hydrate>` boundary before it has a range of its
+  own.
+
+  When the server rendered no range for a `@switch` or `@if`, the client's arm
+  takes the place of the server node at that position and adopts it. If that arm
+  suspended inside a `<Hydrate split={false}>` boundary, the boundary's retry
+  published the arm's range after the sibling that followed it, so that sibling
+  reported a false mismatch and built a second copy of its server node. A case
+  change while the boundary was still pending removed the wrong server nodes, with
+  the same result for the next sibling. The arm now marks where its content starts
+  with a comment of its own and keeps track of how far that content reached. Its
+  retry finalizes the range from there, and another case replaces exactly that
+  content and renders on the client without reporting a mismatch. This works for
+  arms whose content is text, several roots, or a root the arm had not yet cloned.
+- 6959fa0: Rebuild a hydrated fragment that starts with a hole when the server rendered something else there, such as another `@if` arm. A leading component call, text hole, or nested block matches any server node, so hydration adopted the other arm's nodes as the fragment's roots: its static roots were never built, and a component in the hole took one of the server nodes as its position. Hydration now compares the first static element root after the leading holes with the server node it would adopt. On a mismatch it rebuilds the fragment on the client, as it already did for a fragment that starts with a static root, and reports one `onRecoverableError`. The development warning names that static root and the server node found in its place. Matching fragments adopt their server nodes as before. A `HYDRATION_RANGE_BOUNDARY` passthrough root, whose owner may adopt one range level off, keeps its existing behavior.
+- 7698907: Adopt a server-rendered `@catch` arm (or JSX `ErrorBoundary` fallback) during hydration when the client's try body throws again, instead of reporting a hydration mismatch and rebuilding it. This covers a boundary that is a component's only output and a try body that renders a host element before it throws. The server now marks a caught arm, so the client replays the try body without claiming the catch arm's DOM. A body that renders or waits on the client replaces the server's catch arm without a mismatch report. The replay also reads the `use()` values of Suspense boundaries and `Hydrate` islands the server completed inside the abandoned try body, including streamed ones, so a body with a nested boundary adopts the catch arm immediately instead of waiting for client data. When a boundary at the top level of a root rebuilds during hydration, the root's next sibling component now hydrates in place instead of being rebuilt with a mismatch report.
+- 3baa492: Hydrate a server-rendered `@catch` arm when a template-less component's `use()` rejected on the server. The component now reads its rejection seed, so the boundary adopts the server's catch arm and reports the caught error instead of discarding that arm, reporting a hydration mismatch, and staying suspended. A component that renders where the server rendered something else still reports the mismatch.
+- 1fa3853: Hydration no longer reports a mismatch for a `@try` body or `<ErrorBoundary>` child that throws to its catch arm after adopting server content. A component that cloned its element and then threw from a hole was compared against whatever the server rendered there, often the server's own catch arm, and logged a development mismatch warning and called `onRecoverableError` in development and production. The catch arm replaces that content, so these reports are now dropped. A body that completes or suspends still reports its mismatches, and nested boundaries pass them to the enclosing boundary.
+- 62e76bf: Load the browser's own query selection when hydration finds a server result for a
+  different request. When a component's props or state select a query request
+  other than the one the server resolved under the same owner, hydration no longer
+  fails with "The presented query definition does not match". The query loads its
+  current selection as if the server had not seeded it, and adoption keeps the
+  server's nodes while reporting changed text as a recoverable hydration mismatch.
+- a1f136c: Deferred hydration no longer lets a live interaction overtake one captured
+  before hydration. A `<Hydrate>` boundary or independent island replays its
+  captured events after its hydration commits, which can be a frame later. An
+  event that arrived in between reached the hydrated handlers immediately, so
+  clicking option A before hydration and option B during it ran B's handler first
+  and left A selected. The boundary now keeps capturing until its replay runs, so
+  handlers see input in the order the user produced it. An island whose content
+  is still suspended after activation also keeps those events instead of
+  dropping them on the inert server markup.
+- 39f3e97: Deferred hydration now replays captured interaction events with the original
+  event's `timeStamp`. Each replay used to be a newly constructed event stamped
+  with the replay time, so the time between a captured `pointerdown` and
+  `pointerup`, or how long an input had been held, collapsed to the hydration
+  delay. A boundary nested inside another boundary reset the clock a second time.
+  Replays from `<Hydrate>` boundaries, nested boundaries, and independent islands
+  now keep the captured value and remain untrusted (`isTrusted` is `false`).
+- 416882f: Hydrate the component after one that adopted a server element in place. When the server rendered a different `@if`/`@switch` arm, a component that found that arm's element where its own server range belonged adopted it, but the next component adopted the same element again, and the server's range for the next component stayed on the page. When the first component's own holes left the cursor inside the element, the next component claimed the enclosing block's range instead, which discarded the arm. Hydration now continues after the adopted element. A returned single-root component that hydration rebuilt at the end of its parent's server range no longer takes that range's end marker as its own, so a later render that hides it removes it, and showing it again no longer throws.
+- 3ec43da: When a component call finds no server range of its own, because the server rendered another `@if` or `@switch` arm there, and hydration adopts the server markup in place, a component call inside that component's template now adopts the server node at its own position. Previously, when the server had rendered that inner call's markup inline, the inner call rendered against the first server node of the outer template instead: it reported a mismatch and replaced that node, which the outer component had already adopted.
+- f5644f7: Stop a query below a JSX `<Suspense>` from reloading without end during hydration, and resume the server value that a `.tsx` component reads in its returned JSX. A JSX `<Suspense>` or `<ErrorBoundary>` gave its try body a new identity on every render. A boundary retrying its own suspended first attempt therefore looked like it had received new children: it retired the attempt's queries and started fresh ones. When the browser had to load a query, for example one without a server seed, each load resolved into another retry and another load, and the page re-rendered indefinitely. The boundary now keeps one body and carries its children like a compiled `@try`, so only new children restart the attempt. On the server, a component's returned value rendered outside that component's signal owner, while the client renders it inside. A `query$` that a `.tsx` component reads with `.get()` in its returned JSX was therefore seeded under the parent's identity and loaded twice on the server, and the browser loaded it again with a hydration mismatch. The server now renders a returned value inside its component's owner.
+- 5ef4f9a: Render private static JSX components through their compiled fragment again.
+
+  A private `.tsx`/`.jsx` component whose body returns only static JSX, and
+  whose every use is an attribute-free child of a returned host element, again
+  renders through that parent's template as a lite component call. Since async
+  signals, component descriptors carry their invocation site, and the proof
+  recognized only the older descriptor call. Every such component therefore fell
+  back to a full component slot plus a descriptor child slot. On the
+  signal-favoring chain, the JSX twin's shallow bump went from 10 full component
+  slots to 100.
+- 2b69387: Discard a mismatched server node inside a hookless component's host during hydration. A hookless component renders into the element its call sits in, which can differ from the parent of the enclosing block's range, for example a `<section>` inside an `@if` arm. When its template did not match the server node there, hydration kept the stale server node on screen and inserted the client's element beside it. Hydration now builds the client's element in that node's place, including when the node was the host's last child, and reports the mismatch once.
+- 3d0e5e2: Re-select a component-local `query$` when a later render's selector captures new props or state, and recompute a synchronous component-local `derived$` from its captured values. Previously both kept the closure from their first render. An equal selection keeps its request and adopts the new loader without refetching. A changed selection aborts the obsolete request and starts the new one when the render is accepted. A held transition or suspended attempt keeps committed readers on the accepted selection and reuses its pending request when it retries.
+- f647cef: Keep destructured `.map()` callback parameters writable on the client. A
+  template `xs.map(({ label }) => <li … />)` compiles to a keyed row loop, and its
+  destructured fields were re-declared with `const`, so a row handler that
+  reassigned one, such as `onClick={() => { label = label + '!' }}`, threw
+  `TypeError: Assignment to constant variable` after mount or hydration. Server
+  rendering already treated them as ordinary parameters. Identifier parameters
+  were unaffected.
+
+  The same row prologue now keeps the kind of an authored `@for` header, so the
+  fields of `@for (let { label } of xs)` can be reassigned too. Output for
+  `const` headers and identifier parameters is unchanged.
+- fdf54fe: A plain `.ts` or `.js` module that calls a hook-named method while it initializes, such as `export const initial = store.useValue()`, now evaluates instead of throwing `ReferenceError: Cannot access '_h$0' before initialization`. That covers top-level statements, optional chains, and a module-level class's static fields, static blocks, and computed keys. These calls run outside every render, so they keep their authored form with no hook slot. A hook call in an instance field initializer runs with each construction, possibly during a render, so a hook method or module-declared custom hook called there now keeps its own slot, as it would in a constructor.
+- ce97a96: A plain `.ts` or `.js` module that calls a hook-named method or a custom hook inside a function it invokes in place, such as `export const value = (() => store.useValue())()`, now evaluates instead of throwing `ReferenceError: Cannot access '_h$0' before initialization`. That covers arrow and function expressions called directly or through `.call` and `.apply`, including async ones. A generator body waits for `.next()`, which a render may call, so its hook calls still get their own slot, as do those in a function invoked in place inside a component or hook.
+- e219d88: Set host refs before layout effects when a nested Suspense boundary reveals
+  after an update replaced its parent's pending retry. The nested boundary first
+  suspended inside that retry; once the update discarded it, the boundary stayed
+  hidden without its reveal bookkeeping, so refs mounted in it (including hosts
+  preserved from before the suspension) were never attached and a layout effect
+  reading them saw `null`. A nested boundary that suspends while its parent is
+  already hidden also no longer calls a callback ref with `null` a second time,
+  matching React.
+- 09cf476: Preserve the submitter's document order in function form actions and manual transition form status data. Include its entry before the native `formdata` event fires.
+- 0887a68: A delegated event listener that the browser runs synchronously during a render's
+  DOM writes, such as `onBlur` when a render disables or removes a focused input,
+  can now write signals. Before, it inherited the render's signal write guard and
+  threw `SignalWriteError`. Its reads no longer become dependencies of that render.
+  Subscribers notified by its writes also run outside the render, so they can
+  write signals and their updates schedule like any other event's. The rest of the
+  render stays write-guarded, and a listener called from inside a pure computation
+  is still rejected.
+- 3514dc7: Production client builds now lower `useMemo` and `useCallback` inline in plain `.ts`/`.js` hook modules that contain template literals, `switch` statements, `try`/`catch`, default or namespace imports, import attributes, or method overloads. Before, any of that syntax kept the whole module on the slower callback-allocating path.
+
+  A plain hook module also stays on that path, with its source unchanged, when the inline printer would emit different code. That covers `declare global`, an empty `import type {}`, a cast assignment target such as `(ref.current as any) = value`, a non-null assertion that continues an optional chain such as `box?.item!.label`, and a few TypeScript-only forms. Previously, such a module could fail to build, turn the type-only import into a side-effect import, throw where the optional chain should short-circuit, or lose authored types.
+- 3f1a7b2: Keep `import.defer()` deferred in plain hook modules that production client builds reprint; it previously compiled to an eager `import()`.
+- 985a81e: A custom hook in a plain `.ts`/`.js` module that calls another hook declared in
+  the same module now gives each call its own state, as a `.tsrx` module does.
+  Previously two calls to a local hook shared their `useState`, `useRef`, `useId`
+  and memo cells on the client, while the server kept them apart, so hydration
+  replaced the server's output. This applies to hook functions, hook-named
+  `const` values and parameters, and aliases of them. Calls to `use*`
+  functions made while a module initializes, outside any function, are no longer
+  rewritten, so they no longer throw a `ReferenceError`.
+- cb71034: Hydrating an `@for` that the server rendered with items while the client has
+  none and builds its `@empty` arm now reports the rebuild through
+  `onRecoverableError`, in production as well as development. The development
+  diagnostic is still logged once, now also when a pending sibling replays the
+  hydration attempt. A dormant `<Hydrate>` boundary whose list emptied before it
+  activated rebuilds it without reporting.
+- 69b02f1: Keep a module-private Context on the public provider in production builds when any of its providers receives element descriptors as children: under a `descriptorChildren` component or `ReactCompat`, or inside a `@{ … }` function that code calls directly. Production builds previously threw `TypeError: body is not a function` there, while development rendered correctly.
+- 3041f5d: When hydration rebuilds an element whose server markup does not match, the
+  rebuilt element's dynamic attributes, `class`, and `style` now apply the client
+  values without a second report. Development builds used to log a false value
+  mismatch for each of them after the one structural mismatch. With
+  `suppressHydrationWarning` on the rebuilt element, those client values were
+  dropped entirely, in development and production, because suppression kept the
+  "server" value, which was only the client template's empty placeholder. A value
+  mismatch on an adopted server element still reports, and suppression still keeps
+  the server value there.
+- b58c783: When hydration rebuilds an element whose server markup does not match, the
+  `@if`, `@switch`, `@for`, `@try`, `<Activity>`, and `<ErrorBoundary>` blocks
+  inside the rebuilt element now mount as client content. They used to keep
+  hydrating against the server output that follows the mismatch. Development
+  builds logged a second, false mismatch for the same recovery, an `@for` could
+  throw, and a block could take a following server element, list range, or
+  `use()` result as its own, so the rebuilt element showed the wrong content or
+  went missing. A block mismatch inside an element that hydration adopts from the
+  server still reports as before.
+- 02e4eb0: Keep a component root that hydration rebuilt after a mismatch where the server
+  node it replaced stood.
+
+  When a component's template root did not match the server node at that
+  position, hydration reported the mismatch and rebuilt the root on the client,
+  but inserted it at the end of its range. Server siblings that later components
+  adopted then rendered before it, and server content after it that no client
+  sibling claimed stayed on the page. The rebuilt root now takes the replaced
+  node's place. Unclaimed server content after it in the same `@if` or `@switch`
+  arm is removed as part of the one reported mismatch. A `@switch` or `@if` that
+  the server did not render keeps the rebuilt root inside its own range. A text
+  hole after the rebuilt root no longer throws `NotFoundError`. A Suspense
+  boundary that resumes hydration after the rebuild places the root the same way
+  and keeps the server siblings it adopted.
+- 5f354d2: When hydration rebuilds an element whose server markup does not match, a text
+  hole inside the rebuilt element now shows the client's text even when its
+  element carries `suppressHydrationWarning`. Suppression keeps the server's text,
+  but a rebuilt element holds the client template's placeholder rather than
+  server output, so the client text was dropped and the element rendered blank in
+  both development and production builds. Suppression still keeps a differing
+  server text on an element that hydration adopts from the server.
+- 02e4eb0: Keep the server node on screen until a root that hydration rebuilt over it
+  commits.
+
+  When a template root did not match the server node at its position, hydration
+  removed that node as soon as it built the replacement. If the replacement then
+  suspended (a `use()` after the mismatched root), the server content vanished
+  while it waited. A deferred `<Hydrate split={false}>` boundary also retried the
+  suspended arm from the next server sibling, so the retry mismatched that sibling
+  too, reported a second mismatch and rebuilt it. The server node now stays until
+  its replacement commits in its place. A retry rebuilds over the same node
+  without reporting it again. A `@switch` or `@if` arm that suspended this way
+  still owns the node, so a case change replaces it.
+- ad203e9: When hydration rebuilds an element whose server markup does not match, it now
+  reports only the structural mismatch. A text hole inside the rebuilt element
+  used to compare the client template's own placeholder as if it were server
+  text, so development builds logged a second, false "server rendered text"
+  mismatch for the same recovery. A text mismatch inside an element that
+  hydration adopts from the server still reports as before.
+- 5e586e2: Fix a `<Hydrate>` activation that suspends on a child inside a hydrated component fragment.
+
+  - **Following components:** when the activation resumed, each component after that one in the same block found the hydration cursor still inside the earlier component's server range. It removed or duplicated server nodes, even when the server rendered exactly what the client did. Those components now adopt their own server ranges.
+  - **Client-built children:** a child that mounted inside content hydration rebuilt on the client now completes as a client render when it resumes. It no longer adopts a server node outside the rebuilt content.
+  - **Fragments with extra roots:** a component fragment that holds more roots than the server rendered in its range, such as a component call followed by text, is now rebuilt and reported once. It is no longer adopted over another component's content. This also applies when the component suspends before its fragment is hydrated and then resumes. Below a passthrough root, whose ranges can sit one level off, hydration keeps its previous behavior.
+- f34be34: Call `hydrateRoot`'s `onRecoverableError` when hydration discards server content
+  for an `@if` arm the client does not render, a branch range the server encoded as
+  something else, or a runtime host element's content. These recoveries already
+  rebuilt the DOM but reported nothing, in development or production. A list whose
+  server rendered its `@empty` arm while the client has items now reports at the
+  list itself, once, including when a suspended boundary or root retries
+  hydration. A dormant boundary whose props changed before it activated still
+  repairs these ranges without reporting or warning.
+- d5030cf: Stop a focused host's removal from running handlers of components that already
+  unmounted.
+
+  Teardown disposes a component before it detaches the component's DOM, and
+  Chromium dispatches `focusout` synchronously while it removes a focused element.
+  That new event no longer starts handlers on hosts whose component has unmounted,
+  so a signal write from `onBlur` no longer reports `ScopeDisposedError` and a
+  plain `onBlur` no longer runs for an unmounted component. Still-mounted
+  ancestors and other roots still receive the event, and an event that was
+  already being dispatched when the component unmounted keeps its handlers until
+  it finishes. A ViewTransition deletion keeps its committed handlers live until
+  it publishes.
+- 15c7b97: A host rendered into a value hole, such as `{show && <div onBlur={…}><input /></div>}`,
+  no longer runs its handlers for the `focusout` that the browser dispatches while
+  the host is being removed. The component that rendered it stays mounted, so
+  these hosts are now retired when they are removed rather than when a component
+  unmounts. This covers value holes, nested `createElement` children, a host
+  whose tag changes, a root that renders a descriptor, and removals published by
+  a View Transition. Still-mounted ancestors keep receiving the event, and an
+  event that was already being delivered keeps its handlers until it finishes.
+- 3971840: Give a signal component below returned JSX the same instance on the server and
+  in the browser. A `.tsx` component, or a plain function in a `.tsrx` module, that
+  returns host elements no longer adds a level of its own to the identity of the
+  signal and query declarations below it, and neither does a dynamic tag that
+  resolves to a host element. Hydration now resumes the server's cells and query
+  results for those components instead of starting fresh ones.
+
+  Instance identity now follows authored component invocations only, so it no
+  longer changes when a module starts importing `octane/signals`.
+- d930afb: A root without a Suspense boundary that suspends while hydrating now reports a
+  hydration mismatch once. When its first attempt had already rebuilt mismatched
+  content, that attempt's diagnostics were published even though it was
+  discarded, and the retry reported the same mismatch again, so development logged
+  the warning twice and `onRecoverableError` fired twice. Some recoveries, such
+  as a renderable or only-child hole over server text, or a list the server
+  rendered differently, also left a half-built client subtree in place of the
+  server content while the root was pending. A suspended root attempt now leaves
+  the server content as the server rendered it, and its mismatch diagnostics and
+  `onRecoverableError` reports are published only by the attempt that commits.
+- d930afb: Keep server text and style values in place while a root without a Suspense
+  boundary is suspended during hydration, and report their mismatches once when
+  it commits. A first attempt that repaired a value and then suspended used to
+  show the client's text or style in the server's markup while the root was
+  pending, and the attempt that committed found the text already matching, so a
+  text mismatch never reached `onRecoverableError` and development builds logged
+  no warning. Attribute, class, style, and `dangerouslySetInnerHTML` warnings now
+  wait for the committing attempt instead of logging once per attempt. When a
+  suspended root render, including a client update, rolls back after removing a
+  namespaced attribute such as `xlink:href`, the attribute now comes back in its
+  namespace.
+- 791f12e: Fixed-node `'use dom bindings'` views that bind a URL attribute (`href`, `src`, `action`, `formAction`, `xlink:href`, …) now compile to the smaller scalar adopter, with the URL sanitizer attached only to those views. A URL view adopted through `adoptBindings` ships about 32% less gzip. URL updates published by an early binding are now kept when the application later hydrates over it, as other attributes already were, instead of being reverted to the rendered value.
+- 9aa6736: Select the correct SSR option when its implicit value consists of dynamic text separated by hydration comments.
+- 5ef4f9a: Update a signal-capable text hole with one text write.
+
+  When a module renders signal-capable bindings, its later identifier holes
+  compile to `bindSignalChild`. For a plain primitive in an ordinary
+  marker-bounded hole, that binding reached the general `childSlot` path on every
+  render. It now keeps `textHoleUpdate`'s fast path: an unchanged primitive does
+  nothing, and a changed one rewrites the slot's Text node. Signal handles,
+  elements, raw-HTML hosts, and mode switches still take the general path.
+- 97618d7: A calculated descriptor array rendered as an element's only child inside a
+  component's children body skips reconciliation again while it is unchanged. Since
+  renderable holes started accepting signal handles, these holes lost the compiler's
+  cached-array region. Every parent update then walked the unchanged list and its
+  items. The region now wraps the signal-capable binding. A signal handle, or any
+  other value that is not an unchanged plain data array, still rebinds on every
+  render, and switching back to a previously cached array rebuilds it.
+- b5277d1: Keep directive-local bindings inside split `<Hydrate>` boundaries.
+
+  A `@catch (error, reset)` reset parameter, an `@for` index, an `@switch` arm
+  local, or a `case` local inside a handler is no longer passed from the parent
+  component into the split child, where it was undefined and threw a
+  `ReferenceError` during hydration. `@empty` now reads the enclosing scope
+  rather than the loop binding, so the outer value reaches the split child. A
+  boundary nested inside one of these scopes also keeps the directive binding
+  instead of picking up a same-named module declaration.
+- 5ef4f9a: Encode a keyed component descriptor's key once per server render path.
+
+  During SSR, a keyed component descriptor already carries its key in the
+  enclosing child identity scope. Since async signals, the component invocation
+  also appended a second encoding of the same key, which added one key encoding
+  and its UTF-16 scan per keyed descriptor row. The duplicate is gone. Replay
+  identity is unchanged, and signal instance keys still use the descriptor key.
+- 63f07f5: Stop reporting a hydration mismatch when a `@switch` or `@if` case changes
+  because a `<Hydrate>` boundary's props changed before it activated.
+
+  When a boundary's captures change before it activates, the server HTML predates
+  the client's state, so hydration builds the changed case on the client without a
+  report. A case whose first node is an element or a component still called
+  `onRecoverableError` and logged "the client expected <b> but the server
+  rendered …" in development. This happened when the case changed while the
+  boundary was pending after it had adopted the server's case, or when an early
+  activation rendered a different case than the server. Those cases are now
+  quiet, like fragments, text, and lists already were. A case the server did not
+  render is still reported when the captures are unchanged.
+- 2b4b3fc: Keep the server DOM intact when a deferred `Hydrate` boundary retries after its captures changed. If a mounted parent updated a boundary while its first activation was suspended, the retry rendered new content over server nodes that other blocks had already adopted. That content was a component swapped in by a dynamic call, a row inserted into a keyed list, or a renderable hole's new component, list, or text. Rows went missing, a sibling's server node was replaced, and the swap reported a false hydration mismatch. Content an update creates during hydration now builds on the client beside the adopted nodes, including when it suspends and a later retry resumes it, and nothing is reported.
+- b98179f: Reveal a streamed Suspense boundary completely when its fallback renders an `@for` list (with items or its `@empty` arm) or a `'use dom bindings'` view directly, rather than inside a host element. The inline swap script now counts those list and binding ranges when removing the fallback. Before, it stopped early: it left the fallback's close marker, which made `hydrateRoot` throw `HierarchyRequestError`, or left fallback nodes visible beside the revealed content. The optional streaming view-transition driver uses the same rule, so it now captures the exit of every fallback element.
+- 2b69559: Strong mode no longer reports `OCTANE_STRONG_EFFECT_STATE_UPDATE` for a state
+  update in a `catch` clause that can only run after its `try` block yields. The
+  common effect pattern
+  `try { setData(await api.get(id)); } catch (error) { setError(error); }` now
+  compiles. A `catch` stays synchronous when something before the `try` block's
+  first guaranteed `await` can throw, such as a call, `new`, `throw`, or
+  iteration. The awaited call, calls it chains from through `then`, `catch`, or
+  `finally`, and calls written as array-literal elements of an awaited
+  `Promise.all`, `allSettled`, `any`, or `race` are trusted to reject rather than
+  throw. Their callees and arguments still count. `finally` clauses and statements
+  after the `try` follow the same rule.
+- 5ef4f9a: Let Strong-mode keyed `@for` rows that log with `console` skip re-rendering again.
+
+  Since the change that keeps rows reading module state or mutable globals live,
+  a row body containing a diagnostic call such as `console.log('row', item.id)`
+  also lost its survivor skip, because `console` is a host global. Every console
+  operation returns undefined, so the receiver of a statement-position
+  `console.method(…)` call cannot reach row output. Strong production builds now
+  reuse those rows again, as documented. The call's arguments are still row
+  reads. A module binding named `console` still disables the skip.
+- 1c44df5: Require Strong effect cleanup to actually cancel or ignore asynchronous state updates. `OCTANE_STRONG_EFFECT_DATA_FETCH` now covers any state update after an `await` or in a `.then`, `.catch`, or `.finally` callback of effect-owned work, not only `fetch`. The returned cleanup must abort an `AbortController` whose `signal` reaches the request, or assign a flag declared in the effect that guards the update after the last `await`. Empty, opaque, and unconnected cleanups, component- or module-scoped flags, and ref flags are errors. Compatibility modules and emitted code are unchanged.
+- f151614: Add `OCTANE_STRONG_EFFECT_HIDDEN_DEPENDENCY`. Strong effect setup may no longer call a state getter, read `current` from a value ref, or read a reassigned module `let` or `var`, because none of them is an inferred dependency. Refs attached with `ref=` or passed to a call, component, or hook remain readable, and reads in cleanup, deferred callbacks, and `useEffectEvent` callbacks remain valid. Compatibility modules and emitted code are unchanged.
+- f151614: Add `OCTANE_STRONG_EFFECT_RESOURCE_LEAK`. Platform resources acquired in Strong effect setup must be released by the returned cleanup: event listeners on browser targets, `matchMedia` lists, attached elements, and connections (by matching `removeEventListener` or an aborted signal), `on<event>` handler properties, intervals and self-rescheduling timers, `ResizeObserver`, `IntersectionObserver`, `MutationObserver`, and `PerformanceObserver`, `WebSocket`, `EventSource`, and `BroadcastChannel`, and geolocation watches. User objects' subscriptions stay legal. Compatibility modules and emitted code are unchanged.
+- 1c44df5: Close zero-delay and custom-hook bypasses of Strong's synchronous effect update check. `OCTANE_STRONG_EFFECT_STATE_UPDATE` now treats callbacks that run before the next paint as effect setup: `startTransition`, a `useTransition` start function, `queueMicrotask`, `.then`/`.catch`/`.finally` on `Promise.resolve(value)` or `Promise.reject()`, `setTimeout` without a positive delay, and code after an `await` that resumes without waiting on any path, such as `await null` or `await (flag ? load() : null)`. It also follows state tuples, updaters, callbacks, and `useTransition` tuples and start functions returned by same-module custom hooks, giving each hook call its own state, in `.tsrx`, `.tsx`, and plain TypeScript modules. `requestAnimationFrame`, timers with a positive delay, and external subscription callbacks remain event-driven. Compatibility modules and emitted code are unchanged.
+- cda985b: Cache Strong-mode inline render expressions the way the same expression is cached when a `const` names it. In a production client build, an eligible expression in a host child hole, a host attribute, or a component prop, such as `<output>{total.toFixed(2)}</output>` or `<List rows={visible(rows)} />`, now recomputes only when its component-local inputs change, matching React Compiler. Expressions in `@if`, `@for`, `@switch`, and `@try` arms, component children, and built-in boundaries still evaluate only when they render. Expressions that contain JSX, event handlers, refs, and keys keep their existing lowering. A component that returns JSX gets the cache only after an authored hook call, so a hookless one stays an ordinary function. Parallel `use()` warm plans still start a child's request from the authored prop expression. Compatibility mode, development builds, and the server are unchanged.
+- b6a414a: Strong mode now rejects imperative writes to DOM that the template renders.
+  When a `useRef` provably names exactly one intrinsic element in the same
+  component, writing `textContent`, `innerText`, or the child list of an element
+  with rendered children, or changing its class, a template-set attribute, or a
+  template-set `style` property, reports `OCTANE_STRONG_MANAGED_DOM_WRITE`. Writing
+  `innerHTML`, `outerHTML`, `insertAdjacentHTML()`, or `setHTMLUnsafe()` to a
+  rendered element reports `OCTANE_STRONG_RAW_HTML_WRITE`; use
+  `dangerouslySetInnerHTML={trustHTML(html)}` instead. Refs passed to components or
+  helpers, reassigned refs, and writes to DOM the template does not own stay valid.
+  Compatibility mode and emitted code are unchanged.
+- 09565b4: Expose the bundler compiler's per-module Strong decision as `strongModuleStatus(code, id)`.
+
+  It reports whether a module compiles under Strong mode through its own
+  `"use strong"` directive, the application's `strong` policy, or both, using the
+  same rules `transform` applies. `octane analyze` uses it for its Strong coverage
+  baseline. `octane/compiler/bundler` also re-exports
+  `findLeadingJsxImportSourcePragma`. Compiled output is unchanged.
+- 752028d: Strong mode now also reports a state value mutated outside render through a
+  whole state tuple passed to a local helper (including a destructured tuple
+  parameter), through an Effect Event called with
+  the state, and through a helper, updater, or reducer parameter that has a
+  default value. A `useLinkedState` reconciler that returns a literal now proves
+  array, `Map`, and `Set` mutators on that state, like a lazy `useState`
+  initializer.
+- b6a414a: Strong mode now rejects `document.getElementById()`, `querySelector()`,
+  `querySelectorAll()`, and `getElementsByClassName()` when a literal selector
+  matches a literal `id` or class that the same component renders
+  (`OCTANE_STRONG_OWN_MARKUP_QUERY`). Attach a ref to the element instead. Portal
+  targets, dynamic selectors, and markup rendered by other components stay valid.
+  Compatibility mode and emitted code are unchanged.
+- 0339abc: Strong mode closes three gaps in its render determinism checks. Callbacks that
+  known array methods (`map`, `filter`, `forEach`, `reduce`, `flatMap`, `some`,
+  `every`, `find`, `sort`, and their variants) run synchronously are now checked
+  as render, so `items.map(item => <li key={Math.random()} />)` is rejected.
+  `crypto.randomUUID()` and `crypto.getRandomValues()` join
+  `OCTANE_STRONG_RENDER_IMPURE_CALL`, which now suggests `useId()` for element IDs
+  and a stable item ID for keys. Formatting a provable `Date` or an `Intl` service
+  during render without an explicit locale and time zone reports
+  `OCTANE_STRONG_RENDER_LOCALE_FORMAT`, because server and browser output can
+  differ. Compatibility mode and emitted code are unchanged.
+- 752028d: `OCTANE_STRONG_STALE_STATE_UPDATE` no longer reports state an Effect Event
+  captures, in its body or in helpers it calls synchronously, because an Effect
+  Event reads the latest committed values even when a timer or promise calls it.
+  A snapshot passed to an Effect Event from deferred code, values computed from
+  it, and timer or promise callbacks created inside the Effect Event are still
+  checked. So is a value computed from state at the call site and passed to an
+  Effect Event or helper from deferred code, like `apply(n + 1)` after an await.
+- 54ff59e: Keep a resolved Suspense arm's server content in place while its first hydrating attempt is suspended, even when that attempt had to rebuild a mismatched node. The discarded attempt no longer removes server nodes or leaves client-built ones behind, and the attempt that commits reports the structural mismatch, and calls `onRecoverableError`, once.
+- 25017f3: Keep server text and attribute values in a resolved `@try` arm while its
+  hydration is suspended, and report their mismatches once when it commits. An
+  attempt that repaired a value and then suspended used to show the client value
+  in the server's markup before the arm hydrated, and the attempt that committed
+  found the value already matching, so a text mismatch never reached
+  `onRecoverableError` and development builds logged no warning. Attribute,
+  style, and `dangerouslySetInnerHTML` warnings now also wait for the committing
+  attempt instead of logging from an attempt that is thrown away.
+- 5ef4f9a: Stop allocating a closure for every transition and delegated event.
+
+  Since async signals, each `startTransition` call created a native candidate
+  resolver closure. Each delegated event handler invocation also created a
+  callback closure, even when it did not enter another signal owner. The
+  transition resolver is now a module function that reads the active Action
+  batch. The handler callback is created only when the event enters a different
+  signal owner.
+- b682c2b: When hydration finds other server content where a component call expects its
+  range, the component is now built where that content stood, and only that
+  content is discarded: a later sibling component keeps its server range and
+  adopts its server nodes instead of being rebuilt with a second mismatch report.
+  Hookless components that return a fragment now recover the same way. A
+  component that suspends while it is built this way, or a fragment rebuilt over
+  another component's range whose hole suspends, now leaves the server content on
+  screen until the attempt that completes, which reports the mismatch once.
+- 56de31a: When hydration builds a component on the client because the server rendered no range for it, it now discards only the server nodes in that component's place and leaves the server range of a later sibling call for that call to adopt. Previously the discard ran into the sibling's range, removed its content and left a stray close marker behind, so the sibling rebuilt without a report of its own. The built component also stays ahead of those siblings instead of being placed at the end of its parent range.
+- ad12525: Adopt a component whose template has several roots when hydration finds the server's nodes without a range of its own, as when the server rendered a different `@if` arm with the same markup inline. In development builds the component adopted its first root, but the next component then read that root as its own and reported a mismatch. In production builds the component was rebuilt and reported as a mismatch. Both builds now adopt the server nodes when every root matches, report nothing, and continue after the last root, so the next component adopts its own server range.
+- 85cb387: Let universal-renderer modules declare `async` and generator functions that JSX
+  never mounts. The universal compiler's synchronous-body restriction now applies
+  only once a function is actually compiled as a component — the `@{ … }` form, a
+  JSX-shaped return, or component usage — so a plain async helper in a `.tsrx`
+  file no longer fails the native-renderer build.
+- 517b61d: Reuse the Vite plugin's preflight classification of an unchanged module across
+  client environments that share one plugin instance, such as Vite's
+  `builder.sharedPlugins` or a dev server with several client environments.
+
+  Before this change, every environment parsed and reclassified the same source
+  again, including host-owned TypeScript that the plugin passes through
+  unchanged. The plugin now keeps a small summary per module, keyed by
+  environment, specialization flags, and the full module ID, and checked against
+  a digest of the exact source. It holds neither the source nor its AST. The
+  summary is cleared when the compiler is reset and on every watch event. The
+  compiler still parses each module for its own transform, and output is
+  unchanged.
+
 ## 0.7.1
 
 ### Patch Changes
