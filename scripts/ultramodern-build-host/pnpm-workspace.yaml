@@ -1,0 +1,7 @@
+packages:
+  - .
+packageImportMethod: clone-or-copy
+autoInstallPeers: false
+strictPeerDependencies: true
+patchedDependencies:
+  '@tsrx/prettier-plugin@0.4.10': ../../patches/@tsrx__prettier-plugin@0.4.10.patch

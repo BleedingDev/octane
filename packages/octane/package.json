@@ -1,6 +1,6 @@
 {
   "name": "octane",
-  "version": "0.7.1",
+  "version": "0.7.1+ultramodern.a01b80f4dd9f",
   "license": "MIT",
   "type": "module",
   "sideEffects": [
@@ -17,7 +17,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/octanejs/octane.git",
+    "url": "git+https://github.com/bleedingdev/octane.git",
     "directory": "packages/octane"
   },
   "main": "src/index.ts",
@@ -326,17 +326,17 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@tsrx/core": "catalog:default",
-    "@types/react": "catalog:default",
-    "@volar/language-core": "catalog:default",
-    "@volar/typescript": "catalog:default",
+    "@tsrx/core": "0.4.0",
+    "@types/react": "19.2.18",
+    "@volar/language-core": "2.4.28",
+    "@volar/typescript": "2.4.28",
     "alien-signals": "3.2.0",
-    "csstype": "catalog:default",
-    "devalue": "catalog:default",
+    "csstype": "3.2.3",
+    "devalue": "5.8.2",
     "entities": "7.0.1",
-    "es-module-lexer": "catalog:default",
-    "esrap": "catalog:default",
-    "@tsrx/oxc": "catalog:default"
+    "es-module-lexer": "1.7.0",
+    "esrap": "2.3.2",
+    "@tsrx/oxc": "0.16.0"
   },
   "peerDependencies": {
     "react": "^19.0.0",
@@ -372,5 +372,10 @@
     "viem": "catalog:default",
     "vite": "catalog:default",
     "vitest": "catalog:default"
+  },
+  "ultramodernSource": {
+    "upstreamCommit": "676a4ee6db59854d6b711921f4ac808845dcdbcd",
+    "implementationCommit": "a01b80f4dd9f63cf4f937a1f775fcd0b0a86b3ba",
+    "runtimePatchSha256": "2262f080f4d2927477cb17d353761958be25206ee2c9e4fc7e3258891659a952"
   }
 }
