@@ -11856,9 +11856,13 @@ export function componentSlotLite<P>(
 	} else if (hydration !== null) {
 		// A hydrating replay, such as a suspended activation's resume, re-renders
 		// an adopted range without adopting it again; its new siblings still adopt
-		// from after it.
+		// from after it. A root the replay rebuilt over the range's first node
+		// leaves the rest of that range's server content (settleClaim).
 		const range = hydration.liteRanges.get(scope);
-		if (range !== undefined) hydration.node = getNextSibling(range.end);
+		if (range !== undefined) {
+			if (hydration.rebuiltTail !== null) hydration.sweepRebuiltTail(range.end);
+			hydration.node = getNextSibling(range.end);
+		}
 	}
 }
 
@@ -19461,7 +19465,10 @@ class HydrationCapability {
 	 * from `from` (endClaim). When no template adopted the range's first node,
 	 * the content is the owner's slots, and the last one left the cursor past
 	 * its range. A cursor on `end` means nothing is left, and anything less
-	 * certain is left in place. The slot at `scope`'s `slotKey` owns the range.
+	 * certain is left in place. When the content is a root rebuilt over the
+	 * range's first node, the tail is the rest of the server content that the
+	 * root's reported mismatch replaced, which goes quietly (sweepRebuiltTail).
+	 * The slot at `scope`'s `slotKey` owns the range.
 	 */
 	settleClaim(
 		owner: Scope,
@@ -19472,6 +19479,10 @@ class HydrationCapability {
 	): void {
 		const cursor = this.node;
 		if (cursor === end || this.abandoned) return;
+		if (from === this.rebuiltTail && from !== null) {
+			this.sweepRebuiltTail(end);
+			if (this.node === end) return;
+		}
 		if (from === undefined) {
 			// A slot that adopted a server node without a range parks the cursor
 			// on that node, so the cursor must follow the last slot's own range.
@@ -20621,6 +20632,9 @@ class HydrationCapability {
 					framedRemainder === undefined ? (unframedRemainder ?? null) : framedRemainder,
 				);
 			this.rebuiltTail = this.node;
+			// The rebuilt root can be a range's whole content: what the server
+			// rendered after the node it replaces is then the range's tail.
+			if (cursor === this.claimFrom) this.claimRoots(cursor, null);
 			return (this.rebuiltRoot = this.freshClone(template));
 		}
 		if (isFragment) {
@@ -20671,13 +20685,14 @@ class HydrationCapability {
 
 	/**
 	 * A template adopted `root`, the first node of the range whose claim is
-	 * open. When the template is that range's content, record the first node
-	 * after its roots: after `root`, or after the `fragment` template's roots,
-	 * stepped as the compiled walk steps them. The template is the content when
-	 * it renders in the range's owner: the block whose markers the range's
-	 * are, a component inheriting them, or the lite component that adopted the
-	 * range. A component that adopts `root` without a range of its own renders
-	 * in its own scope, and the slots after it claim the nodes after its root.
+	 * open, or rebuilt its single root over it. When the template is that
+	 * range's content, record the first node after its roots: after `root`, or
+	 * after the `fragment` template's roots, stepped as the compiled walk steps
+	 * them. The template is the content when it renders in the range's owner:
+	 * the block whose markers the range's are, a component inheriting them, or
+	 * the lite component that adopted the range. A component that adopts `root`
+	 * without a range of its own renders in its own scope, and the slots after
+	 * it claim the nodes after its root.
 	 * Returns false when the range ends before the template's roots do: every
 	 * root, a hole included, renders at least one server node, so the server
 	 * rendered other content there. Below a passthrough root, the range may
