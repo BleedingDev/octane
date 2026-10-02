@@ -15809,7 +15809,7 @@ function createHydrateSlot(
 	if ((STAGED_DOM?.view(wrapper) ?? wrapper).parentNode !== parentNode)
 		(STAGED_DOM?.view(parentNode) ?? parentNode).insertBefore(
 			wrapper,
-			hydration?.rebuiltAt(wrapper, parentNode) ?? parentBlock.endMarker,
+			hydration ? hydration.rebuiltAt(wrapper, parentBlock) : parentBlock.endMarker,
 		);
 	if (!(STAGED_DOM?.view(wrapper) ?? wrapper).hasAttribute(HYDRATE_ID_ATTR))
 		(STAGED_DOM?.view(wrapper) ?? wrapper).setAttribute(HYDRATE_ID_ATTR, boundaryId);
@@ -20611,11 +20611,6 @@ class HydrationCapability {
 			this.node = getNextSibling(isBlockOpen(cursor) ? this.close(cursor) : cursor);
 			this.replaced = cursor;
 			this.reachedRangeEnd(this.node);
-			// A lite call that found no server range inserts before the node it
-			// found there, which the rebuilt root replaces. A lite block is only that
-			// insertion context, so point it past the node: when the node was its
-			// host's last child, the root is appended in its place.
-			if (block instanceof LiteBlockImpl && block.endMarker === cursor) block.endMarker = this.node;
 			if (claimsRoot)
 				this.claimRootRemainder(
 					framedRemainder === undefined ? (unframedRemainder ?? null) : framedRemainder,
@@ -20800,15 +20795,19 @@ class HydrationCapability {
 	}
 
 	/**
-	 * Where a detached root that mismatch recovery rebuilt goes in `parent`:
-	 * in place of the server node it replaces, which goes now (first, since a
-	 * Document holds one element), or else before the server node that
-	 * followed that one while it is still there. Undefined for any other root,
-	 * which goes at its block's end. A rebuilt root commits before any later
-	 * sibling can rebuild, since the subtree it holds no longer hydrates.
+	 * Where a detached root goes in its block's parent. A root that mismatch
+	 * recovery rebuilt goes in place of the server node it replaces, which goes
+	 * now (first, since a Document holds one element), or else before the
+	 * server node that followed that one while it is still there. Any other
+	 * root goes at its block's end. A rebuilt root commits before any later
+	 * sibling can rebuild, since the subtree it holds no longer hydrates. Null
+	 * appends: the replaced node was its parent's last child, and the block's
+	 * end may be that very node (a single-root call anchors on the server node
+	 * its template's walk found).
 	 */
-	rebuiltAt(root: Node, parent: Node): Node | null | undefined {
-		if (root !== this.rebuiltRoot) return undefined;
+	rebuiltAt(root: Node, block: Block): Node | null {
+		if (root !== this.rebuiltRoot) return block.endMarker;
+		const parent = block.parentNode;
 		const replaced = this.replaced;
 		const next = this.rebuiltTail;
 		this.replaced = null;
@@ -20819,7 +20818,7 @@ class HydrationCapability {
 			removeHydrationRange(replaced, last);
 			return at;
 		}
-		return next !== null && domNode(next).parentNode === parent ? next : undefined;
+		return next !== null && domNode(next).parentNode === parent ? next : block.endMarker;
 	}
 
 	/**
@@ -21669,7 +21668,7 @@ function commitBag<T>(scope: Scope, root: Node | null, bag: T): T {
 			const parent = block.parentNode;
 			(STAGED_DOM?.view(parent) ?? parent).insertBefore(
 				root,
-				hydration?.rebuiltAt(root, parent) ?? block.endMarker,
+				hydration ? hydration.rebuiltAt(root, block) : block.endMarker,
 			);
 		}
 	}
