@@ -237,6 +237,33 @@ export function IfLaterHost(props: { on: boolean }) @{
 	</div>
 }
 
+// A hookless component whose body is a fragment (not a single host element).
+function FragLeaf(props: { v: string }) @{
+	<>
+		{props.v as string}
+	</>
+}
+
+// The arm's second component returns a fragment body, which finds no server
+// range and adopts the text node there in place. The server's arm has another
+// element after it that must be discarded.
+export function IfLaterFragment(props: { on: boolean }) @{
+	<div id="r">
+		@if (props.on) {
+			<>
+				<Leaf v="x" />
+				<FragLeaf v="y" />
+			</>
+		} @else {
+			<>
+				<Leaf v="x" />
+				y
+				<b>{'z' as string}</b>
+			</>
+		}
+	</div>
+}
+
 // A component in a hole of the arm's own template finds no server range and
 // adopts the element there in place. The template already recorded where the
 // arm ends, after its last root.

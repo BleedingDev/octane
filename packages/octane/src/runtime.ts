@@ -11888,7 +11888,7 @@ function renderLiteInPlace<P>(
 			root,
 		)
 	)
-		hydration.parkPast(root, parentScope);
+		hydration.parkHere(parentScope);
 }
 
 // Keep the fresh-subtree callback's extra captures out of ordinary lite dispatch.
@@ -18831,6 +18831,12 @@ class HydrationCapability {
 	private readonly unframedRootRanges = new WeakMap<Node, Node>();
 	/** The server node renderInPlace's body may adopt, until a template does. */
 	private inPlace: Node | null = null;
+	/**
+	 * When a fragment body clears `inPlace`, the close of its last root's range
+	 * (or the last root itself when it is not a range). renderInPlace steps past
+	 * it so the cursor lands after all fragment roots, not just the first.
+	 */
+	private inPlacePark: Node | null = null;
 	/** Pairs discovered while matching an outer range; released with this hydration pass. */
 	private matchingCloses: WeakMap<Node, Comment> | null = null;
 	/** First unclaimed root sibling after a compiled root clone; undefined until known. */
@@ -19210,6 +19216,7 @@ class HydrationCapability {
 	renderInPlace<T>(render: (target: T) => void, target: T, root: Node): boolean {
 		const outer = this.inPlace;
 		this.inPlace = root;
+		this.inPlacePark = null;
 		let adopted = false;
 		try {
 			render(target);
@@ -19217,7 +19224,11 @@ class HydrationCapability {
 		} finally {
 			this.inPlace = outer;
 		}
-		if (adopted) this.node = getNextSibling(root);
+		if (adopted) {
+			const last = this.inPlacePark;
+			this.inPlacePark = null;
+			this.node = last !== null ? getNextSibling(last) : getNextSibling(root);
+		}
 		return adopted;
 	}
 
@@ -19672,6 +19683,19 @@ class HydrationCapability {
 		const next = (this.node = getNextSibling(close));
 		if (parent === this.arm) {
 			this.armTail = next;
+			this.armSlots = parent.slots.length;
+		}
+	}
+
+	/**
+	 * Record the arm tracking at the current cursor, which renderInPlace already
+	 * parked past the adopted content. Unlike parkPast this does not move the
+	 * cursor: renderInPlace already advanced it past all roots (including the
+	 * extra roots of a fragment body).
+	 */
+	parkHere(parent: Scope): void {
+		if (parent === this.arm) {
+			this.armTail = this.node;
 			this.armSlots = parent.slots.length;
 		}
 	}
@@ -20298,6 +20322,19 @@ class HydrationCapability {
 					: lazyFragmentRootMatches(cursor, lazy!, this))
 			) {
 				if (cursor === this.claimFrom) this.claimRoots(cursor, template ?? lazy!);
+				if (cursor === this.inPlace) {
+					this.inPlace = null;
+					const count = templateRootCount(template ?? lazy!);
+					if (count > 1) {
+						let node: Node | null = cursor;
+						for (let i = count; i > 1; i--) {
+							node = this.sibling(node!, 1);
+							if (node === null || isBlockClose(node)) break;
+						}
+						if (node !== null && !isBlockClose(node))
+							this.inPlacePark = this.isOpen(node) ? this.close(node) : node;
+					}
+				}
 				return { __oct_vfrag: true, firstChild: cursor } as unknown as Node;
 			}
 			return this.rebuildFragment(template ?? resolveLazyTemplate(lazy!), cursor, loc);
@@ -32413,7 +32450,7 @@ function componentSlotImpl(
 				}
 			}
 			// An arm that ends with this root cannot read its end off the cursor.
-			if (adopted) hydration!.parkPast(hydrationCursor!, parentScope);
+			if (adopted) hydration!.parkHere(parentScope);
 		} else {
 			const b = createBlock(
 				'dynamic',

@@ -254,6 +254,19 @@ describe.each([
 		expect(markup(s.host)).toBe('<em>x</em><b>b</b>');
 	});
 
+	it('discards the server tail after a fragment body adopted in place and reports it', async () => {
+		const s = await hydrate('IfLaterFragment', { on: false }, { on: true });
+
+		expect(container.querySelector('#r')).toBe(s.host);
+		expect(markup(s.host)).toBe('<em>x</em>y');
+		expect(s.recoverable).toHaveLength(1);
+
+		s.render({ on: false });
+		expect(markup(s.host)).toBe('<em>x</em>y<b>z</b>');
+		s.render({ on: true });
+		expect(markup(s.host)).toBe('<em>x</em>y');
+	});
+
 	it('builds the components a longer client arm adds and reports it once', async () => {
 		const s = await hydrate('SwitchComponents', { k: 'one' }, { k: 'two' });
 
@@ -277,6 +290,7 @@ describe.each([
 		{ name: 'IfRangeAfterHost', props: { on: false }, html: '<em>x</em><b>b</b><em>z</em>' },
 		{ name: 'IfInheritedHost', props: { on: true }, html: '<em>x</em>' },
 		{ name: 'IfLaterHost', props: { on: true }, html: '<em>x</em><em>y</em>' },
+		{ name: 'IfLaterFragment', props: { on: true }, html: '<em>x</em>y' },
 		{ name: 'HoleWithoutRange', props: { on: true }, html: '<em>x</em><b>b</b>' },
 		{
 			name: 'NestedArms',
