@@ -1,0 +1,55 @@
+diff --git a/src/analyze/style-analyze.js b/src/analyze/style-analyze.js
+index bd352ed60b5bc84fb69dc3fece8c4efa071b4dec..61e18ec7cc3cb783853ea61459b8183583882b25 100644
+--- a/src/analyze/style-analyze.js
++++ b/src/analyze/style-analyze.js
+@@ -126,6 +126,19 @@ function member_root(expression) {
+ 	return current.type === 'Identifier' ? current : null;
+ }
+ 
++/**
++ * An editor parse keeps parentheses (`preserveParens`), so a formatted
++ * multi-line `const theme = (<style>…</style>);` declares a
++ * `ParenthesizedExpression` around the block.
++ *
++ * @param {AST.Node | null | undefined} node
++ * @returns {AST.Node | null | undefined}
++ */
++function without_parens(node) {
++	while (node?.type === 'ParenthesizedExpression') node = node.expression;
++	return node;
++}
++
+ /**
+  * @param {Binding} binding
+  * @param {AST.Expression} expression the `apply` entry for the member chain
+@@ -137,7 +150,7 @@ function resolve_local_member(binding, expression) {
+ 	if (expression.object.type !== 'Identifier' || expression.property.type !== 'Identifier') {
+ 		return undefined;
+ 	}
+-	const object = binding.initial;
++	const object = without_parens(binding.initial);
+ 	if (object?.type !== 'ObjectExpression') return undefined;
+ 	const name = expression.property.name;
+ 	for (const property of object.properties) {
+@@ -146,9 +159,9 @@ function resolve_local_member(binding, expression) {
+ 			!property.computed &&
+ 			((property.key.type === 'Identifier' && property.key.name === name) ||
+ 				(property.key.type === 'Literal' && property.key.value === name)) &&
+-			property.value.type === 'JSXStyleElement'
++			without_parens(property.value)?.type === 'JSXStyleElement'
+ 		) {
+-			return property.value;
++			return /** @type {AST.JSXStyleElement} */ (without_parens(property.value));
+ 		}
+ 	}
+ 	return undefined;
+@@ -211,7 +224,8 @@ export function analyze_styles(ast, scopes, state) {
+ 		/** @type {AST.JSXStyleElement | null | undefined} */
+ 		let target;
+ 		if (expression.type === 'Identifier') {
+-			target = binding.initial?.type === 'JSXStyleElement' ? binding.initial : undefined;
++			const initial = without_parens(binding.initial);
++			target = initial?.type === 'JSXStyleElement' ? initial : undefined;
+ 		} else {
+ 			target = resolve_local_member(binding, expression);
+ 		}

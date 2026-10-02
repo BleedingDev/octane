@@ -663,6 +663,47 @@ export function Unchecked(props: { label: (value: number) => string }) @{
 		}
 	});
 
+	it('accepts a parenthesized style block as an apply target', () => {
+		// The formatter wraps a multi-line assigned block in parentheses, which the
+		// editor parse keeps.
+		const source = `const theme = (
+	<style>
+		.card { color: purple; }
+	</style>
+);
+const themes = {
+	dark: (
+		<style>
+			.card { color: black; }
+		</style>
+	),
+};
+const notTheme = ('card');
+
+export function Card() @{
+	<>
+		<style apply={[theme, themes.dark]}>
+			.title { font-weight: bold; }
+		</style>
+		<p class="card title">{'Card'}</p>
+	</>
+}
+
+export function Wrong() @{
+	<>
+		<style apply={notTheme}>
+			.title { font-weight: bold; }
+		</style>
+		<p class="title">{'Wrong'}</p>
+	</>
+}
+`;
+		const { errors } = compileToVolarMappings(source, 'Card.tsrx');
+		expect(errors.map((error) => [error.code, error.message])).toEqual([
+			['TSRX3002', expect.stringContaining("'notTheme' is not a style block")],
+		]);
+	});
+
 	it('reports a typed error array when there are no parse errors', () => {
 		// Hard parse errors still throw (the underlying acorn parser can't
 		// recover from arbitrary brace mismatches). When parsing succeeds the

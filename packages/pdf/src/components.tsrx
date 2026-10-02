@@ -18,7 +18,6 @@ import type {
 	DocumentContextValue,
 	DocumentProps,
 	DocumentRenderProps,
-	HostProps,
 	NodeOrRenderer,
 	OutlineProps,
 	PageCallback,
@@ -80,12 +79,11 @@ function renderMessage(value: NodeOrRenderer): unknown {
 	return typeof value === 'function' ? value() : value;
 }
 
-// Host props may forward the consumer's `ref` (`HostProps['ref']`), which the
-// host element composes with its own.
-type HostEventProps = Record<string, unknown> & Pick<HostProps<unknown>, 'ref'>;
-
-function withEventData(props: Record<string, unknown>, value: unknown): HostEventProps {
-	return makeEventProps(props as never, () => value) as HostEventProps;
+function withEventData(
+	props: Record<string, unknown>,
+	value: unknown,
+): Record<string, unknown> & { ref?: undefined } {
+	return makeEventProps(props as never, () => value) as Record<string, unknown>;
 }
 
 async function resolveSource(file: DocumentProps['file']): Promise<Source | null> {

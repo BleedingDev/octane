@@ -16,7 +16,7 @@ export type PanelProps = HTMLAttributes<HTMLDivElement> & {
 
 function PanelComponent(
 	{ position = 'top-left', children, className, style, ...rest }: PanelProps,
-	ref: import('octane/jsx-runtime').Octane.Ref,
+	ref: import('octane/jsx-runtime').Octane.Ref<HTMLDivElement>,
 ) {
 	const positionClasses = `${position}`.split('-');
 
