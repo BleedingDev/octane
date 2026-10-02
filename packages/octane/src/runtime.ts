@@ -18825,7 +18825,7 @@ class HydrationCapability {
 	 */
 	rebuiltTail: Node | null = null;
 	private readonly unframedRootRanges = new WeakMap<Node, Node>();
-	/** The server node renderInPlace's body may adopt, until a template does. */
+	/** The server node renderInPlace's body renders in place of, which it claims. */
 	private inPlace: Node | null = null;
 	/** Pairs discovered while matching an outer range; released with this hydration pass. */
 	private matchingCloses: WeakMap<Node, Comment> | null = null;
@@ -19196,25 +19196,32 @@ class HydrationCapability {
 
 	/**
 	 * First render, by `render(target)`, of a component call that found `root`
-	 * at the cursor instead of a server range of its own. Its template adopts
-	 * `root` in place when they match. clone() leaves the cursor on a root it
-	 * adopts, and the root's own holes move it into the root's children, but
-	 * the next sibling's server content starts after the root, so step past it.
-	 * A body that rebuilt `root` or rendered nothing there leaves the cursor
-	 * where it put it. Returns whether the body adopted `root`.
+	 * at the cursor instead of a server range of its own. It opens a claim on
+	 * `root`, and its template adopts `root` in place when they match
+	 * (claimRoots). clone() leaves the cursor on the first root it adopts, and
+	 * the roots' own holes move it into their content, but the next sibling's
+	 * server content starts after the last root, so step past it. A body that
+	 * rebuilt `root` or rendered nothing there leaves the cursor where it put
+	 * it. Returns whether the body adopted `root`.
 	 */
 	renderInPlace<T>(render: (target: T) => void, target: T, root: Node): boolean {
 		const outer = this.inPlace;
-		this.inPlace = root;
-		let adopted = false;
+		const outerFrom = this.claimFrom;
+		const outerEnd = this.claimEnd;
+		this.inPlace = this.claimFrom = root;
+		this.claimEnd = undefined;
+		let end: Node | null | undefined;
 		try {
 			render(target);
-			adopted = this.inPlace === null;
+			end = this.claimEnd;
 		} finally {
 			this.inPlace = outer;
+			this.claimFrom = outerFrom;
+			this.claimEnd = outerEnd;
 		}
-		if (adopted) this.node = getNextSibling(root);
-		return adopted;
+		if (end === undefined) return false;
+		this.node = end;
+		return true;
 	}
 
 	/**
@@ -20052,6 +20059,10 @@ class HydrationCapability {
 		return cloned;
 	}
 
+	/**
+	 * The first server node after the roots of the `template` fragment, when the
+	 * server nodes from `cursor` match each of them; undefined when they do not.
+	 */
 	private fragmentRemainder(
 		template: Node,
 		cursor: Node | null,
@@ -20061,7 +20072,9 @@ class HydrationCapability {
 		let actual = cursor;
 		let childIndex = 0;
 		while (expected !== null) {
-			if (actual === null) return undefined;
+			// A close marker ends the server range that holds the roots: the server
+			// rendered fewer of them, whatever the remaining root is.
+			if (actual === null || isBlockClose(actual)) return undefined;
 			// A template comment is a dynamic logical hole. Its server form may be
 			// text or a marker range, so only static text/element roots compare shape.
 			if (
@@ -20276,23 +20289,27 @@ class HydrationCapability {
 		if (isFragment) {
 			// A nested fragment has no server wrapper, so its first logical root must
 			// be the cursor itself, or follow the server forms of its leading holes.
-			// A root claim already compared every root above.
+			// A root claim already compared every root above, and a claim in place
+			// compares them (claimRoots).
 			if (
-				claimsRoot ||
-				(template !== null
-					? fragmentRootMatches(cursor, template, this, partialStyles)
-					: lazyFragmentRootMatches(cursor, lazy!, this))
-			) {
-				if (cursor === this.claimFrom) this.claimRoots(cursor, template ?? lazy!);
+				(claimsRoot ||
+					(template !== null
+						? fragmentRootMatches(cursor, template, this, partialStyles)
+						: lazyFragmentRootMatches(cursor, lazy!, this))) &&
+				(cursor !== this.claimFrom || this.claimRoots(cursor, template ?? lazy!, partialStyles))
+			)
 				return { __oct_vfrag: true, firstChild: cursor } as unknown as Node;
-			}
-			return this.rebuildFragment(template ?? resolveLazyTemplate(lazy!), cursor, loc);
+			return this.rebuildFragment(
+				template ?? resolveLazyTemplate(lazy!),
+				cursor,
+				loc,
+				partialStyles,
+			);
 		}
 		if (claimsRoot)
 			this.claimRootRemainder(
 				framedRemainder === undefined ? (unframedRemainder ?? null) : framedRemainder,
 			);
-		if (cursor === this.inPlace) this.inPlace = null;
 		if (cursor === this.claimFrom) this.claimRoots(cursor, null);
 		return cursor;
 	}
@@ -20306,16 +20323,42 @@ class HydrationCapability {
 	 * are, a component inheriting them, or the lite component that adopted the
 	 * range. A component that adopts `root` without a range of its own renders
 	 * in its own scope, and the slots after it claim the nodes after its root.
+	 *
+	 * A claim renderInPlace opened on `root` is in place: the server rendered
+	 * other content there, as another @if arm does, and no range marks where
+	 * the component's content ends. A `fragment` template there adopts the
+	 * server nodes from `root` only when each of its roots matches one, and
+	 * this returns false when they do not, so adopt() rebuilds it. A component
+	 * in place has no range, so it never owns the claim.
 	 */
-	private claimRoots(root: Node, fragment: Node | LazyTemplateRecord | null): void {
+	private claimRoots(
+		root: Node,
+		fragment: Node | LazyTemplateRecord | null,
+		partialStyles?: string,
+	): boolean {
 		const open = domNode(root).previousSibling;
 		const scope = CURRENT_SCOPE;
 		if (
 			open === null ||
 			scope === null ||
 			(scope.block.startMarker !== open && this.liteRanges.get(scope)?.start !== open)
-		)
-			return;
+		) {
+			if (root !== this.inPlace) return true;
+			const end =
+				fragment === null
+					? getNextSibling(root)
+					: this.fragmentRemainder(
+							(fragment as Node).nodeType === undefined
+								? resolveLazyTemplate(fragment as LazyTemplateRecord)
+								: (fragment as Node),
+							root,
+							partialStyles,
+						);
+			if (end === undefined) return false;
+			this.claimFrom = null;
+			this.claimEnd = end;
+			return true;
+		}
 		this.claimFrom = null;
 		let node: Node | null = root;
 		// Stepping over each root's own range, the first close marker is the end
@@ -20325,42 +20368,70 @@ class HydrationCapability {
 			node = this.sibling(node, 1);
 			if (node === null || isBlockClose(node)) {
 				this.claimEnd = node;
-				return;
+				return true;
 			}
 		}
 		this.claimEnd = getNextSibling(this.isOpen(node) ? this.close(node) : node);
+		return true;
 	}
 
 	/**
 	 * The server rendered something other than this nested fragment at the
-	 * cursor (a text value, another component's roots). Report it once and build
+	 * cursor (a text value, another component's roots, or another arm's nodes
+	 * that match only some roots, in place). Report it once and build
 	 * the fragment on the client. The fragment's block owns the server nodes from
 	 * the cursor up to its end marker, where drainFrag inserts the fresh roots, so
 	 * discard them. When the end marker does not follow the cursor inside the
 	 * block's range, discard only the cursor node or its range, as a single-root
 	 * mismatch does.
 	 */
-	private rebuildFragment(template: Node, cursor: Node, loc: string | undefined): Node {
+	private rebuildFragment(
+		template: Node,
+		cursor: Node,
+		loc: string | undefined,
+		partialStyles?: string,
+	): Node {
 		if (PRESENTATION_HYDRATION?.revision !== undefined) presentationMiss();
 		// Captures that changed before a dormant boundary activated legitimately
 		// differ from the server's; still rebuild, but there is nothing to report.
 		if (!this.staleServerValues) {
 			noteRecoverableHydrationError(() => new Error(formatClientError(51)));
 			if (process.env.NODE_ENV !== 'production') {
-				// A leading hole matches any server node: name the static root that
+				// A lite component renders in its caller's block: name its call site.
+				const scope = CURRENT_SCOPE;
+				const caller = scope?.block instanceof LiteBlockImpl ? scope.parent : null;
+				// A leading hole matches any server node, and a fragment in place can
+				// match the server's nodes up to a later root: name the first root that
 				// did not match, and what the server rendered in its place.
-				let expected = getFirstChild(template);
+				let expected = getFirstChild(template)!;
 				let actual: Node | null = cursor;
-				while (expected !== null && expected.nodeType === 8) {
-					expected = getNextSibling(expected);
-					actual = actual === null ? null : this.sibling(actual, 1);
+				let previous: Node | null = null;
+				let holesOnly = true;
+				for (
+					let childIndex = 0;
+					getNextSibling(expected) !== null &&
+					actual !== null &&
+					!isBlockClose(actual) &&
+					(expected.nodeType === 8 ||
+						hydrationNodeMatches(actual, expected, partialStyles, String(childIndex)));
+					childIndex++
+				) {
+					if (expected.nodeType !== 8) holesOnly = false;
+					previous = expected;
+					expected = getNextSibling(expected)!;
+					actual = this.sibling(actual, 1);
 				}
 				warnHydrationStructuralMismatch(
-					loc ?? componentSourceLoc(CURRENT_BLOCK?.body) ?? CURRENT_SCOPE?.locFile,
-					expected === getFirstChild(template) || expected === null
-						? `a fragment starting with ${describeHydrationNode(getFirstChild(template))}`
-						: `a fragment with ${describeHydrationNode(expected)} after its leading holes`,
-					describeHydrationNode(expected === null ? cursor : actual),
+					loc ??
+						((caller != null && siteLoc(caller, caller.slots.indexOf(scope))) ||
+							componentSourceLoc(CURRENT_BLOCK?.body)) ??
+						scope?.locFile,
+					previous === null
+						? `a fragment starting with ${describeHydrationNode(expected)}`
+						: `a fragment with ${describeHydrationNode(expected)} after ${
+								holesOnly ? 'its leading holes' : describeHydrationNode(previous)
+							}`,
+					describeHydrationNode(actual),
 				);
 			}
 		}
