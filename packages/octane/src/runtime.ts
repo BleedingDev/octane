@@ -19972,9 +19972,12 @@ class HydrationCapability {
 	/**
 	 * A slot of `parent` claimed the server range that `close` ends, or adopted
 	 * `close` in place as its root. Step the cursor past it to the next
-	 * sibling's server content.
+	 * sibling's server content. A parent that the slot's render disposed, as a
+	 * cleanup error an ancestor boundary caught does, owns no server content
+	 * any more: the cursor stays where that boundary left it.
 	 */
 	parkPast(close: Node, parent: Scope): void {
+		if (parent.block.disposed) return;
 		const next = (this.node = getNextSibling(close));
 		if (parent === this.arm) {
 			this.armTail = next;
