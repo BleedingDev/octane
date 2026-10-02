@@ -122,6 +122,33 @@ export function TryIfThenChild(props: { on: boolean; Child: ComponentBody }) @{
 	</div>
 }
 
+// The client arm ends with a @try boundary, which parks the cursor on its
+// inner close marker rather than advancing past the outer range. The server's
+// longer else arm has an extra component after the shared @try that the client
+// arm must discard.
+export function IfTryThenTail(props: { on: boolean }) @{
+	<div id="r">
+		@if (props.on) {
+			<>
+				@try {
+					<Leaf v="x" />
+				} @pending {
+					<p>{'loading' as string}</p>
+				}
+			</>
+		} @else {
+			<>
+				@try {
+					<Leaf v="x" />
+				} @pending {
+					<p>{'loading' as string}</p>
+				}
+				<Leaf v="z" />
+			</>
+		}
+	</div>
+}
+
 export function DormantIf(props: { on: boolean; when: HydrationStrategy }) @{
 	<div id="r">
 		<Hydrate when={props.when} split={false}>

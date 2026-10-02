@@ -19358,10 +19358,21 @@ class HydrationCapability {
 	 * The cursor does not move past the elements and text that a template
 	 * adopts either, so at an element or text node it cannot tell what the arm
 	 * adopted from what the server rendered for another arm. Both stay.
+	 *
+	 * Some slots (@try, deopt lists) park the cursor on their close marker
+	 * rather than advancing past the outer range. A close marker is never
+	 * ambiguous — the block it closes is finished — so the method walks past
+	 * consecutive close markers before inspecting the unclaimed tail.
 	 */
 	discardArmTail(scope: Scope, slotKey: number, first: Node, end: Node): void {
-		const from = this.node;
-		if (from === first || !this.isOpen(from)) return;
+		let from: Node | null = this.node;
+		if (from === first) return;
+		// A close marker means a control-flow block or slot parked the cursor on
+		// its end rather than advancing past the outer range (e.g. @try, deopt
+		// lists). Walk past consecutive close markers — each belongs to a finished
+		// claimed block — so `from` lands on the first unclaimed sibling.
+		while (from !== null && from !== end && this.isClose(from)) from = getNextSibling(from);
+		if (from === null || from === end || !this.isOpen(from)) return;
 		let stop: Node | null = null;
 		let node: Node | null = from;
 		while (node !== null && node !== end) {

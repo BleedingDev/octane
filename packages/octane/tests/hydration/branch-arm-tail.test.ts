@@ -141,6 +141,21 @@ describe.each([
 		expect(markup(s.host)).toBe('<em>x</em>');
 	});
 
+	it('discards the server component after a @try that ends the adopted arm', async () => {
+		const s = await hydrate('IfTryThenTail', { on: false }, { on: true });
+
+		expect(container.querySelector('#r')).toBe(s.host);
+		expect(markup(s.host)).toBe('<em>x</em>');
+		expect(s.host.querySelector('em')).toBe(s.ems[0]);
+		expect(s.recoverable).toEqual([expect.stringMatching(STRUCTURAL)]);
+		expect(warnings()).toEqual(dev ? [tailReport('IfTryThenTail', '@if')] : []);
+
+		s.render({ on: false });
+		expect(markup(s.host)).toBe('<em>x</em><em>z</em>');
+		s.render({ on: true });
+		expect(markup(s.host)).toBe('<em>x</em>');
+	});
+
 	it('builds the components a longer client arm adds and reports it once', async () => {
 		const s = await hydrate('SwitchComponents', { k: 'one' }, { k: 'two' });
 
