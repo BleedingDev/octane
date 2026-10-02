@@ -19482,6 +19482,8 @@ class HydrationCapability {
 		if (from === this.rebuiltTail && from !== null) {
 			this.sweepRebuiltTail(end);
 			if (this.node === end) return;
+		} else {
+			this.rebuiltTail = null;
 		}
 		if (from === undefined) {
 			// A slot that adopted a server node without a range parks the cursor
