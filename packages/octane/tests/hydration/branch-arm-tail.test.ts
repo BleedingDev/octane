@@ -165,6 +165,21 @@ describe.each([
 		},
 	);
 
+	// The tail check measures from what the arm claimed. An empty client arm
+	// claims nothing, so the server's whole range is the other arm, not a tail
+	// after this one, and it is left to the existing empty-arm handling.
+	it('does not report a client arm that renders nothing over the server arm', async () => {
+		const s = await hydrate('EmptyArm', { on: true }, { on: false });
+
+		expect(s.recoverable).toEqual([]);
+		expect(warnings()).toEqual([]);
+
+		s.render({ on: true });
+		expect(markup(s.host)).toBe('<em>x</em>');
+		s.render({ on: false });
+		expect(markup(s.host)).toBe('');
+	});
+
 	it('keeps the server content of a boundary that ends the arm while it loads', async () => {
 		container.innerHTML = ServerRT.renderToString(server.TrailingTry, {
 			on: true,

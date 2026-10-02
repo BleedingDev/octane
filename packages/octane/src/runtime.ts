@@ -19290,19 +19290,22 @@ class HydrationCapability {
 
 	/**
 	 * Runs after a branch's first hydrating render, which adopted the server's
-	 * arm range ending at `end`. Every range the arm claims parks the cursor
-	 * past it, so a server range still at the cursor is one that nothing in the
-	 * arm claimed: the server rendered another arm here, longer than this one.
-	 * Discard the server content from the cursor up to `end`, stopping at any
-	 * client nodes that mismatch recovery built there, and report it once.
+	 * arm range from `first` to `end`. Every range the arm claims parks the
+	 * cursor past it, so once the arm has claimed something, a server range
+	 * still at the cursor is one that nothing in the arm claimed: the server
+	 * rendered another arm here, longer than this one. Discard the server
+	 * content from the cursor up to `end`, stopping at any client nodes that
+	 * mismatch recovery built there, and report it once.
 	 *
+	 * An arm that claimed nothing leaves the cursor on `first`, and the whole
+	 * range is then the server's other arm rather than a tail after this one.
 	 * The cursor does not move past the elements and text that a template
-	 * adopts, so at an element or text node it cannot tell what the arm adopted
-	 * from what the server rendered for another arm. That content stays.
+	 * adopts either, so at an element or text node it cannot tell what the arm
+	 * adopted from what the server rendered for another arm. Both stay.
 	 */
-	discardArmTail(scope: Scope, slotKey: number, end: Node): void {
+	discardArmTail(scope: Scope, slotKey: number, first: Node, end: Node): void {
 		const from = this.node;
-		if (!this.isOpen(from)) return;
+		if (from === first || !this.isOpen(from)) return;
 		let stop: Node | null = null;
 		let node: Node | null = from;
 		while (node !== null && node !== end) {
@@ -41755,6 +41758,7 @@ function renderBranchSlot(
 				let rebuild = false;
 				let inner: Comment | null = null;
 				let innerEnd: Comment | null = null;
+				let first: Node | null = null;
 				if (hydration !== null && hydration.isOpen(getNextSibling(state.start))) {
 					inner = getNextSibling(state.start) as Comment;
 					innerEnd = hydration.close(inner);
@@ -41790,7 +41794,7 @@ function renderBranchSlot(
 				if (inner !== null) {
 					bStart = inner;
 					bEnd = innerEnd as Comment;
-					hydration!.node = getNextSibling(inner);
+					hydration!.node = first = getNextSibling(inner);
 				} else {
 					bStart = state.start;
 					bEnd = state.end as Node;
@@ -41826,7 +41830,7 @@ function renderBranchSlot(
 					renderBlock(b);
 					// The server may have rendered another arm here, longer than this one.
 					if (inner !== null && hydration!.node !== bEnd)
-						hydration!.discardArmTail(parentScope, slotKey, bEnd);
+						hydration!.discardArmTail(parentScope, slotKey, first!, bEnd);
 				}
 			} else if (hydration !== null && getNextSibling(state.start) !== state.end) {
 				if (PRESENTATION_HYDRATION?.revision !== undefined) throw new Error(formatClientError(75));

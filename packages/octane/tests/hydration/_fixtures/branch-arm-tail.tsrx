@@ -38,6 +38,18 @@ export function SwitchComponents(props: { k: string }) @{
 	</div>
 }
 
+// The client's empty arm claims nothing of the server's other arm, the shape
+// the router binding renders its server-only scroll restoration script with.
+export function EmptyArm(props: { on: boolean }) @{
+	<div id="r">
+		@if (props.on) {
+			<Leaf v="x" />
+		} @else {
+			<></>
+		}
+	</div>
+}
+
 // The arm ends with elements after its component, which the arm adopts.
 export function TrailingHosts(props: { on: boolean }) @{
 	<div id="r">
