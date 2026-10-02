@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+	chmodSync,
+	cpSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	rmSync,
+	statSync,
+	utimesSync,
+	writeFileSync,
+} from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,8 +25,17 @@ assert(
 	!['main', 'master'].includes(git('branch', '--show-current')),
 	'Use the source fork branch.',
 );
+const corpus = [
+	'packages/octane',
+	'scripts/ultramodern-build-host',
+	'scripts/error-codes',
+	'scripts/build-package-commonjs.mjs',
+	'benchmarks/scoped-signals/native-presentation',
+	'LICENSE',
+	'.prettierrc',
+];
 assert.equal(
-	git('status', '--porcelain'),
+	git('status', '--porcelain', '--', ...corpus),
 	'',
 	'Commit the complete producer source before packing.',
 );
@@ -40,7 +59,8 @@ execFileSync(
 		source.implementationCommit,
 		sourceCommit,
 		'--',
-		'packages/octane/src/runtime.ts',
+		'packages/octane/src',
+		':(exclude)packages/octane/src/version.ts',
 	],
 	{ cwd: root },
 );
@@ -53,12 +73,106 @@ const digest = (algorithm, bytes, encoding = 'hex') =>
 	createHash(algorithm).update(bytes).digest(encoding);
 assert(runtimePatch.length > 0, 'A maintained source fix must contain an authored runtime diff.');
 assert.equal(source.runtimePatchSha256, digest('sha256', runtimePatch));
+const authoredSourcePatch = execFileSync(
+	'git',
+	[
+		'diff',
+		upstreamCommit,
+		source.implementationCommit,
+		'--',
+		'packages/octane/src',
+		':(exclude)packages/octane/src/version.ts',
+	],
+	{ cwd: root },
+);
+assert.equal(source.authoredSourcePatchSha256, digest('sha256', authoredSourcePatch));
 
 mkdirSync(output, { recursive: true });
 const artifact = resolve(output, `octane-${version}.tgz`);
-// Native prepack runs the complete authored runtime, declarations, compiler,
-// published-error and export verification build. There is no prebuilt input.
-execFileSync('pnpm', ['pack', '--out', artifact], { cwd: packageRoot, stdio: 'inherit' });
+// Run exact native prepack gates. Package managers strip SemVer build metadata,
+// so apply the native publishConfig directly in the npm-format source artifact.
+assert.equal(
+	sourceManifest.scripts.prepack,
+	'node ../../scripts/error-codes/generate.mjs --check && node scripts/build.mjs',
+);
+execFileSync(process.execPath, [resolve(root, 'scripts/error-codes/generate.mjs'), '--check'], {
+	cwd: packageRoot,
+	stdio: 'inherit',
+});
+execFileSync(process.execPath, [resolve(packageRoot, 'scripts/build.mjs')], {
+	cwd: packageRoot,
+	stdio: 'inherit',
+});
+execFileSync(
+	process.execPath,
+	[resolve(root, 'scripts/ultramodern-build-host/check-public-types.mjs')],
+	{ cwd: root, stdio: 'inherit' },
+);
+const stage = resolve(output, `.native-stage-${process.pid}`);
+const packageStage = resolve(stage, 'package');
+mkdirSync(stage);
+mkdirSync(packageStage);
+try {
+	for (const file of ['dist', 'README.md', 'LICENSE']) {
+		if (process.platform === 'darwin')
+			execFileSync('cp', ['-cR', resolve(packageRoot, file), resolve(packageStage, file)]);
+		else cpSync(resolve(packageRoot, file), resolve(packageStage, file), { recursive: true });
+	}
+	const published = { ...sourceManifest };
+	for (const key of ['main', 'module', 'types', 'imports', 'exports'])
+		published[key] = sourceManifest.publishConfig[key];
+	delete published.publishConfig;
+	delete published.scripts;
+	delete published.devDependencies;
+	writeFileSync(resolve(packageStage, 'package.json'), `${JSON.stringify(published, null, 2)}\n`);
+	const epoch = Number(git('show', '-s', '--format=%ct', sourceCommit));
+	const normalize = (path) => {
+		const directory = statSync(path).isDirectory();
+		if (directory) for (const file of readdirSync(path).sort()) normalize(resolve(path, file));
+		chmodSync(path, directory ? 0o755 : 0o644);
+		utimesSync(path, epoch, epoch);
+	};
+	normalize(packageStage);
+	const members = [];
+	const collect = (path, member) => {
+		members.push(member);
+		if (statSync(path).isDirectory())
+			for (const file of readdirSync(path).sort())
+				collect(resolve(path, file), `${member}/${file}`);
+	};
+	collect(packageStage, 'package');
+	const archive = execFileSync(
+		'tar',
+		[
+			'-cf',
+			'-',
+			'--format=ustar',
+			'--uid',
+			'0',
+			'--gid',
+			'0',
+			'--uname',
+			'root',
+			'--gname',
+			'root',
+			'--no-recursion',
+			...(process.platform === 'darwin' ? ['--no-xattrs', '--no-acls', '--no-fflags'] : []),
+			'-C',
+			stage,
+			'-T',
+			'-',
+		],
+		{ input: `${members.join('\n')}\n`, maxBuffer: 128 * 1024 * 1024 },
+	);
+	const bytes = execFileSync('gzip', ['-n', '-c'], {
+		input: archive,
+		maxBuffer: 128 * 1024 * 1024,
+	});
+	writeFileSync(artifact, bytes);
+} finally {
+	// Only this invocation's freshly created, task-owned stage is removed.
+	rmSync(stage, { recursive: true, force: true });
+}
 const packedManifest = JSON.parse(
 	execFileSync('tar', ['-xOf', artifact, 'package/package.json'], { encoding: 'utf8' }),
 );
@@ -104,6 +218,7 @@ const provenance = {
 		commit: sourceCommit,
 		implementationCommit: source.implementationCommit,
 		runtimePatchSha256: source.runtimePatchSha256,
+		authoredSourcePatchSha256: source.authoredSourcePatchSha256,
 	},
 	producer: {
 		node: process.version,
@@ -112,11 +227,16 @@ const provenance = {
 			'sha256',
 			readFileSync(resolve(root, 'scripts/ultramodern-build-host/pnpm-lock.yaml')),
 		),
+		sourceManifestSha256: digest('sha256', readFileSync(resolve(packageRoot, 'package.json'))),
 	},
 	artifact: {
 		file,
 		sha256: digest('sha256', bytes),
 		integrity: `sha512-${digest('sha512', bytes, 'base64')}`,
+		publishManifestSha256: digest(
+			'sha256',
+			execFileSync('tar', ['-xOf', artifact, 'package/package.json']),
+		),
 		intendedReleaseURI: `https://github.com/bleedingdev/octane/releases/download/${encodeURIComponent(releaseTag)}/${encodeURIComponent(file)}`,
 	},
 };

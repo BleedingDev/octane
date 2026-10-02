@@ -11,6 +11,15 @@ importers:
 
   .:
     dependencies:
+      '@tanstack/history':
+        specifier: 1.162.0
+        version: 1.162.0
+      '@tanstack/router-core':
+        specifier: 1.171.15
+        version: 1.171.15
+      '@tanstack/store':
+        specifier: 0.9.3
+        version: 0.9.3
       '@tsrx/core':
         specifier: 0.4.0
         version: 0.4.0
@@ -20,6 +29,9 @@ importers:
       '@tsrx/prettier-plugin':
         specifier: 0.4.10
         version: 0.4.10(patch_hash=1afb94e67a22bc3f5c16db0293e10cee42c1b31f4a3725340b73e1537e252dbc)(prettier@3.9.6)
+      '@tsrx/typescript-plugin':
+        specifier: 0.6.0
+        version: 0.6.0(typescript@5.9.3)
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3
@@ -59,6 +71,9 @@ importers:
       happy-dom:
         specifier: 20.11.2
         version: 20.11.2
+      isbot:
+        specifier: 5.2.1
+        version: 5.2.1
       jsdom:
         specifier: 30.0.1
         version: 30.0.1(@noble/hashes@2.4.0)
@@ -74,6 +89,12 @@ importers:
       react-dom:
         specifier: 19.2.7
         version: 19.2.7(react@19.2.7)
+      seroval:
+        specifier: 1.6.8
+        version: 1.6.8
+      seroval-plugins:
+        specifier: 1.6.8
+        version: 1.6.8(seroval@1.6.8)
       svelte:
         specifier: 5.56.7
         version: 5.56.7
@@ -724,6 +745,17 @@ packages:
     peerDependencies:
       acorn: ^8.9.0
 
+  '@tanstack/history@1.162.0':
+    resolution: {integrity: sha512-79pf/RkhteYZTRgcR4F9kbk84P2N8rugQJswxfIqovlbRiT3yI7eBE+5QorIrZaOKktsgzRlXh1l/du/xpl4iA==}
+    engines: {node: '>=20.19'}
+
+  '@tanstack/router-core@1.171.15':
+    resolution: {integrity: sha512-IILCDcLaItMZQ2jEmCABHY1Nhjjn5XUvwpQp3e4Nmu+vfg0BgYFuu/QASz2SwE2ZNbVMrvt8X/wxa+Gg5aErxA==}
+    engines: {node: '>=20.19'}
+
+  '@tanstack/store@0.9.3':
+    resolution: {integrity: sha512-8reSzl/qGWGGVKhBoxXPMWzATSbZLZFWhwBAFO9NAyp0TxzfBP0mIrGb8CP8KrQTmvzXlR/vFPPUrHTLBGyFyw==}
+
   '@tsrx/core@0.3.2':
     resolution: {integrity: sha512-L2Pi841MRybR6PX5sqyTCWssBOP5dnUFjb+AUz3zxlCXOUhilQblLwOEc9oKXU9EkoNKp5E0kUbVaknWP/SC7A==}
 
@@ -797,6 +829,34 @@ packages:
 
   '@tsrx/runtime@0.2.4':
     resolution: {integrity: sha512-rLwKYml/Qbb1D9LtB+NE5bcJDs/SowSKaL+lMR0m6Mr61lKZNuK43IFK+jxFmLvRlG+7ico1kOszMyhA5rObNA==}
+
+  '@tsrx/typescript-plugin@0.6.0':
+    resolution: {integrity: sha512-vVm7tczmdClm1HHXriGJFUbLrdHUfsnuuz0Wu0qQnc5ioh0m1x/c6U4JeZ51Tg7GOFdHEnZd9aGABKCvJwrHjw==}
+    hasBin: true
+    peerDependencies:
+      '@tsrx/content-mapper': 0.1.2
+      '@tsrx/preact': 0.3.3
+      '@tsrx/react': 0.4.3
+      '@tsrx/ripple': ^0.2.0
+      '@tsrx/solid': 0.3.3
+      '@tsrx/vue': 0.3.3
+      octane: '*'
+      typescript: ^5.9.3 || ^6.0.0 || ^7.1.0-dev.20260923.1
+    peerDependenciesMeta:
+      '@tsrx/content-mapper':
+        optional: true
+      '@tsrx/preact':
+        optional: true
+      '@tsrx/react':
+        optional: true
+      '@tsrx/ripple':
+        optional: true
+      '@tsrx/solid':
+        optional: true
+      '@tsrx/vue':
+        optional: true
+      octane:
+        optional: true
 
   '@tybys/wasm-util@0.10.4':
     resolution: {integrity: sha512-W3c4gRigFS0T/Ma4qIYF3GDAc5AQdHb1yL5znJT1Zv1YaD9Kitx656wBjvr19qbiosmZT8lWDM5BEMynUqX65A==}
@@ -909,6 +969,9 @@ packages:
   convert-source-map@2.0.0:
     resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
 
+  cookie-es@3.1.1:
+    resolution: {integrity: sha512-UaXxwISYJPTr9hwQxMFYZ7kNhSXboMXP+Z3TRX6f1/NyaGPfuNUZOWP1pUEb75B2HjfklIYLVRfWiFZJyC6Npg==}
+
   css-tree@3.2.1:
     resolution: {integrity: sha512-X7sjQzceUhu1u7Y/ylrRZFU2FS6LRiFVp6rKLPg23y3x3c3DOKAwuXGDp+PAGjh6CSnCjYeAul8pcT8bAl+lSA==}
     engines: {node: ^10 || ^12.20.0 || ^14.13.0 || >=15.0.0}
@@ -999,6 +1062,10 @@ packages:
   is-reference@3.0.3:
     resolution: {integrity: sha512-ixkJoqQvAP88E6wLydLGGqCJsrFUnqoH6HnaczB8XmDH1oaWU+xxdptvikTgaEhtZ53Ky6YXiBuUI2WXLMCwjw==}
 
+  isbot@5.2.1:
+    resolution: {integrity: sha512-dJ+LpKyClQZ7NG+j3OensC/mAZkGpukE9YUrgPYvAZj2doVL0edfDgywTUh5CXa0o+nW9a1V9e5+CJTX8+SxRw==}
+    engines: {node: '>=18'}
+
   jsdom@30.0.1:
     resolution: {integrity: sha512-52v7mUVUfNQVYYqE1lcdaymWL0njO7lTLUog6ZvW2U5KsbiLk/GnZlVJ+qx0xfNJZ6Gn+KSpPNE52vurbxZwrA==}
     engines: {node: ^22.22.2 || ^24.15.0 || >=26.0.0}
@@ -1007,6 +1074,9 @@ packages:
     peerDependenciesMeta:
       canvas:
         optional: true
+
+  jsonc-parser@3.3.1:
+    resolution: {integrity: sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==}
 
   lightningcss-android-arm64@1.33.0:
     resolution: {integrity: sha512-gEpRTalKdosp4Bb8qWtc2iOgE5SeIHlpS1up9bFq2wAyYhl1UdTObYiHe98zEM9SQvSoqQZ1IQD0JNpg3Ml5pg==}
@@ -1197,6 +1267,16 @@ packages:
 
   scheduler@0.27.0:
     resolution: {integrity: sha512-eNv+WrVbKu1f3vbYJT/xtiF5syA5HPIMtf9IgY/nKg0sWqzAUEvqY/xm7OcZc/qafLx/iO9FgOmeSAp4v5ti/Q==}
+
+  seroval-plugins@1.6.8:
+    resolution: {integrity: sha512-N7mWAMydj89EnYTHtRpS3LBrAz3J9O6oVrqpuXuvlAHfAUG8WEKqtbAd7SBiJNY5NfCAFhSdyAh7wI4Shjqy4g==}
+    engines: {node: '>=10'}
+    peerDependencies:
+      seroval: ^1.0
+
+  seroval@1.6.8:
+    resolution: {integrity: sha512-HlSgSAkTk4EqHcje1ptJjfZi1YDv5KbhVJ/d3P7T/nAXua2VmDu+AKDX5VTdFfZf48nDkWB2TKYt0DrCSa+3wg==}
+    engines: {node: '>=10'}
 
   siginfo@2.0.0:
     resolution: {integrity: sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g==}
@@ -1769,6 +1849,17 @@ snapshots:
     dependencies:
       acorn: 8.18.0
 
+  '@tanstack/history@1.162.0': {}
+
+  '@tanstack/router-core@1.171.15':
+    dependencies:
+      '@tanstack/history': 1.162.0
+      cookie-es: 3.1.1
+      seroval: 1.6.8
+      seroval-plugins: 1.6.8(seroval@1.6.8)
+
+  '@tanstack/store@0.9.3': {}
+
   '@tsrx/core@0.3.2':
     dependencies:
       '@jridgewell/sourcemap-codec': 1.6.0
@@ -1856,6 +1947,14 @@ snapshots:
   '@tsrx/runtime@0.2.3': {}
 
   '@tsrx/runtime@0.2.4': {}
+
+  '@tsrx/typescript-plugin@0.6.0(typescript@5.9.3)':
+    dependencies:
+      '@volar/language-core': 2.4.28
+      '@volar/typescript': 2.4.28
+      jsonc-parser: 3.3.1
+      resolve-pkg-maps: 1.0.0
+      typescript: 5.9.3
 
   '@tybys/wasm-util@0.10.4':
     dependencies:
@@ -1972,6 +2071,8 @@ snapshots:
 
   convert-source-map@2.0.0: {}
 
+  cookie-es@3.1.1: {}
+
   css-tree@3.2.1:
     dependencies:
       mdn-data: 2.27.1
@@ -2077,6 +2178,8 @@ snapshots:
     dependencies:
       '@types/estree': 1.0.9
 
+  isbot@5.2.1: {}
+
   jsdom@30.0.1(@noble/hashes@2.4.0):
     dependencies:
       '@asamuzakjp/css-color': 6.0.7
@@ -2102,6 +2205,8 @@ snapshots:
       xml-name-validator: 5.0.0
     transitivePeerDependencies:
       - '@noble/hashes'
+
+  jsonc-parser@3.3.1: {}
 
   lightningcss-android-arm64@1.33.0:
     optional: true
@@ -2287,6 +2392,12 @@ snapshots:
       xmlchars: 2.2.0
 
   scheduler@0.27.0: {}
+
+  seroval-plugins@1.6.8(seroval@1.6.8):
+    dependencies:
+      seroval: 1.6.8
+
+  seroval@1.6.8: {}
 
   siginfo@2.0.0: {}
 

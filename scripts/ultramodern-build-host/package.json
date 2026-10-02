@@ -28,7 +28,14 @@
     "svelte": "5.56.7",
     "typescript": "5.9.3",
     "vite": "8.1.5",
-    "vitest": "4.1.10"
+    "vitest": "4.1.10",
+    "@tanstack/history": "1.162.0",
+    "@tanstack/router-core": "1.171.15",
+    "@tanstack/store": "0.9.3",
+    "@tsrx/typescript-plugin": "0.6.0",
+    "isbot": "5.2.1",
+    "seroval": "1.6.8",
+    "seroval-plugins": "1.6.8"
   },
   "scripts": {
     "prepare:source": "node prepare.mjs",

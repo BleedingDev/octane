@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "preserve",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "jsx": "preserve",
+    "jsxImportSource": "octane",
+    "strict": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "allowJs": true,
+    "esModuleInterop": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": false,
+    "types": [],
+    "lib": ["DOM", "DOM.Iterable", "ESNext"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "paths": {
+      "octane": ["../../packages/octane/dist/index.d.ts"],
+      "octane/*": ["../../packages/octane/dist/*"]
+    }
+  },
+  "tsrx": { "compiler": "octane/compiler/volar", "platform": "web" },
+  "files": ["../../node_modules/@types/node/index.d.ts"],
+  "include": ["../../packages/tanstack-router/src/**/*"]
+}
