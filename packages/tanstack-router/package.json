@@ -1,6 +1,6 @@
 {
   "name": "@octanejs/tanstack-router",
-  "version": "0.1.60",
+  "version": "0.1.60+ultramodern.681ca11f6bff",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -23,7 +23,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/octanejs/octane.git",
+    "url": "git+https://github.com/bleedingdev/octane.git",
     "directory": "packages/tanstack-router"
   },
   "main": "src/index.ts",
@@ -55,13 +55,13 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@tanstack/history": "catalog:default",
-    "@tanstack/router-core": "catalog:default",
-    "@tanstack/store": "catalog:default",
-    "isbot": "^5.1.22"
+    "@tanstack/history": "1.162.0",
+    "@tanstack/router-core": "1.171.15",
+    "@tanstack/store": "0.9.3",
+    "isbot": "5.2.1"
   },
   "peerDependencies": {
-    "octane": "workspace:^0.7.0"
+    "octane": "^0.7.0"
   },
   "devDependencies": {
     "@tanstack/react-router": "catalog:default",
@@ -71,5 +71,16 @@
     "react": "catalog:default",
     "react-dom": "catalog:default",
     "vitest": "catalog:default"
+  },
+  "ultramodernSource": {
+    "upstreamCommit": "676a4ee6db59854d6b711921f4ac808845dcdbcd",
+    "implementationCommit": "681ca11f6bff537f121ef7fbf1aa1d5672e9f29b",
+    "authoredSourcePatchSha256": "8ae4277f9811ad2b28fac67b0e1545899206de7775a6f857a057c96beda3ea72",
+    "nativeRuntime": {
+      "name": "octane",
+      "version": "0.7.1+ultramodern.aab0f1410f79",
+      "artifactSha256": "60f2e76673be5f1e4cbe6f0fa8b85bc12cac41475c17acd22e377f8fca2e8a7e",
+      "provenanceSha256": "8f4765726e6665ffee10046b1131b7b583943700cc7c84f7243b7298286cba31"
+    }
   }
 }

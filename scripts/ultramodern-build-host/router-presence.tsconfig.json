@@ -1,0 +1,12 @@
+{
+  "extends": "./router.tsconfig.json",
+  "compilerOptions": {
+    "typeRoots": ["../../node_modules/@types"]
+  },
+  "include": [
+    "../../packages/tanstack-router/src/**/*",
+    "../../packages/tanstack-router/tests/_fixtures/optional-presence.tsrx",
+    "../../packages/tanstack-router/tests/conformance/optional-presence.test.ts",
+    "../../packages/tanstack-router/tests/ssr/optional-presence.test.ts"
+  ]
+}

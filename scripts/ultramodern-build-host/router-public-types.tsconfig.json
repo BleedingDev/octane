@@ -1,0 +1,7 @@
+{
+  "extends": "./router.tsconfig.json",
+  "include": [
+    "../../packages/tanstack-router/src/**/*",
+    "../../packages/tanstack-router/typetests/public-api.test-d.ts"
+  ]
+}

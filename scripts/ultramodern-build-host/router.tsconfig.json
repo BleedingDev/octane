@@ -20,6 +20,7 @@
     "resolveJsonModule": true,
     "skipLibCheck": false,
     "types": [],
+    "typeRoots": ["../../node_modules/@types"],
     "lib": ["DOM", "DOM.Iterable", "ESNext"],
     "allowImportingTsExtensions": true,
     "noEmit": true,
@@ -29,6 +30,6 @@
     }
   },
   "tsrx": { "compiler": "octane/compiler/volar", "platform": "web" },
-  "files": ["../../node_modules/@types/node/index.d.ts"],
+  "files": ["../../node_modules/.pnpm/@types+node@24.13.3/node_modules/@types/node/index.d.ts"],
   "include": ["../../packages/tanstack-router/src/**/*"]
 }

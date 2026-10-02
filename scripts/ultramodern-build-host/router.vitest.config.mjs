@@ -5,6 +5,7 @@ import { octane } from '../../packages/octane/src/compiler/vite.js';
 import { octaneServerFixtures } from '../react-parity/server-fixtures.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
+const production = process.env.OCTANE_TEST_COMPILE_MODE === 'prod';
 const routerAliases = [
 	{
 		find: /^@octanejs\/tanstack-router$/,
@@ -18,6 +19,11 @@ const routerAliases = [
 
 export default defineConfig({
 	root,
+	cacheDir: resolve(
+		root,
+		'node_modules/.vite',
+		production ? 'ultramodern-router-prod' : 'ultramodern-router-dev',
+	),
 	test: {
 		projects: [
 			{
@@ -31,8 +37,9 @@ export default defineConfig({
 					],
 					environment: 'jsdom',
 					globals: false,
+					env: { OCTANE_TEST_COMPILE_MODE: production ? 'prod' : 'dev' },
 				},
-				plugins: [octaneServerFixtures(root), octane()],
+				plugins: [octaneServerFixtures(root), octane({ hmr: !production })],
 				resolve: { alias: routerAliases },
 			},
 			{
@@ -42,8 +49,9 @@ export default defineConfig({
 					include: ['packages/tanstack-router/tests/ssr/**/*.test.ts'],
 					environment: 'node',
 					globals: false,
+					env: { OCTANE_TEST_COMPILE_MODE: production ? 'prod' : 'dev' },
 				},
-				plugins: [octane({ ssr: true })],
+				plugins: [octane({ ssr: true, hmr: !production })],
 				resolve: {
 					alias: [
 						{ find: /^octane$/, replacement: resolve(root, 'packages/octane/src/server/index.ts') },
