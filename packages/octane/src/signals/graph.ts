@@ -446,10 +446,10 @@ export class ScopedNode<T = any> implements SignalHandle<T>, ReactiveNode {
 	get [SIGNAL_HANDLE](): true {
 		return true;
 	}
-	deps: ReactiveNode['deps'];
-	depsTail: ReactiveNode['depsTail'];
-	subs: ReactiveNode['subs'];
-	subsTail: ReactiveNode['subsTail'];
+	deps?: NonNullable<ReactiveNode['deps']>;
+	depsTail?: NonNullable<ReactiveNode['depsTail']>;
+	subs?: NonNullable<ReactiveNode['subs']>;
+	subsTail?: NonNullable<ReactiveNode['subsTail']>;
 	flags: ReactiveFlags;
 	revision = 0;
 	state: NodeState<T> | undefined;
@@ -869,8 +869,8 @@ export function derivedValueState<T>(
 }
 
 export class SignalObserver implements ReactiveNode {
-	deps: ReactiveNode['deps'];
-	depsTail: ReactiveNode['depsTail'];
+	deps?: NonNullable<ReactiveNode['deps']>;
+	depsTail?: NonNullable<ReactiveNode['depsTail']>;
 	flags: ReactiveFlags = ReactiveFlags.Watching;
 
 	constructor(
