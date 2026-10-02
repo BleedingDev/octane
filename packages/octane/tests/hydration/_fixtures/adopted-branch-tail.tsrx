@@ -160,6 +160,111 @@ export function UnframedComponent(props: { server?: boolean }) @{
 	</div>
 }
 
+// A module binding that these components read: the production compile then
+// renders their calls through the lite component slot, as development does.
+let word = 'w';
+
+function Pair() @{
+	<>
+		<i>{word as string}</i>
+		<em>{'e'}</em>
+	</>
+}
+
+function Trio() @{
+	<>
+		<i>{word as string}</i>
+		<em>{'e'}</em>
+		<small>{'m'}</small>
+	</>
+}
+
+function Word() @{
+	<>
+		{word as string}
+	</>
+}
+
+// The client's last component finds the server's `<i>` and `<em>` where it
+// expects its range and adopts both, the roots of its fragment, without one.
+// The server's `<u>` after them is the tail.
+export function UnframedFragment(props: { server?: boolean }) @{
+	<div>
+		@if (props.server) {
+			<>
+				<Bold />
+				<i>{'w'}</i>
+				<em>{'e'}</em>
+				<u class="foreign">{'tail'}</u>
+			</>
+		} @else {
+			<>
+				<Bold />
+				<Pair />
+			</>
+		}
+	</div>
+}
+
+// The same, for a component whose fragment is one text root.
+export function UnframedText(props: { server?: boolean }) @{
+	<div>
+		@if (props.server) {
+			<>
+				<Bold />
+				{'w'}
+				<u class="foreign">{'tail'}</u>
+			</>
+		} @else {
+			<>
+				<Bold />
+				<Word />
+			</>
+		}
+	</div>
+}
+
+// The component after one that adopted a fragment in place claims its own
+// server range.
+export function UnframedFragmentSibling(props: { server?: boolean }) @{
+	<div>
+		@if (props.server) {
+			<>
+				<Bold />
+				<i>{'w'}</i>
+				<em>{'e'}</em>
+				<Strike />
+			</>
+		} @else {
+			<>
+				<Bold />
+				<Pair />
+				<Strike />
+			</>
+		}
+	</div>
+}
+
+// The server's arm ends after the first of the fragment's three roots, which
+// adopts the arm's last node, and Strike finds the arm's end.
+export function UnframedFragmentPastRange(props: { server?: boolean }) @{
+	<div>
+		@if (props.server) {
+			<>
+				<Bold />
+				<i>{'w'}</i>
+			</>
+		} @else {
+			<>
+				<Bold />
+				<Trio />
+				<Strike />
+			</>
+		}
+		<u>{'after'}</u>
+	</div>
+}
+
 function Slot(props: { render: ComponentBody }) @{
 	const Render = props.render;
 	<section>

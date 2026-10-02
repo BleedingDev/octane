@@ -189,22 +189,75 @@ describe.each([
 		},
 	);
 
-	// The client's last component adopts the server's `<s>` in place, and the
-	// server's `<u>` after it is the tail.
-	it('keeps a server node that a component adopted without its range', async () => {
-		render('UnframedComponent', { server: true });
-		const strike = container.querySelector('s')!;
-		const stale = container.querySelector('u')!;
+	// The client's last component adopts the server's nodes after `<b>` in
+	// place, and the server's `<u>` after them is the tail. Production
+	// hydration finds where a fragment's roots end without parsing it.
+	it.each([
+		{ shape: 'an element', name: 'UnframedComponent', html: '<b>b</b><s>s</s>' },
+		{
+			shape: 'the roots of a fragment',
+			name: 'UnframedFragment',
+			html: '<b>b</b><i>w</i><em>e</em>',
+		},
+		{ shape: 'the text root of a fragment', name: 'UnframedText', html: '<b>b</b>w' },
+	])('keeps $shape that a component adopted without its range', async ({ name, html }) => {
+		render(name, { server: true });
+		const host = container.firstElementChild!;
+		const stale = host.querySelector('.foreign')!;
+		const adopted = [...host.childNodes].filter((node) => node.nodeType !== 8 && node !== stale);
+		const fresh = loadClient();
+		const createElement = vi.spyOn(document, 'createElement');
 
-		const recoverable = await hydrate(client.UnframedComponent);
+		const recoverable = await hydrate(fresh[name]);
+		const parsed = createElement.mock.calls.filter(([tag]) => tag === 'template');
+		createElement.mockRestore();
 
-		expect(markup(container.firstElementChild!)).toBe('<b>b</b><s>s</s>');
-		expect(container.querySelector('s')).toBe(strike);
-		expect(strike.isConnected).toBe(true);
+		expect(markup(host)).toBe(html);
+		expect([...host.childNodes].filter((node) => node.nodeType !== 8)).toEqual(adopted);
 		expect(stale.isConnected).toBe(false);
 		expect(recoverable).toEqual([expect.stringMatching(TAIL)]);
+		expect(warnings()).toEqual(dev ? [tail(siteOf(`function ${name}(`, '@if'), '<u>')] : []);
+		if (runtime === 'production') expect(parsed).toEqual([]);
+	});
+
+	it('hydrates the component after one that adopted a fragment without its range', async () => {
+		render('UnframedFragmentSibling', { server: true });
+		const host = container.firstElementChild!;
+		const adopted = [...host.children];
+
+		const recoverable = await hydrate(client.UnframedFragmentSibling);
+
+		expect(markup(host)).toBe('<b>b</b><i>w</i><em>e</em><s>s</s>');
+		expect([...host.children]).toEqual(adopted);
+		expect(recoverable).toEqual([]);
+		expect(warnings()).toEqual([]);
+	});
+
+	// The server's arm ends before the fragment's second root. Nothing the
+	// server rendered is stale: the next component finds the arm's end, builds
+	// its root there and reports that, and the node after the branch stays.
+	// The fragment's roots that the server's arm lacks are outside this test.
+	it("keeps the server's nodes when a fragment's roots run past the arm", async () => {
+		render('UnframedFragmentPastRange', { server: true });
+		const host = container.firstElementChild!;
+		const server = [...host.children];
+		const after = host.querySelector('u')!;
+
+		const recoverable = await hydrate(client.UnframedFragmentPastRange);
+
+		for (const node of server) expect(node.isConnected).toBe(true);
+		expect(host.firstElementChild).toBe(server[0]);
+		expect(host.lastElementChild).toBe(after);
+		expect(after.previousElementSibling!.outerHTML).toBe('<s>s</s>');
+		expect(recoverable).toEqual([expect.stringMatching(TAIL)]);
 		expect(warnings()).toEqual(
-			dev ? [tail(siteOf('function UnframedComponent(', '@if'), '<u>')] : [],
+			dev
+				? [
+						expect.stringContaining(
+							'the client expected <s> but the server rendered the end of the parent block',
+						),
+					]
+				: [],
 		);
 	});
 });

@@ -11917,14 +11917,12 @@ function renderLiteInPlace<P>(
 	anchor: Node | undefined,
 	root: Node,
 ): void {
-	if (
-		hydration.renderInPlace(
-			() => componentSlotLite(parentScope, slotKey, host, comp, props, invocationSite, anchor),
-			undefined,
-			root,
-		)
-	)
-		hydration.parkPast(root, parentScope);
+	hydration.renderInPlace(
+		() => componentSlotLite(parentScope, slotKey, host, comp, props, invocationSite, anchor),
+		undefined,
+		root,
+		parentScope,
+	);
 }
 
 // Keep the fresh-subtree callback's extra captures out of ordinary lite dispatch.
@@ -18894,6 +18892,8 @@ class HydrationCapability {
 	private rebuiltFragments: WeakMap<Node, RebuiltFragment> | null = null;
 	/** The server node renderInPlace's body may adopt, until a template does. */
 	private inPlace: Node | null = null;
+	/** The last server node that the template adopting `inPlace` adopts (adoptInPlace). */
+	private inPlaceLast: Node | null = null;
 	/**
 	 * What a hydrating update built on the client where its slot had already
 	 * rendered: blocks (renderUpdate), and child slots whose list it built.
@@ -19376,26 +19376,31 @@ class HydrationCapability {
 	}
 
 	/**
-	 * First render, by `render(target)`, of a component call that found `root`
-	 * at the cursor instead of a server range of its own. Its template adopts
-	 * `root` in place when they match. clone() leaves the cursor on a root it
-	 * adopts, and the root's own holes move it into the root's children, but
-	 * the next sibling's server content starts after the root, so step past it.
-	 * A body that rebuilt `root` or rendered nothing there leaves the cursor
-	 * where it put it. Returns whether the body adopted `root`.
+	 * First render, by `render(target)`, of a component call of `parent`'s that
+	 * found `root` at the cursor instead of a server range of its own. Its
+	 * template adopts `root` in place when they match, and a fragment template
+	 * the server nodes after it as well (adoptInPlace). clone() leaves the
+	 * cursor on the first root it adopts, and the roots' own holes move it into
+	 * their content, but the next sibling's server content starts after the
+	 * last root, so step past it (parkPast). A body that rebuilt `root` or
+	 * rendered nothing there leaves the cursor where it put it. Returns whether
+	 * the body adopted `root`.
 	 */
-	renderInPlace<T>(render: (target: T) => void, target: T, root: Node): boolean {
+	renderInPlace<T>(render: (target: T) => void, target: T, root: Node, parent: Scope): boolean {
 		const outer = this.inPlace;
-		this.inPlace = root;
-		let adopted = false;
+		const outerLast = this.inPlaceLast;
+		this.inPlace = this.inPlaceLast = root;
+		let last: Node | null = null;
 		try {
 			render(target);
-			adopted = this.inPlace === null;
+			if (this.inPlace === null) last = this.inPlaceLast;
 		} finally {
 			this.inPlace = outer;
+			this.inPlaceLast = outerLast;
 		}
-		if (adopted) this.node = getNextSibling(root);
-		return adopted;
+		if (last === null) return false;
+		this.parkPast(last, parent);
+		return true;
 	}
 
 	/** Read the `<!--oct-catch:T:C-->` comment ahead of a caught arm's range. */
@@ -19815,8 +19820,9 @@ class HydrationCapability {
 
 	/**
 	 * A slot of `parent` claimed the server range that `close` ends, or adopted
-	 * `close` in place as its root. Step the cursor past it to the next
-	 * sibling's server content.
+	 * server nodes in place that `close` is the last of. Step the cursor past it
+	 * to the next sibling's server content. An arm that ends with nodes adopted
+	 * in place cannot read its end off the cursor, so record it.
 	 */
 	parkPast(close: Node, parent: Scope): void {
 		const next = (this.node = getNextSibling(close));
@@ -19832,10 +19838,9 @@ class HydrationCapability {
 	 * belongs to no client node (discardArmTail), with the cursor parked on it:
 	 * the first node after the roots of the arm's own template, which records
 	 * them as the range's content (claimRoots), or else where the arm's last
-	 * slot parked the cursor after the range it claimed, or after the single
-	 * root it adopted in place (renderInPlace). Null when a later slot adopted
-	 * without either, such as a component that adopted a fragment or text in
-	 * place, since the cursor then rests on the roots it adopted.
+	 * slot parked the cursor after the range it claimed, or after the roots it
+	 * adopted in place (renderInPlace). Null when a later slot adopted server
+	 * nodes without either, since the cursor then rests on them.
 	 */
 	renderAdoptedArm(block: Block): Node | null {
 		const outerArm = this.arm;
@@ -20451,6 +20456,7 @@ class HydrationCapability {
 					? fragmentRootMatches(cursor, template, this, partialStyles)
 					: lazyFragmentRootMatches(cursor, lazy!, this))
 			) {
+				if (cursor === this.inPlace) this.adoptInPlace(cursor, template ?? lazy!);
 				if (cursor === this.claimFrom) this.claimRoots(cursor, template ?? lazy!);
 				return { __oct_vfrag: true, firstChild: cursor } as unknown as Node;
 			}
@@ -20497,6 +20503,25 @@ class HydrationCapability {
 			}
 		}
 		this.claimEnd = getNextSibling(this.isOpen(node) ? this.close(node) : node);
+	}
+
+	/**
+	 * The `fragment` template adopted `root`, the server node that a component
+	 * renders in place of (renderInPlace). Record the last server node of its
+	 * roots, stepped as claimRoots steps them, so that hydration continues
+	 * after them.
+	 */
+	private adoptInPlace(root: Node, fragment: Node | LazyTemplateRecord): void {
+		let last = root;
+		for (let i = templateRootCount(fragment); i > 1; i--) {
+			const next = this.sibling(last, 1);
+			// The server's range ends before the template's roots do: they end with
+			// its last node, and the cursor stops at its end.
+			if (next === null || isBlockClose(next)) break;
+			last = next;
+		}
+		this.inPlace = null;
+		this.inPlaceLast = this.isOpen(last) ? this.close(last) : last;
 	}
 
 	/**
@@ -32586,7 +32611,7 @@ function componentSlotImpl(
 				} else if (hydrationCursor === null) {
 					renderBlock(b);
 					adopted = false;
-				} else adopted = hydration!.renderInPlace(renderBlock, b, hydrationCursor);
+				} else adopted = hydration!.renderInPlace(renderBlock, b, hydrationCursor, parentScope);
 			} finally {
 				// The root is one rebuilt in the cursor's place, else one built at the
 				// anchor, which the probe finds. Otherwise an unframed single-root return
@@ -32619,8 +32644,6 @@ function componentSlotImpl(
 					b.endMarker = last;
 				}
 			}
-			// An arm that ends with this root cannot read its end off the cursor.
-			if (adopted) hydration!.parkPast(hydrationCursor!, parentScope);
 		} else {
 			const b = createBlock(
 				'dynamic',
