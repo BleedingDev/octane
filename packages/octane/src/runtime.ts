@@ -18855,7 +18855,7 @@ class HydrationCapability {
 	private abandoned = false;
 	private readonly freshNodes = new WeakSet<Node>();
 	private readonly unframedRootRanges = new WeakMap<Node, Node>();
-	/** The server node renderInPlace's body may adopt, until a template does. */
+	/** The server node renderInPlace claimed for the body it renders. */
 	private inPlace: Node | null = null;
 	/** Pairs discovered while matching an outer range; released with this hydration pass. */
 	private matchingCloses: WeakMap<Node, Comment> | null = null;
@@ -19203,24 +19203,32 @@ class HydrationCapability {
 	/**
 	 * First render, by `render(target)`, of a component call that found `root`
 	 * at the cursor instead of a server range of its own. Its template adopts
-	 * `root` in place when they match. clone() leaves the cursor on a root it
-	 * adopts, and the root's own holes move it into the root's children, but
-	 * the next sibling's server content starts after the root, so step past it.
-	 * A body that rebuilt `root` or rendered nothing there leaves the cursor
-	 * where it put it. Returns whether the body adopted `root`.
+	 * `root` in place when they match: a fragment template adopts as many
+	 * server siblings as it has roots. clone() leaves the cursor on the first
+	 * root it adopts, and the roots' own holes move it into their children, but
+	 * the next sibling's server content starts after the last root, so step
+	 * past it. The claim on `root` records that node (claimRoots). The enclosing
+	 * claim stays as it was, so when this body did not adopt `root`, a later
+	 * slot of an enclosing in-place call's body still can. A body that rebuilt
+	 * `root` or rendered nothing there leaves the cursor where it put it.
+	 * Returns whether the body adopted `root`.
 	 */
 	renderInPlace<T>(render: (target: T) => void, target: T, root: Node): boolean {
 		const outer = this.inPlace;
+		const outerFrom = this.claimFrom;
 		this.inPlace = root;
-		let adopted = false;
+		const claim = this.beginClaim(root);
+		let after: Node | null | undefined;
 		try {
 			render(target);
-			adopted = this.inPlace === null;
 		} finally {
+			after = this.endClaim(claim);
+			this.claimFrom = outerFrom;
 			this.inPlace = outer;
 		}
-		if (adopted) this.node = getNextSibling(root);
-		return adopted;
+		if (after === undefined) return false;
+		this.node = after;
+		return true;
 	}
 
 	/** Read the `<!--oct-catch:T:C-->` comment ahead of a caught arm's range. */
@@ -20185,7 +20193,6 @@ class HydrationCapability {
 			this.claimRootRemainder(
 				framedRemainder === undefined ? (unframedRemainder ?? null) : framedRemainder,
 			);
-		if (cursor === this.inPlace) this.inPlace = null;
 		if (cursor === this.claimFrom) this.claimRoots(cursor, null);
 		return cursor;
 	}
@@ -20198,15 +20205,17 @@ class HydrationCapability {
 	 * it renders in the range's owner: the block whose markers the range's
 	 * are, a component inheriting them, or the lite component that adopted the
 	 * range. A component that adopts `root` without a range of its own renders
-	 * in its own scope, and the slots after it claim the nodes after its root.
+	 * in its own scope, and the slots after it claim the nodes after its root,
+	 * unless renderInPlace claimed `root` for it: then its roots are the content.
 	 */
 	private claimRoots(root: Node, fragment: Node | LazyTemplateRecord | null): void {
 		const open = domNode(root).previousSibling;
 		const scope = CURRENT_SCOPE;
 		if (
-			open === null ||
-			scope === null ||
-			(scope.block.startMarker !== open && this.liteRanges.get(scope)?.start !== open)
+			(open === null ||
+				scope === null ||
+				(scope.block.startMarker !== open && this.liteRanges.get(scope)?.start !== open)) &&
+			root !== this.inPlace
 		)
 			return;
 		this.claimFrom = null;
