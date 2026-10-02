@@ -261,6 +261,7 @@ import {
 	currentSignalOwner,
 	retireSignalOwnerIdentity,
 	runWithSignalOwner,
+	signalOwnerFollowsInputs,
 } from './signals/owner-context.js';
 import { createSignalHookSites } from './signals/declaration-path.js';
 import {
@@ -680,6 +681,9 @@ function retainSignalRetryScope(
 	root: Scope,
 	holder: { retrySignalOwners?: SignalRetryOwners },
 	subtree = false,
+	// Hand the owner to the cache now. A live tree's teardown may be deferred
+	// to its root's commit, after a replacement has claimed the same owner.
+	detach = false,
 ): void {
 	const owner = SCOPE_SIGNAL_OWNERS.get(scope);
 	if (owner) {
@@ -694,10 +698,14 @@ function retainSignalRetryScope(
 				cache.owners.delete(previous);
 				retireRendererSignalOwner(previous);
 			}
+			// An ownerless scope still records retirement when it is deleted.
+			if (detach) SCOPE_SIGNAL_OWNERS.set(scope, false);
 		}
 	}
 	if (subtree)
-		forEachSubtreeChild(scope, (child) => retainSignalRetryScope(child, root, holder, true));
+		forEachSubtreeChild(scope, (child) =>
+			retainSignalRetryScope(child, root, holder, true, detach),
+		);
 	else if (scope.children !== null)
 		for (const child of scope.children) retainSignalRetryScope(child.scope, root, holder);
 }
@@ -707,6 +715,18 @@ function clearSignalRetryOwners(holder: { retrySignalOwners?: SignalRetryOwners 
 	if (cache === undefined) return;
 	holder.retrySignalOwners = undefined;
 	for (const owner of cache.owners) retireRendererSignalOwner(owner);
+}
+
+// New inputs restart an uncommitted attempt's hooks, not its query$ requests:
+// a redeclared query re-selects from the new inputs and shares the in-flight
+// request when its selection is unchanged. Retire only owners whose cells
+// cannot follow those inputs.
+function supersedeSignalRetryOwners(holder: { retrySignalOwners?: SignalRetryOwners }): void {
+	const cache = holder.retrySignalOwners;
+	if (cache === undefined) return;
+	const retired: SignalRendererOwnerIdentity[] = [];
+	collectRetiredSignalRetryOwners(cache.paths, cache, retired, true);
+	for (const owner of retired) retireRendererSignalOwner(owner);
 }
 
 function discardSignalRetryItem(block: Block, error: unknown): void {
@@ -757,15 +777,16 @@ function collectRetiredSignalRetryOwners(
 	node: SignalRetryNode,
 	cache: SignalRetryOwners,
 	retired: SignalRendererOwnerIdentity[],
+	superseded = false,
 ): void {
-	if (node.owner !== undefined) {
+	if (node.owner !== undefined && !(superseded && signalOwnerFollowsInputs(node.owner))) {
 		cache.owners.delete(node.owner);
 		retired.push(node.owner);
 		node.owner = undefined;
 	}
 	if (node.children !== undefined)
 		for (const child of node.children.values())
-			collectRetiredSignalRetryOwners(child, cache, retired);
+			collectRetiredSignalRetryOwners(child, cache, retired, superseded);
 }
 
 function trackSignalRetryListKeys<T>(
@@ -39408,7 +39429,7 @@ export function tryBlock(
 		supersedesInputs =
 			(state.branch === 2 || state.retrySignalOwners !== undefined) &&
 			(state.tryBody !== tryBody || (state.env !== env && depsChanged(state.env, env)));
-		if (state.retrySignalOwners !== undefined && supersedesInputs) clearSignalRetryOwners(state);
+		if (supersedesInputs) supersedeSignalRetryOwners(state);
 		state.tryBody = tryBody;
 		state.catchBody = catchBody;
 		state.pendingBody = pendingBody;
@@ -39568,13 +39589,17 @@ function createTryBody(state: TrySlot, start: Node, end: Node): Block {
 
 /** New inputs abandon an initial primary that has never committed, not its fallback. */
 function restartUncommittedTry(state: TrySlot): Block | null {
-	if (state.retrySignalOwners !== undefined) clearSignalRetryOwners(state);
 	HIDDEN_REVEAL_ACTIONS?.delete(state);
 	const old = state.tryBlock!;
 	const refs: SuspenseRefEntry[] = [];
 	collectVisibleSubtreeRefs(old, refs);
 	showTryBlock(state);
 	state.tryBlock = null;
+	// The replacement claims the abandoned primary's signal owners by path,
+	// like a retry of a discarded hydration attempt; see supersedeSignalRetryOwners.
+	if (signalDocumentEnabled || state.idState.renderOwner?.signalOwner !== undefined)
+		retainSignalRetryScope(old, old, state, true, true);
+	supersedeSignalRetryOwners(state);
 	// Neither these refs nor the primary's captured effects ever committed.
 	// Its hook registrations still need real teardown (e.g. transition listeners).
 	withRefDetachSuppression(refs, () => unmountBlock(old));

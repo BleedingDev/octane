@@ -205,6 +205,8 @@ export class ScopeImpl implements Scope, GraphOwner {
 	streams: ScopeStreams | undefined = undefined;
 	derivedBindings: Map<ScopedNode, DerivedBindingLifecycle> | undefined = undefined;
 	frames: Set<AdoptionFrameImpl> | undefined = undefined;
+	/** Holds a writable or asynchronous derived cell that new render inputs cannot re-select. */
+	unkeyedState = false;
 	private readonly seedEntries: Map<string, DecodedSeedEntry> | undefined;
 	private readonly traceLimit: number;
 	private events: SignalTraceEvent[] | undefined = undefined;
