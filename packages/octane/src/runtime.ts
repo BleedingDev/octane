@@ -39105,8 +39105,11 @@ export function errorBlock(
 		}
 	} else mountErrorBoundary(state, hydration);
 	// Hydration: park past the boundary's range, as every slot does, so a
-	// following sibling adopts its own server content.
-	if (!state.passthrough) hydration?.parkPast(state.end, parentScope);
+	// following sibling adopts its own server content.  Skip when the parent was
+	// disposed during mount — an ancestor boundary already owns the cursor and
+	// state.end may be detached.
+	if (!state.passthrough && !state.parentBlock.disposed)
+		hydration?.parkPast(state.end, parentScope);
 	return state.reset;
 }
 
