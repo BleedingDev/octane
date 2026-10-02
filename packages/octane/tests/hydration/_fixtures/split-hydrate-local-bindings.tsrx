@@ -1,9 +1,10 @@
 import { Hydrate, type HydrateProps } from 'octane';
 
 // Each split boundary reads a name that a directive binds locally: a `@catch`
-// reset parameter, an `@for` index, an `@switch` arm local, or a `case` local in
-// a handler. The parent must not pass those names into the split child, and a
-// same-named module declaration must not replace them inside the child.
+// reset parameter or destructured error, an `@for` index, an `@switch` arm
+// local, or a `case` local in a handler. The parent must not pass those names
+// into the split child, and a same-named module declaration must not replace
+// them inside the child.
 
 function reset(): void {
 	throw new Error('module reset');
@@ -65,7 +66,7 @@ export function NestedCatch(props: Props) @{
 					</button>
 				}
 			</>
-		} @catch (error: unknown, retry) {
+		} @catch ({ message }: any, retry) {
 			<button
 				class="outer-retry"
 				onClick={() => {
@@ -73,7 +74,7 @@ export function NestedCatch(props: Props) @{
 					retry();
 				}}
 			>
-				{(error as Error).message as string}
+				{message as string}
 			</button>
 		}
 	</Hydrate>
