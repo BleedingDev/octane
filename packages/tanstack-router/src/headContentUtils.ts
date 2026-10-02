@@ -109,10 +109,11 @@ function buildTagsFromMatches(
 		}
 
 		if (manifest.inlineStyle) {
+			const children = manifest.inlineStyle.children;
 			manifestTags.push({
 				tag: 'style',
 				attrs: { ...manifest.inlineStyle.attrs, nonce },
-				children: manifest.inlineStyle.children,
+				...(children === undefined ? {} : { children }),
 				inlineCss: true,
 			});
 		}
@@ -126,7 +127,7 @@ function buildTagsFromMatches(
 				({
 					tag: 'style',
 					attrs: { ...attrs, nonce },
-					children: children,
+					...(children === undefined ? {} : { children }),
 				}) satisfies RouterManagedTag,
 		);
 
@@ -138,7 +139,7 @@ function buildTagsFromMatches(
 				({
 					tag: 'script',
 					attrs: { ...attrs, nonce },
-					children: children,
+					...(children === undefined ? {} : { children }),
 				}) satisfies RouterManagedTag,
 		);
 

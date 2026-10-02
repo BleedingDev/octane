@@ -104,12 +104,13 @@ export async function renderRouterToStream({
 	};
 
 	try {
+		const nonce = router.options.ssr?.nonce;
 		const stream = await renderToReadableStream(
 			App as unknown as ServerComponent,
 			{ router },
 			{
 				signal: renderController.signal,
-				nonce: router.options.ssr?.nonce,
+				...(nonce === undefined ? {} : { nonce }),
 				injection,
 				onError(error) {
 					if (!isAbortError(request, error)) {
@@ -160,12 +161,13 @@ async function renderRouterForBot({
 	App: RouterApp;
 }) {
 	try {
+		const nonce = router.options.ssr?.nonce;
 		const result = await prerender(
 			App as unknown as Parameters<typeof prerender>[0],
 			{ router },
 			{
 				signal: request.signal,
-				nonce: router.options.ssr?.nonce,
+				...(nonce === undefined ? {} : { nonce }),
 				onError(error) {
 					if (!isAbortError(request, error)) {
 						console.error('Error in prerender:', error);

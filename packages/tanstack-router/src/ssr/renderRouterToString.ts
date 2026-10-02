@@ -16,10 +16,11 @@ export async function renderRouterToString({
 	App: RouterApp;
 }) {
 	try {
+		const nonce = router.options.ssr?.nonce;
 		const result = octaneRenderToString(
 			App as unknown as ServerComponent,
 			{ router },
-			{ nonce: router.options.ssr?.nonce },
+			nonce === undefined ? {} : { nonce },
 		);
 		router.serverSsr!.setRenderFinished();
 

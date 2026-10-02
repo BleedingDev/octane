@@ -41,9 +41,9 @@ export function CatchBoundary(props: {
 function CatchErrorView(props: {
 	error: any;
 	reset: () => void;
-	getResetKey?: () => number | string;
-	errorComponent?: ErrorRouteComponent;
-	onCatch?: (error: Error, errorInfo: ErrorInfo) => void;
+	getResetKey: () => number | string;
+	errorComponent: ErrorRouteComponent | undefined;
+	onCatch: ((error: Error, errorInfo: ErrorInfo) => void) | undefined;
 }) @{
 	// componentDidCatch parity — once per distinct caught error, during render so a
 	// rethrow (the notFound-forwarding path) escapes to the parent boundary.
@@ -78,7 +78,7 @@ export function ErrorComponent(props: {
 	reset?: () => void;
 	info?: { componentStack?: string };
 }) @{
-	const [show, setShow] = useState(process.env.NODE_ENV !== 'production');
+	const [show, setShow] = useState(process.env['NODE_ENV'] !== 'production');
 
 	<div style="padding:.5rem;max-width:100%">
 		<div style="display:flex;align-items:center;gap:.5rem">

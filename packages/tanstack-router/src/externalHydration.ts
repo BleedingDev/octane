@@ -2,9 +2,9 @@ const EXTERNAL_HYDRATION_PROMISE = Symbol.for('octane.external-hydration-promise
 
 type ExternalHydrationThenable<T> = PromiseLike<T> & {
 	[EXTERNAL_HYDRATION_PROMISE]: true;
-	status?: ThenableStatus;
-	value?: T;
-	reason?: unknown;
+	status: ThenableStatus | undefined;
+	value: T | undefined;
+	reason: unknown;
 };
 
 type ThenableStatus = 'pending' | 'fulfilled' | 'rejected';

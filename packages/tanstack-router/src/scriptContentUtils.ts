@@ -13,17 +13,18 @@ function getScripts(router: AnyRouter, matches: Array<AnyRouteMatch>) {
 		.map(({ children, ...attrs }) => ({
 			tag: 'script',
 			attrs: { ...attrs, nonce },
-			children,
+			...(children === undefined ? {} : { children }),
 		}));
 
 	const manifest = router.ssr?.manifest;
 	if (manifest) {
 		for (const match of matches) {
 			for (const asset of manifest.routes[match.routeId]?.scripts ?? []) {
+				const children = asset.children;
 				scripts.push({
 					tag: 'script',
 					attrs: { ...asset.attrs, nonce },
-					children: asset.children,
+					...(children === undefined ? {} : { children }),
 				});
 			}
 		}
@@ -42,14 +43,16 @@ export function useScripts(...args: Array<unknown>): Array<RouterManagedTag> {
 		if (!buffered || buffered.tag !== 'script') {
 			return scripts;
 		}
+		const { attrs } = buffered;
+		const children =
+			typeof buffered.children === 'string'
+				? buffered.children.replace(/;document\.currentScript\.remove\(\)$/, '')
+				: buffered.children;
 		return [
 			{
 				tag: 'script',
-				attrs: buffered.attrs,
-				children:
-					typeof buffered.children === 'string'
-						? buffered.children.replace(/;document\.currentScript\.remove\(\)$/, '')
-						: buffered.children,
+				...(attrs === undefined ? {} : { attrs }),
+				...(children === undefined ? {} : { children }),
 			},
 			...scripts,
 		];

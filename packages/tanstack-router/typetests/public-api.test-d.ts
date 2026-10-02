@@ -4,9 +4,13 @@ import {
 	createRootRoute,
 	createRoute,
 	createRouter,
+	getLocationChangeInfo,
 	getRouteApi,
 	linkOptions,
+	Router,
+	useRouter,
 } from '@octanejs/tanstack-router';
+import type { AnyRouter, CreateRouterFn } from '@tanstack/router-core';
 
 const rootRoute = createRootRoute();
 const postRoute = createRoute({
@@ -41,6 +45,39 @@ const postLink = linkOptions({
 });
 expectTypeOf(postLink.to).toEqualTypeOf<'/posts/$postId'>();
 expectTypeOf(postLink.params).toEqualTypeOf<{ readonly postId: '42' }>();
+
+const registeredRouter = useRouter();
+expectTypeOf(registeredRouter.routeTree).toEqualTypeOf<typeof router.routeTree>();
+expectTypeOf(registeredRouter.options).toEqualTypeOf<typeof router.options>();
+expectTypeOf(registeredRouter.history).toEqualTypeOf<typeof router.history>();
+expectTypeOf(createRouter).toEqualTypeOf<CreateRouterFn>();
+
+const explicitRouter = useRouter<typeof router>({ router, warn: false });
+expectTypeOf(explicitRouter.routeTree).toEqualTypeOf<typeof router.routeTree>();
+expectTypeOf(explicitRouter.options).toEqualTypeOf<typeof router.options>();
+expectTypeOf(explicitRouter.history).toEqualTypeOf<typeof router.history>();
+
+function preserveGenericRouter<TRouter extends AnyRouter>(value: TRouter): TRouter {
+	return useRouter<TRouter>({ router: value });
+}
+expectTypeOf(preserveGenericRouter(router).routeTree).toEqualTypeOf<typeof router.routeTree>();
+
+const locationChangeInfo = getLocationChangeInfo(router.state.location);
+registeredRouter.emit({ type: 'onLoad', ...locationChangeInfo });
+registeredRouter.emit({ type: 'onBeforeRouteMount', ...locationChangeInfo });
+registeredRouter.emit({ type: 'onResolved', ...locationChangeInfo });
+registeredRouter.emit({ type: 'onRendered', ...locationChangeInfo });
+const originalEmitter: typeof router.emit = registeredRouter.emit;
+originalEmitter({
+	type: 'onBeforeNavigate',
+	toLocation: router.state.location,
+	pathChanged: false,
+	hrefChanged: false,
+	hashChanged: false,
+});
+
+const nativeRouter = new Router({ routeTree });
+nativeRouter.emit({ type: 'onLoad', ...locationChangeInfo });
 
 // @ts-expect-error unknown route ids stay rejected by the registered route tree
 getRouteApi('/missing');

@@ -166,7 +166,7 @@ function MatchInner(props: { matchId: string }) {
 				routerMatch._nonReactive.minPendingPromise = minPendingPromise;
 				setTimeout(() => {
 					minPendingPromise.resolve();
-					routerMatch._nonReactive.minPendingPromise = undefined;
+					delete routerMatch._nonReactive.minPendingPromise;
 				}, pendingMinMs);
 			}
 		}

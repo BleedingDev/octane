@@ -13,7 +13,7 @@ import { CatchBoundary } from './CatchBoundary.tsrx';
 
 function NotFoundFallback(props: {
 	error: unknown;
-	render?: (error: NotFoundError) => OctaneNode;
+	render: ((error: NotFoundError) => OctaneNode) | undefined;
 }) {
 	if (isNotFound(props.error)) {
 		return props.render ? props.render(props.error) : null;

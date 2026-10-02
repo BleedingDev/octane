@@ -215,17 +215,23 @@ export function useLinkProps(...args: any[]): Record<string, any> {
 	// Class composes clsx-style (octane normalizeClass folds arrays + falsy).
 	const resolvedClass = [
 		klass ?? className,
-		resolvedActiveProps.class ?? resolvedActiveProps.className,
-		resolvedInactiveProps.class ?? resolvedInactiveProps.className,
+		resolvedActiveProps['class'] ?? resolvedActiveProps['className'],
+		resolvedInactiveProps['class'] ?? resolvedInactiveProps['className'],
 	].filter(Boolean);
-	const resolvedStyle = mergeStyles(style, resolvedActiveProps.style, resolvedInactiveProps.style);
+	const resolvedStyle = mergeStyles(
+		style,
+		resolvedActiveProps['style'],
+		resolvedInactiveProps['style'],
+	);
 
 	const [isTransitioning, setIsTransitioning] = useState(false, subSlot(slot, 'lp:t'));
 	const hasRenderFetched = useRef(false, subSlot(slot, 'lp:rf'));
 	const elRef = useRef<Element | null>(null, subSlot(slot, 'lp:el'));
 
 	const preload =
-		options.reloadDocument || externalLink ? false : (userPreload ?? router.options.defaultPreload);
+		options['reloadDocument'] || externalLink
+			? false
+			: (userPreload ?? router.options.defaultPreload);
 	const preloadDelay = userPreloadDelay ?? router.options.defaultPreloadDelay ?? 0;
 
 	const doPreload = useCallback(

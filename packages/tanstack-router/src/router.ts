@@ -18,8 +18,16 @@ import type {
 	AnyRoute,
 	CreateRouterFn,
 	RouterConstructorOptions,
+	RouterEvent,
 	TrailingSlashOption,
+	getLocationChangeInfo,
 } from '@tanstack/router-core';
+
+type NativeRouterEvent =
+	| RouterEvent
+	| (ReturnType<typeof getLocationChangeInfo> & {
+			type: 'onLoad' | 'onBeforeRouteMount' | 'onResolved' | 'onRendered';
+	  });
 
 const isServerEnv = typeof document === 'undefined';
 
@@ -56,6 +64,8 @@ export class Router<
 	TRouterHistory,
 	TDehydrated
 > {
+	declare emit: (routerEvent: NativeRouterEvent) => void;
+
 	constructor(
 		options: RouterConstructorOptions<
 			TRouteTree,

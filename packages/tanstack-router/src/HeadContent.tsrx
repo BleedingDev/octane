@@ -17,14 +17,14 @@ export function HeadContent(props: HeadContentProps) @{
 	const hydrated = useHydrated();
 
 	useEffect(() => {
-		if (process.env.NODE_ENV === 'production' || !hydrated) {
+		if (process.env['NODE_ENV'] === 'production' || !hydrated) {
 			return;
 		}
 		document.querySelectorAll(`link[${DEV_STYLES_ATTR}]`).forEach((element) => element.remove());
 	}, [hydrated]);
 
 	const filteredTags =
-		process.env.NODE_ENV !== 'production' && hydrated
+		process.env['NODE_ENV'] !== 'production' && hydrated
 			? tags.filter((tag) => tag.tag !== 'link' || tag.attrs?.[DEV_STYLES_ATTR] !== true)
 			: tags;
 	const keys = getAssetKeys('head', owner, filteredTags);

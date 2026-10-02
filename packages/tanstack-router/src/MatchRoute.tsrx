@@ -24,10 +24,10 @@ export function MatchRoute(props: Record<string, any>) @{
 	const matchRoute = useMatchRoute();
 	const params = matchRoute(props);
 	const out =
-		typeof props.children === 'function' && !isChildrenBlock(props.children)
-			? props.children(params)
+		typeof props['children'] === 'function' && !isChildrenBlock(props['children'])
+			? props['children'](params)
 			: params
-				? props.children
+				? props['children']
 				: null;
 	<>
 		{out}
