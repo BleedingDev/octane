@@ -22,3 +22,9 @@ export function ArrayRefsOneEl(props) @{
 		{'mounted'}
 	</div>
 }
+
+export function ArrayRefHost(props) @{
+	<div class="array-host" ref={props.refs}>
+		{'host'}
+	</div>
+}
