@@ -633,12 +633,20 @@ minimumReleaseAgeExclude:
 # and the parameter-property and bodyless-method mapping fix
 # (https://github.com/tsrx-org/tsrx/pull/143) in @tsrx/core >= 0.3.0.
 patchedDependencies:
-  # Resolve a parenthesized `<style>` block as a style `apply` target. The
-  # formatter wraps a multi-line assigned block, `const theme = (<style>…</style>);`,
-  # and the editor parse keeps the parentheses (`preserveParens`), so
-  # analyze_styles reported TSRX3002 in Volar and octane-tsc for a valid theme.
-  # Not yet fixed upstream in tsrx-org/tsrx; drop once a release includes it.
-  # Guarded by packages/octane/tests/compiler/volar.test.ts.
+  # Two @tsrx/core fixes not yet released upstream in tsrx-org/tsrx (checked
+  # through 0.5.2); drop each once an adopted release includes it.
+  # - Resolve a parenthesized `<style>` block as a style `apply` target. The
+  #   formatter wraps a multi-line assigned block, `const theme = (<style>…</style>);`,
+  #   and the editor parse keeps the parentheses (`preserveParens`), so
+  #   analyze_styles reported TSRX3002 in Volar and octane-tsc for a valid theme.
+  #   Guarded by packages/octane/tests/compiler/volar.test.ts.
+  # - Print source-phase imports (`import source x from`, `import.source()`) in
+  #   withDeferredImports. It printed only the `defer` phase, and esrap ignores
+  #   `phase`, so compiled output silently became an evaluation-phase import.
+  #   Guarded by packages/octane/tests/compiler/module-import-phases.test.ts.
+  # SCOPE: like every entry here, this does not ship in the published octane
+  # tarball; consumers resolve unpatched @tsrx/core until an upstream release is
+  # adopted.
   '@tsrx/core@0.5.2': patches/@tsrx__core@0.5.2.patch
   # Preserve sibling package URLs when browser mocks share a directory-name prefix.
   # Browser ships its own prebundled copy of the mocker implementation.
