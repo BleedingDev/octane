@@ -18388,7 +18388,8 @@ interface LazyTemplateRecord {
 	ns: 0 | 1 | 2 | 3;
 	/**
 	 * Raw multi-root markup: the number of roots, as the compiler counts them.
-	 * 0 = one root, or HTML roots pre-wrapped in `<octane-frag>`.
+	 * 0 = one root, or HTML roots already wrapped in `<octane-frag>`, which the
+	 * compiler no longer emits.
 	 */
 	frag: number;
 	parsed: Array<Node | null>;
@@ -18431,9 +18432,9 @@ function parseTemplate(html: string, ns: 0 | 1 | 2, frag: number): Node {
 	initDomOperations();
 	const t = (STAGED_DOM?.view(document) ?? document).createElement('template');
 	if (ns === 0) {
-		// Fixed HTML multi-root templates arrive pre-wrapped by the compiler. Opaque
-		// multi-root templates carry raw markup because their eventual namespace is
-		// unknown, so add the equivalent wrapper only after HTML wins at clone time.
+		// Multi-root templates carry raw markup: an opaque one because its eventual
+		// namespace is unknown until clone time. Add the wrapper the HTML parser
+		// needs here. Markup that arrives already wrapped parses the same way.
 		(STAGED_DOM?.view(t) ?? t).innerHTML = frag ? `<octane-frag>${html}</octane-frag>` : html;
 		const root = getFirstChild(t.content) as Element;
 		// Multi-root HTML templates arrive wrapped in a synthetic <octane-frag>. The
@@ -18499,10 +18500,10 @@ function lazyRootDescriptor(lazy: LazyTemplateRecord): string | 3 | 8 {
 }
 
 /**
- * Is this lazy template a multi-root fragment? SVG/MathML/opaque fragments carry
- * `frag`; HTML multi-root templates arrive from the compiler pre-wrapped in
- * `<octane-frag>` with frag=0, so the wrapper tag is the discriminant there
- * (mirrors parseTemplate's `__oct_frag` stamping of the parsed root).
+ * Is this lazy template a multi-root fragment? Compiled fragments carry `frag`;
+ * HTML roots already wrapped in `<octane-frag>` with frag=0 are discriminated
+ * by the wrapper tag (mirrors parseTemplate's `__oct_frag` stamping of the
+ * parsed root).
  */
 function isLazyFragment(lazy: LazyTemplateRecord): boolean {
 	return lazy.frag !== 0 || lazyRootDescriptor(lazy) === 'octane-frag';
@@ -18510,8 +18511,8 @@ function isLazyFragment(lazy: LazyTemplateRecord): boolean {
 
 /**
  * How many roots a multi-root template has. The compiler passes the count as
- * a raw fragment's `frag`; a parsed or pre-wrapped template counts its
- * children.
+ * `frag`; a parsed template, or markup already wrapped in `<octane-frag>`,
+ * counts its children.
  */
 function templateRootCount(template: Node | LazyTemplateRecord): number {
 	let parsed: Node;
@@ -18547,8 +18548,8 @@ function lazyRootMatches(server: Node, lazy: LazyTemplateRecord): boolean {
 
 /**
  * lazyRootMatches for a nested fragment's FIRST logical root, read from the
- * template source. A raw fragment's cached descriptor is that root; a
- * fixed-HTML fragment's starts after its synthetic `<octane-frag>` wrapper. A
+ * template source. A raw fragment's cached descriptor is that root; markup
+ * already wrapped in `<octane-frag>` has it after the wrapper. A
  * leading `<!>` is a dynamic hole whose server form (text, a marker range, or
  * nothing) cannot decide a mismatch.
  */

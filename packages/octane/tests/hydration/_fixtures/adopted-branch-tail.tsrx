@@ -1,3 +1,5 @@
+import type { ComponentBody } from 'octane';
+
 function label(): string {
 	return 'ok';
 }
@@ -156,4 +158,32 @@ export function UnframedComponent(props: { server?: boolean }) @{
 			</>
 		}
 	</div>
+}
+
+function Slot(props: { render: ComponentBody }) @{
+	const Render = props.render;
+	<section>
+		<Render />
+	</section>
+}
+
+// The branch sits in a template that a helper passed as a render prop returns.
+export function HelperFragment(props: { server?: boolean }) @{
+	const render = () => @{
+		<div>
+			@if (props.server) {
+				<>
+					<i>{label() as string}</i>
+					<b>{'b'}</b>
+					<s class="foreign">{'f'}</s>
+				</>
+			} @else {
+				<>
+					<i>{label() as string}</i>
+					<b>{'b'}</b>
+				</>
+			}
+		</div>
+	};
+	<Slot render={render} />
 }

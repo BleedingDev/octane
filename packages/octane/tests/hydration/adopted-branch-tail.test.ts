@@ -112,6 +112,11 @@ describe.each([
 			name: 'HoleFragment',
 			html: '<i>ok</i><b>b</b>',
 		},
+		{
+			shape: "a fragment in a helper's template",
+			name: 'HelperFragment',
+			html: '<div><i>ok</i><b>b</b></div>',
+		},
 	])('removes the stale tail after $shape', async ({ name, html }) => {
 		render(name, { server: true });
 		const adopted = [...container.querySelectorAll('i, b:not(.foreign)')];
@@ -156,23 +161,33 @@ describe.each([
 		expect(warnings()).toEqual(dev ? [tail(siteOf(`function ${name}(`, directive), '<s>')] : []);
 	});
 
-	it('reports nothing, and parses no template, when the server rendered the same arm', async () => {
-		render('StaticFragment', {});
-		const adopted = [...container.querySelectorAll('i, b')];
-		// Fresh template records: hydration adopts them without parsing any.
-		const fresh = loadClient();
-		const createElement = vi.spyOn(document, 'createElement');
+	it.each([
+		{ shape: 'a fragment arm', name: 'StaticFragment', html: '<i>ok</i><b>b</b>' },
+		{
+			shape: "a fragment arm in a helper's template",
+			name: 'HelperFragment',
+			html: '<div><i>ok</i><b>b</b></div>',
+		},
+	])(
+		'reports nothing, and parses no template, when the server rendered the same $shape',
+		async ({ name, html }) => {
+			render(name, {});
+			const adopted = [...container.querySelectorAll('i, b')];
+			// Fresh template records: hydration adopts them without parsing any.
+			const fresh = loadClient();
+			const createElement = vi.spyOn(document, 'createElement');
 
-		const recoverable = await hydrate(fresh.StaticFragment);
-		const parsed = createElement.mock.calls.filter(([tag]) => tag === 'template');
-		createElement.mockRestore();
+			const recoverable = await hydrate(fresh[name]);
+			const parsed = createElement.mock.calls.filter(([tag]) => tag === 'template');
+			createElement.mockRestore();
 
-		expect(markup(container.firstElementChild!)).toBe('<i>ok</i><b>b</b>');
-		expect([...container.querySelectorAll('i, b')]).toEqual(adopted);
-		expect(recoverable).toEqual([]);
-		expect(warnings()).toEqual([]);
-		if (runtime === 'production') expect(parsed).toEqual([]);
-	});
+			expect(markup(container.firstElementChild!)).toBe(html);
+			expect([...container.querySelectorAll('i, b')]).toEqual(adopted);
+			expect(recoverable).toEqual([]);
+			expect(warnings()).toEqual([]);
+			if (runtime === 'production') expect(parsed).toEqual([]);
+		},
+	);
 
 	it('keeps a server node that a component adopted without its range', async () => {
 		render('UnframedComponent', { server: true });
