@@ -75,6 +75,22 @@ export function HoleLast(props: { server?: boolean; tail: string }) @{
 	</section>
 }
 
+export function KeyedLast(props: { server?: boolean; k: string; tail: string }) @{
+	<section>
+		@if (props.server) {
+			<>
+				<i>{props.tail as string}</i>
+				<b class="server" />
+			</>
+		} @else {
+			<>
+				<i>{props.tail as string}</i>
+				<Under key={props.k} v={props.k} />
+			</>
+		}
+	</section>
+}
+
 export function TwoHoles(props: { server?: boolean; tail: string }) @{
 	<section>
 		@if (props.server) {
