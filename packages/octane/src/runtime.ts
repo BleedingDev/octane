@@ -19428,6 +19428,8 @@ class HydrationCapability {
 			}
 		}
 		removeRange(from, end);
+		// Never leave the cursor on a removed node, as discard() does not.
+		this.node = end;
 	}
 
 	/**
