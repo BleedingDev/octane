@@ -11856,11 +11856,12 @@ export function componentSlotLite<P>(
 	} else if (hydration !== null) {
 		// A hydrating replay, such as a suspended activation's resume, re-renders
 		// an adopted range without adopting it again; its new siblings still adopt
-		// from after it. A root the replay rebuilt over the range's first node
-		// leaves the rest of that range's server content (settleClaim).
+		// from after it. When this range's whole content is a root rebuilt by an
+		// attempt that suspended before settling it, the rest of the range is that
+		// root's server tail (settleClaim).
 		const range = hydration.liteRanges.get(scope);
 		if (range !== undefined) {
-			if (hydration.rebuiltTail !== null) hydration.sweepRebuiltTail(range.end);
+			if (hydration.rebuiltContent === scope) hydration.sweepRebuiltTail(range.end);
 			hydration.node = getNextSibling(range.end);
 		}
 	}
@@ -18960,6 +18961,8 @@ class HydrationCapability {
 	 * slot claims it or the enclosing range ends (sweepRebuiltTail).
 	 */
 	rebuiltTail: Node | null = null;
+	/** The scope whose range's whole content rebuiltRoot is (claimRoots), until its tail goes. */
+	rebuiltContent: Scope | null = null;
 	/**
 	 * The start comment of each markerless branch that holdMarkerlessBranch
 	 * holds, to where its content reached when it threw.
@@ -20632,9 +20635,13 @@ class HydrationCapability {
 					framedRemainder === undefined ? (unframedRemainder ?? null) : framedRemainder,
 				);
 			this.rebuiltTail = this.node;
+			this.rebuiltContent = null;
 			// The rebuilt root can be a range's whole content: what the server
 			// rendered after the node it replaces is then the range's tail.
-			if (cursor === this.claimFrom) this.claimRoots(cursor, null);
+			if (cursor === this.claimFrom) {
+				this.claimRoots(cursor, null);
+				if (this.claimFrom === null) this.rebuiltContent = CURRENT_SCOPE;
+			}
 			return (this.rebuiltRoot = this.freshClone(template));
 		}
 		if (isFragment) {
@@ -20862,6 +20869,7 @@ class HydrationCapability {
 	sweepRebuiltTail(end: Node): void {
 		const tail = this.rebuiltTail;
 		this.rebuiltTail = null;
+		this.rebuiltContent = null;
 		if (
 			tail === null ||
 			tail === end ||

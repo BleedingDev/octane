@@ -178,6 +178,42 @@ export function RebuiltRootBranch(props: { server?: boolean; leaf: Promise<strin
 	</div>
 }
 
+function BoldThenItalic() @{
+	<>
+		<b class="server">{'server'}</b>
+		<i>{'x'}</i>
+	</>
+}
+
+// A rebuilt single root in a fragment's leading hole. The fragment adopts the
+// static root after it, so the rebuilt root is not its range's whole content.
+function ParaThenItalic(props: { leaf: Promise<string> }) @{
+	<>
+		<Para leaf={props.leaf} />
+		<i>{'x'}</i>
+	</>
+}
+
+export function RebuiltHoleBranch(props: { server?: boolean; leaf: Promise<string> }) @{
+	<div>
+		<Hydrate split={false} when={load()}>
+			<section>
+				@if (props.server) {
+					<>
+						<BoldThenItalic />
+						<Em />
+					</>
+				} @else {
+					<>
+						<ParaThenItalic leaf={props.leaf} />
+						<Em />
+					</>
+				}
+			</section>
+		</Hydrate>
+	</div>
+}
+
 function UnderValue(props: { v: string }) @{
 	<u>{props.v as string}</u>
 }
