@@ -983,19 +983,14 @@ function scopeSignalOwner(scope: Scope | null): SignalOwner | undefined {
 		scope.signalInstanceParent === null &&
 		scope.signalInstanceResolved === undefined
 	) {
-		// Host control fragments borrow the enclosing row's declaration owner.
+		// Host control fragments borrow the enclosing component or row owner.
 		// Do not cache it on the fragment: deleting that fragment must not retire
-		// the row's cells, and a retired fragment must never reacquire them.
+		// its parent's cells, and a retired fragment must never reacquire them.
 		let parent = scope.parent ?? scope.block.parentBlock;
-		while (parent !== null) {
-			if (parent instanceof LiteBlockImpl) break;
-			if (parent.signalInstanceParent !== null || parent.signalInstanceResolved !== undefined)
-				break;
-			if (parent.block.forSlot?.signalSite !== undefined) {
-				SCOPE_SIGNAL_OWNERS.set(scope, false);
-				return scopeSignalOwner(parent);
-			}
-			parent = parent.parent ?? parent.block.parentBlock;
+		if (parent instanceof LiteBlockImpl) parent = parent.scope;
+		if (parent !== null) {
+			SCOPE_SIGNAL_OWNERS.set(scope, false);
+			return scopeSignalOwner(parent);
 		}
 	}
 	const retired = owner === null;
@@ -11404,6 +11399,9 @@ class LiteBlockImpl {
 	declare parentNode: Node;
 	declare endMarker: Node | null;
 	declare parentBlock: Block;
+	// Control fragments retain this stand-in as their DOM parent, but signals
+	// belong to the component's logical scope, including detached retries.
+	declare scope: Scope;
 	declare $$ctxValues: Map<Context<any>, any> | null;
 	declare idState: RootIdState;
 	// Signal-instance fields exist on every Block stand-in: lite blocks are
@@ -11415,10 +11413,11 @@ class LiteBlockImpl {
 	declare signalInstanceHasKey: boolean;
 	declare signalInstanceResolved: string | undefined;
 
-	constructor(parentNode: Node, endMarker: Node | null, parentBlock: Block) {
+	constructor(parentNode: Node, endMarker: Node | null, parentBlock: Block, scope: Scope) {
 		this.parentNode = parentNode;
 		this.endMarker = endMarker;
 		this.parentBlock = parentBlock;
+		this.scope = scope;
 		this.$$ctxValues = null;
 		this.idState = parentBlock.idState;
 		this.signalInstanceParent = null;
@@ -11524,7 +11523,7 @@ export function componentSlotLite<P>(
 				hydration.node = getNextSibling(open);
 			}
 		}
-		scope.block = new LiteBlockImpl(host, endMarker, parentScope.block) as unknown as Block;
+		scope.block = new LiteBlockImpl(host, endMarker, parentScope.block, scope) as unknown as Block;
 		stampSignalInstance(scope, parentScope, invocationSite, undefined, false);
 		if (adoptedOpen !== null && adoptedClose !== null) {
 			hydration!.liteRanges.set(scope, {
