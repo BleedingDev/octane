@@ -18894,6 +18894,8 @@ class HydrationCapability {
 	private inPlace: Node | null = null;
 	/** The last server node that the template adopting `inPlace` adopts (adoptInPlace). */
 	private inPlaceLast: Node | null = null;
+	/** Whether adoptInPlace adopted a fragment for inPlace (not a single root). */
+	private inPlaceIsFragment = false;
 	/**
 	 * What a hydrating update built on the client where its slot had already
 	 * rendered: blocks (renderUpdate), and child slots whose list it built.
@@ -19389,7 +19391,9 @@ class HydrationCapability {
 	renderInPlace<T>(render: (target: T) => void, target: T, root: Node, parent: Scope): boolean {
 		const outer = this.inPlace;
 		const outerLast = this.inPlaceLast;
+		const outerFrag = this.inPlaceIsFragment;
 		this.inPlace = this.inPlaceLast = root;
+		this.inPlaceIsFragment = false;
 		let last: Node | null = null;
 		try {
 			render(target);
@@ -19397,9 +19401,19 @@ class HydrationCapability {
 		} finally {
 			this.inPlace = outer;
 			this.inPlaceLast = outerLast;
+			this.inPlaceIsFragment = outerFrag;
 		}
 		if (last === null) return false;
 		this.parkPast(last, parent);
+		// adoptInPlace counts a child component as one template root, but a
+		// child that returns a multi-root fragment without a server frame spans
+		// more DOM nodes than one sibling step covers, so the inPlaceLast it
+		// computes can be too short. After this child parks past its actual
+		// roots, propagate its last node to the parent's inPlaceLast so that
+		// the parent parks past the correct node rather than rewinding.
+		// Only propagate when the parent adopted a fragment (not a single root):
+		// a hole inside a single-root element is not a sibling root.
+		if (this.inPlaceIsFragment) this.inPlaceLast = last;
 		return true;
 	}
 
@@ -20522,6 +20536,7 @@ class HydrationCapability {
 		}
 		this.inPlace = null;
 		this.inPlaceLast = this.isOpen(last) ? this.close(last) : last;
+		this.inPlaceIsFragment = true;
 	}
 
 	/**

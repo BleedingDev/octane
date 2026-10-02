@@ -265,6 +265,38 @@ export function UnframedFragmentPastRange(props: { server?: boolean }) @{
 	</div>
 }
 
+// A component whose fragment roots include another fragment-returning component.
+function PairBold() @{
+	<>
+		<Pair />
+		<Bold />
+	</>
+}
+
+// PairBold's fragment contains Pair (a nested fragment) and Bold. adoptInPlace
+// counts both as single roots, but Pair's fragment spans two DOM nodes without a
+// server frame, so one sibling step undershoots. The parent's renderInPlace must
+// park past Bold's root, not Pair's first root, so Strike after it hydrates.
+export function NestedUnframedFragmentSibling(props: { server?: boolean }) @{
+	<div>
+		@if (props.server) {
+			<>
+				<Bold />
+				<i>{'w'}</i>
+				<em>{'e'}</em>
+				<b>{'b'}</b>
+				<Strike />
+			</>
+		} @else {
+			<>
+				<Bold />
+				<PairBold />
+				<Strike />
+			</>
+		}
+	</div>
+}
+
 function Slot(props: { render: ComponentBody }) @{
 	const Render = props.render;
 	<section>

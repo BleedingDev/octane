@@ -260,4 +260,22 @@ describe.each([
 				: [],
 		);
 	});
+
+	// PairBold returns [Pair, Bold], and Pair returns [<i>, <em>]. adoptInPlace
+	// counts both as single roots, but Pair spans two DOM nodes without a server
+	// frame, so one sibling step undershoots. Without the inPlaceLast
+	// propagation, the parent's renderInPlace parks past Pair's first root and
+	// the arm discards Bold's <b>. With the fix, all adopted roots survive.
+	it('keeps all roots of a nested fragment-returning component adopted in place', async () => {
+		render('NestedUnframedFragmentSibling', { server: true });
+		const host = container.firstElementChild!;
+		const adopted = [...host.children];
+
+		const recoverable = await hydrate(client.NestedUnframedFragmentSibling);
+
+		expect(markup(host)).toBe('<b>b</b><i>w</i><em>e</em><b>b</b><s>s</s>');
+		expect([...host.children]).toEqual(adopted);
+		expect(recoverable).toEqual([]);
+		expect(warnings()).toEqual([]);
+	});
 });
