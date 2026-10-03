@@ -1,6 +1,6 @@
 {
   "name": "@octanejs/tanstack-router",
-  "version": "0.1.60+ultramodern.681ca11f6bff",
+  "version": "0.1.60+ultramodern.6c31d4be4768",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -13,7 +13,7 @@
       ]
     }
   },
-  "description": "TanStack Router bindings for the octane renderer — reuses @tanstack/router-core and swaps the React binding for octane's hooks.",
+  "description": "TanStack Router bindings for the octane renderer \u2014 reuses @tanstack/router-core and swaps the React binding for octane's hooks.",
   "author": {
     "name": "Dominic Gannaway",
     "email": "dg@domgan.com"
@@ -74,13 +74,13 @@
   },
   "ultramodernSource": {
     "upstreamCommit": "676a4ee6db59854d6b711921f4ac808845dcdbcd",
-    "implementationCommit": "681ca11f6bff537f121ef7fbf1aa1d5672e9f29b",
+    "implementationCommit": "6c31d4be47686e66fc8c38674caa72e6dde4405b",
     "authoredSourcePatchSha256": "8ae4277f9811ad2b28fac67b0e1545899206de7775a6f857a057c96beda3ea72",
     "nativeRuntime": {
       "name": "octane",
-      "version": "0.7.1+ultramodern.aab0f1410f79",
-      "artifactSha256": "60f2e76673be5f1e4cbe6f0fa8b85bc12cac41475c17acd22e377f8fca2e8a7e",
-      "provenanceSha256": "8f4765726e6665ffee10046b1131b7b583943700cc7c84f7243b7298286cba31"
+      "version": "0.7.1+ultramodern.f75bf12ac8be",
+      "artifactSha256": "485b62884e9e85621ad9d58347fed22dc66a628a9a7ec5f1c4cd5c7a86643137",
+      "provenanceSha256": "623a5d9962b9011de0dcc06e5e31001f17a535be5b1e240a346e59fb51e9d4d1"
     }
   }
 }
