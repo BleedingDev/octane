@@ -105,7 +105,7 @@ All publishable packages share the enforced Node.js engine baseline `>=22.22.2`.
 | `@octanejs/tanstack-hotkeys` | [`packages/tanstack-hotkeys`](../packages/tanstack-hotkeys) | framework binding | `0.0.49` | 1 |
 | `@octanejs/tanstack-pacer` | [`packages/tanstack-pacer`](../packages/tanstack-pacer) | framework binding | `0.0.49` | 15 |
 | `@octanejs/tanstack-query` | [`packages/tanstack-query`](../packages/tanstack-query) | framework binding | `0.1.58` | 1 |
-| `@octanejs/tanstack-router` | [`packages/tanstack-router`](../packages/tanstack-router) | framework binding | `0.1.60` | 6 |
+| `@octanejs/tanstack-router` | [`packages/tanstack-router`](../packages/tanstack-router) | framework binding | `0.1.60+ultramodern.681ca11f6bff` | 6 |
 | `@octanejs/tanstack-router-ssr-query` | [`packages/tanstack-router-ssr-query`](../packages/tanstack-router-ssr-query) | framework binding | `0.0.51` | 1 |
 | `@octanejs/tanstack-start` | [`packages/tanstack-start`](../packages/tanstack-start) | framework integration | `0.1.52` | 13 |
 | `@octanejs/tanstack-store` | [`packages/tanstack-store`](../packages/tanstack-store) | framework binding | `0.0.54` | 1 |
@@ -134,7 +134,7 @@ All publishable packages share the enforced Node.js engine baseline `>=22.22.2`.
 | `@octanejs/zag` | [`packages/zag`](../packages/zag) | framework binding | `0.0.24` | 1 |
 | `@octanejs/zustand` | [`packages/zustand`](../packages/zustand) | framework binding | `0.1.58` | 6 |
 | `create-octane` | [`packages/create-octane`](../packages/create-octane) | project scaffolder | `0.0.12` | 1 |
-| `octane` | [`packages/octane`](../packages/octane) | core runtime + compiler | `0.7.1` | 40 |
+| `octane` | [`packages/octane`](../packages/octane) | core runtime + compiler | `0.7.1+ultramodern.f75bf12ac8be` | 40 |
 
 ## Private packages
 

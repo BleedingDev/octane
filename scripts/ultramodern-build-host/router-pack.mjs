@@ -20,6 +20,7 @@ import { checkTsrxProject } from './check-tsrx-project.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const packageRoot = resolve(root, 'packages/tanstack-router');
+const nativePackageRoot = resolve(root, 'packages/octane');
 const upstreamCommit = '676a4ee6db59854d6b711921f4ac808845dcdbcd';
 const [output, runtimeProvenancePath] = process.argv.slice(2);
 assert(output && isAbsolute(output), 'Pass an absolute owned artifact directory.');
@@ -143,7 +144,7 @@ const runtime = {
 	provenanceSha256: digest('sha256', runtimeProvenanceBytes),
 };
 assert.deepEqual(source.nativeRuntime, runtime, 'Bind the selected immutable native runtime.');
-assert.equal(sourceManifest.peerDependencies.octane, '^0.7.0');
+assert.equal(sourceManifest.peerDependencies.octane, 'workspace:^0.7.0');
 assert.deepEqual(
 	Object.keys(sourceManifest.dependencies).sort(),
 	Object.keys(upstreamManifest.dependencies).sort(),
@@ -217,6 +218,7 @@ try {
 	}
 	writeFileSync(resolve(packageStage, 'LICENSE'), licenseBytes);
 	const published = { ...sourceManifest };
+	published.peerDependencies = { ...sourceManifest.peerDependencies, octane: '^0.7.0' };
 	delete published.publishConfig;
 	delete published.scripts;
 	delete published.devDependencies;
@@ -231,14 +233,18 @@ try {
 	};
 	linkPackage('octane', resolve(runtimeStage, 'package'));
 	linkPackage('@octanejs/tanstack-router', packageStage);
-	const dependencies = { ...runtimeManifest.dependencies, ...sourceManifest.dependencies };
-	for (const [name, pin] of Object.entries(dependencies)) {
-		assert.match(pin, /^\d+\.\d+\.\d+$/, `Exact checker dependency ${name}`);
-		const installed = realpathSync(resolve(root, 'node_modules', name));
-		const installedManifest = JSON.parse(readFileSync(resolve(installed, 'package.json')));
-		assert.equal(installedManifest.name, name);
-		assert.equal(installedManifest.version, pin, `Checker dependency ${name}`);
-		linkPackage(name, installed);
+	for (const [dependencies, context] of [
+		[runtimeManifest.dependencies, nativePackageRoot],
+		[sourceManifest.dependencies, packageRoot],
+	]) {
+		for (const [name, pin] of Object.entries(dependencies)) {
+			assert.match(pin, /^\d+\.\d+\.\d+$/, `Exact checker dependency ${name}`);
+			const installed = realpathSync(resolve(context, 'node_modules', name));
+			const installedManifest = JSON.parse(readFileSync(resolve(installed, 'package.json')));
+			assert.equal(installedManifest.name, name);
+			assert.equal(installedManifest.version, pin, `Checker dependency ${name}`);
+			linkPackage(name, installed);
+		}
 	}
 	linkPackage('@types/node', realpathSync(resolve(root, 'node_modules/@types/node')));
 	linkPackage('typescript', realpathSync(resolve(root, 'node_modules/typescript')));

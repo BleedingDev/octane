@@ -1,6 +1,6 @@
 {
   "name": "octane",
-  "version": "0.7.1+ultramodern.aab0f1410f79",
+  "version": "0.7.1+ultramodern.f75bf12ac8be",
   "license": "MIT",
   "type": "module",
   "sideEffects": [
@@ -335,10 +335,7 @@
     "entities": "7.0.1",
     "es-module-lexer": "1.7.0",
     "esrap": "2.3.2",
-    "@tsrx/oxc": "0.16.0",
-    "@typescript-eslint/types": "8.71.0",
-    "vscode-languageserver-types": "3.18.4",
-    "source-map": "0.8.0"
+    "@tsrx/oxc": "0.16.0"
   },
   "peerDependencies": {
     "react": "^19.0.0",
@@ -373,12 +370,15 @@
     "typescript": "catalog:default",
     "viem": "catalog:default",
     "vite": "catalog:default",
-    "vitest": "catalog:default"
+    "vitest": "catalog:default",
+    "@typescript-eslint/types": "8.71.0",
+    "vscode-languageserver-types": "3.18.4",
+    "source-map": "0.8.0"
   },
   "ultramodernSource": {
     "upstreamCommit": "676a4ee6db59854d6b711921f4ac808845dcdbcd",
-    "implementationCommit": "aab0f1410f799e57d833a4b6fd94b58958f39b46",
+    "implementationCommit": "f75bf12ac8bebe3ca4c4db1f62f45f9d4a36963d",
     "runtimePatchSha256": "2262f080f4d2927477cb17d353761958be25206ee2c9e4fc7e3258891659a952",
-    "authoredSourcePatchSha256": "b16489a3bcd239831e3bd7501d1fd0d00c7f739e98779bcde45c9c40e4f1773e"
+    "authoredSourcePatchSha256": "699036d4f620a2d463128b13991e11393ea3a83494955839b56193841ebbc352"
   }
 }
