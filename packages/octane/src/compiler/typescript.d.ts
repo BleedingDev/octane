@@ -1,20 +1,5 @@
-/** Source-bound, serializable primitive-text proofs for JSX child holes. */
-export interface TextTypeFacts {
-	readonly version: 1;
-	/** Clean absolute filename, with forward-slash separators. */
-	readonly filename: string;
-	/** Digest of every authored UTF-16 code unit, including line endings. */
-	readonly sourceVersion: string;
-	/** Identifies the TypeScript options and source graph used for this proof. */
-	readonly projectVersion: string;
-	/** Sorted, unique, half-open UTF-16 ranges of authored child expressions. */
-	readonly stringChildRanges: readonly (readonly [start: number, end: number])[];
-	/**
-	 * Number, bigint, and mixed string/number/bigint children. Older version-1
-	 * snapshots omit this field and retain their string-only behavior.
-	 */
-	readonly primitiveTextChildRanges?: readonly (readonly [start: number, end: number])[];
-}
+import type { TextTypeFacts } from './text-type-facts.js';
+export type { TextTypeFacts } from './text-type-facts.js';
 
 export interface TextTypeProjectOptions {
 	/** Path to the consumer tsconfig. Relative paths resolve from the process cwd. */
@@ -34,7 +19,7 @@ export interface TextTypeProject {
 	 * override until that file, or the whole project, is invalidated.
 	 *
 	 * The project uses strict null checking only when the consumer enables it and
-	 * always enables noUncheckedIndexedAccess for this analysis. Unproven, unsafe,
+	 * always enables full checking and noUncheckedIndexedAccess for this analysis. Unproven, unsafe,
 	 * erroneous, or ambiguously mapped expressions are omitted. These facts trust
 	 * TypeScript declarations; they do not validate runtime values.
 	 */
@@ -45,7 +30,7 @@ export interface TextTypeProject {
 	 * the tsconfig and project roots before the next snapshot. No watcher is started.
 	 */
 	invalidate(filename?: string): void;
-	/** Release the language service and retained source graph. Idempotent. */
+	/** Release the native TypeScript API and retained source graph. Idempotent. */
 	dispose(): void;
 }
 
@@ -58,12 +43,12 @@ export function createTextTypeProject(options: TextTypeProjectOptions): TextType
 
 /**
  * Validate native signal names and known live reads in ordinary memo callbacks
- * against the exact SourceFile in an existing TypeScript Program. The caller
+ * against the exact SourceFile in an existing native TypeScript Project. The caller
  * owns project lifetime and mapping diagnostics from virtual .tsrx files.
  * Resolves the native SIGNAL_HANDLE brand by symbol; unrelated structural
  * shapes and ordinary sampled values are not native capabilities.
  */
 export function validateNativeSignalNames(
-	program: import('typescript').Program,
-	file: string | import('typescript').SourceFile,
+	project: import('typescript/unstable/sync').Project,
+	file: string | import('typescript/unstable/ast').SourceFile,
 ): import('./index.js').CompileDiagnostic[];

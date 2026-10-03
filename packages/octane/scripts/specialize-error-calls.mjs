@@ -1,5 +1,10 @@
 import { dirname, resolve } from 'node:path';
-import ts from 'typescript';
+import * as ts from 'typescript/unstable/ast';
+import * as factory from 'typescript/unstable/ast/factory';
+import {
+	NativeSyntaxError,
+	withNativeSyntaxProject,
+} from '../../../scripts/lib/native-syntax-project.mjs';
 import { frameworkErrorSurface } from '../../../scripts/error-codes/generate.mjs';
 import { formatProdErrorMessage } from '../src/error-message.ts';
 
@@ -14,9 +19,35 @@ export function specializeErrorCalls(source, filename, catalog) {
 	if (surface === undefined || productionParts.length !== 3) return source;
 	const formatter = surface === 'server' ? 'formatServerError' : 'formatClientError';
 	const runtime = surface === 'server' ? 'server' : 'client';
-	const sourceFile = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
-	if (sourceFile.parseDiagnostics.length !== 0) return source;
+	try {
+		return withNativeSyntaxProject([[filename, source]], ({ project, sourceFiles }) => {
+			return specializeParsedCalls(
+				source,
+				filename,
+				catalog,
+				surface,
+				formatter,
+				runtime,
+				sourceFiles[0][1],
+				project.emitter,
+			);
+		});
+	} catch (error) {
+		if (error instanceof NativeSyntaxError) return source;
+		throw error;
+	}
+}
 
+function specializeParsedCalls(
+	source,
+	filename,
+	catalog,
+	surface,
+	formatter,
+	runtime,
+	sourceFile,
+	emitter,
+) {
 	const imports = sourceFile.statements.filter((node) => {
 		if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier)) return false;
 		// Bare and absolute specifiers have different resolution rules, even when
@@ -41,7 +72,7 @@ export function specializeErrorCalls(source, filename, catalog) {
 	}
 
 	let safe = true;
-	let calls = 0;
+	const calls = [];
 	function scan(node) {
 		if (ts.isIdentifier(node)) {
 			// A caller-local process binding would change the lookup that used to
@@ -71,39 +102,42 @@ export function specializeErrorCalls(source, filename, catalog) {
 					) {
 						safe = false;
 					} else {
-						calls++;
+						calls.push({ node: parent, code: raw });
 					}
 				} else {
 					safe = false;
 				}
 			}
 		}
-		ts.forEachChild(node, scan);
+		node.forEachChild(scan);
 	}
 	scan(sourceFile);
-	if (!safe || calls === 0) return source;
+	if (!safe || calls.length === 0) return source;
 
-	const factory = ts.factory;
 	const helperCode = factory.createIdentifier('code');
 	const productionExpression = productionParts
 		.slice(1)
 		.reduce(
 			(expression, part) =>
 				factory.createBinaryExpression(
+					undefined,
 					factory.createBinaryExpression(
+						undefined,
 						expression,
+						undefined,
 						factory.createToken(ts.SyntaxKind.PlusToken),
 						helperCode,
 					),
+					undefined,
 					factory.createToken(ts.SyntaxKind.PlusToken),
-					factory.createStringLiteral(part),
+					factory.createStringLiteral(part, ts.TokenFlags.None),
 				),
-			factory.createStringLiteral(productionParts[0]),
+			factory.createStringLiteral(productionParts[0], ts.TokenFlags.None),
 		);
 	const helper = factory.createFunctionDeclaration(
 		undefined,
 		undefined,
-		HELPER,
+		factory.createIdentifier(HELPER),
 		undefined,
 		[
 			factory.createParameterDeclaration(
@@ -117,54 +151,61 @@ export function specializeErrorCalls(source, filename, catalog) {
 		factory.createKeywordTypeNode(ts.SyntaxKind.StringKeyword),
 		factory.createBlock([factory.createReturnStatement(productionExpression)], true),
 	);
-	const result = ts.transform(sourceFile, [
-		(context) => {
-			const visit = (node) => {
-				if (
-					ts.isCallExpression(node) &&
-					ts.isIdentifier(node.expression) &&
-					node.expression.text === formatter
-				) {
-					const code = node.arguments[0].getText(sourceFile);
-					return factory.createConditionalExpression(
-						factory.createBinaryExpression(
-							factory.createPropertyAccessExpression(
-								factory.createPropertyAccessExpression(factory.createIdentifier('process'), 'env'),
-								'NODE_ENV',
-							),
-							factory.createToken(ts.SyntaxKind.ExclamationEqualsEqualsToken),
-							factory.createStringLiteral('production'),
-						),
+	const edits = calls.map(({ node, code }) => {
+		const conditional = factory.createConditionalExpression(
+			factory.createBinaryExpression(
+				undefined,
+				factory.createPropertyAccessExpression(
+					factory.createPropertyAccessExpression(
+						factory.createIdentifier('process'),
 						undefined,
-						factory.createStringLiteral(catalog.codes[code].message),
-						undefined,
-						factory.createCallExpression(factory.createIdentifier(HELPER), undefined, [
-							factory.createNumericLiteral(code),
-						]),
-					);
-				}
-				return ts.visitEachChild(node, visit, context);
-			};
-			return (file) => {
-				const statements = file.statements
-					.filter((statement) => statement !== imports[0])
-					.map((statement) => ts.visitNode(statement, visit));
-				let index = 0;
-				while (
-					index < statements.length &&
-					(ts.isImportDeclaration(statements[index]) ||
-						(ts.isExpressionStatement(statements[index]) &&
-							ts.isStringLiteral(statements[index].expression)))
-				)
-					index++;
-				statements.splice(index, 0, helper);
-				return factory.updateSourceFile(file, statements);
-			};
-		},
-	]);
-	try {
-		return ts.createPrinter().printFile(result.transformed[0]);
-	} finally {
-		result.dispose();
+						factory.createIdentifier('env'),
+						ts.NodeFlags.None,
+					),
+					undefined,
+					factory.createIdentifier('NODE_ENV'),
+					ts.NodeFlags.None,
+				),
+				undefined,
+				factory.createToken(ts.SyntaxKind.ExclamationEqualsEqualsToken),
+				factory.createStringLiteral('production', ts.TokenFlags.None),
+			),
+			factory.createToken(ts.SyntaxKind.QuestionToken),
+			factory.createStringLiteral(catalog.codes[code].message, ts.TokenFlags.None),
+			factory.createToken(ts.SyntaxKind.ColonToken),
+			factory.createCallExpression(
+				factory.createIdentifier(HELPER),
+				undefined,
+				undefined,
+				[factory.createNumericLiteral(code, ts.TokenFlags.None)],
+				ts.NodeFlags.None,
+			),
+		);
+		return {
+			start: node.getStart(sourceFile),
+			end: node.end,
+			// A standalone printer has no enclosing operator context. Parentheses
+			// keep the replacement correct in unary, binary and member expressions.
+			text: emitter.printNode(factory.createParenthesizedExpression(conditional)),
+		};
+	});
+	const statements = sourceFile.statements.filter((statement) => statement !== imports[0]);
+	let index = 0;
+	while (
+		index < statements.length &&
+		(ts.isImportDeclaration(statements[index]) ||
+			(ts.isExpressionStatement(statements[index]) &&
+				ts.isStringLiteral(statements[index].expression)))
+	)
+		index++;
+	const insertAt = index === 0 ? (ts.getShebang(source)?.length ?? 0) : statements[index - 1].end;
+	edits.push({ start: imports[0].getStart(sourceFile), end: imports[0].end, text: '' });
+	edits.push({ start: insertAt, end: insertAt, text: `\n${emitter.printNode(helper)}\n` });
+	// Source-range edits retain every untouched comment and annotation while
+	// keeping the native project's AST immutable.
+	let output = source;
+	for (const { start, end, text } of edits.sort((a, b) => b.start - a.start || b.end - a.end)) {
+		output = output.slice(0, start) + text + output.slice(end);
 	}
+	return output;
 }

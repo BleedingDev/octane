@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import ts from 'typescript';
+import { existsSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { API } from 'typescript/unstable/sync';
 import { afterEach, describe, expect, it } from 'vitest';
 import { compile, compileToVolarMappings } from 'octane/compiler';
 import { createTextTypeProject } from 'octane/compiler/typescript';
@@ -135,6 +135,201 @@ export function Shapes<T extends string>(props: Props, constrained: T) @{
 			attributeStart + 'props.name'.length,
 		]);
 		expect(JSON.parse(JSON.stringify(facts))).toEqual(facts);
+	});
+
+	it('accepts JSONC configuration with explicit TSRX roots and inherited JSX settings', () => {
+		const source = `export function Label(props: { value: string }) @{ <p>{props.value}</p> }`;
+		const consumer = fixture({ 'Label.tsrx': source });
+		consumer.write(
+			'base.json',
+			'{ "compilerOptions": { "strict": true, "jsx": "react-jsx", "jsxImportSource": "octane", "types": [], }, }',
+		);
+		consumer.write(
+			'tsconfig.json',
+			'{ // authored configuration\n "extends": "./base.json", "files": ["Label.tsrx",], }',
+		);
+		consumer.project.invalidate();
+		expect(stringChildren(source, consumer.project.snapshot(consumer.file('Label.tsrx')))).toEqual([
+			'props.value',
+		]);
+	});
+
+	it.each([false, true])(
+		'discovers inherited configs of project references recursively: %s',
+		(recursive) => {
+			const model = recursive ? 'leaf/Model.tsrx' : 'referenced/Model.tsrx';
+			const source = `import type { Label } from './${model}'; export function Main(props: { value: Label }) @{ <p>{props.value}</p> }`;
+			const consumer = fixture({
+				'Main.tsrx': source,
+				[model]: `export type Label = string; export function Model() @{ <i>model</i> }`,
+			});
+			const mainConfig = JSON.parse(readFileSync(consumer.tsconfig, 'utf8'));
+			delete mainConfig.include;
+			mainConfig.files = ['Main.tsrx'];
+			mainConfig.references = [{ path: './referenced' }];
+			consumer.write('tsconfig.json', JSON.stringify(mainConfig));
+			consumer.write(
+				'referenced/tsconfig.json',
+				JSON.stringify({
+					extends: './base.json',
+					...(recursive ? { references: [{ path: '../leaf/project.json' }] } : {}),
+				}),
+			);
+			consumer.write(
+				'referenced/base.json',
+				JSON.stringify({
+					compilerOptions: { ...mainConfig.compilerOptions, composite: true },
+					...(recursive ? { files: [] } : { files: ['Model.tsrx'] }),
+				}),
+			);
+			const inherited = recursive ? 'leaf/settings/base.json' : 'referenced/base.json';
+			if (recursive) {
+				consumer.write('leaf/project.json', '{ "extends": "./settings/base.json" }');
+				consumer.write(
+					inherited,
+					JSON.stringify({
+						compilerOptions: { ...mainConfig.compilerOptions, composite: true },
+						files: ['../Model.tsrx'],
+					}),
+				);
+			}
+			consumer.project.invalidate();
+			const first = consumer.project.snapshot(consumer.file('Main.tsrx'));
+			expect(stringChildren(source, first)).toEqual(['props.value']);
+
+			consumer.write(
+				inherited,
+				readFileSync(consumer.file(inherited), 'utf8') + '\n// changed inherited input',
+			);
+			consumer.project.invalidate(consumer.file(inherited));
+			const second = consumer.project.snapshot(consumer.file('Main.tsrx'));
+			expect(stringChildren(source, second)).toEqual(['props.value']);
+			expect(second.sourceVersion).toBe(first.sourceVersion);
+			expect(second.projectVersion).not.toBe(first.projectVersion);
+
+			consumer.write(
+				model,
+				`export type Label = boolean; export function Model() @{ <i>model</i> }`,
+			);
+			consumer.project.invalidate(consumer.file(model));
+			expect(stringChildren(source, consumer.project.snapshot(consumer.file('Main.tsrx')))).toEqual(
+				[],
+			);
+		},
+	);
+
+	it('does not inherit project references from a base config', () => {
+		const source = `export function Main(props: { value: string }) @{ <p>{props.value}</p> }`;
+		const consumer = fixture({
+			'Main.tsrx': source,
+			'ignored/tsconfig.json': '{ malformed and not a referenced project }',
+		});
+		const config = JSON.parse(readFileSync(consumer.tsconfig, 'utf8'));
+		consumer.write('base.json', JSON.stringify({ ...config, references: [{ path: './ignored' }] }));
+		consumer.write('tsconfig.json', '{ "extends": "./base.json" }');
+		consumer.project.invalidate();
+		const first = consumer.project.snapshot(consumer.file('Main.tsrx'));
+		expect(stringChildren(source, first)).toEqual(['props.value']);
+		consumer.write('ignored/tsconfig.json', '{ still malformed and ignored }');
+		consumer.project.invalidate(consumer.file('ignored/tsconfig.json'));
+		const second = consumer.project.snapshot(consumer.file('Main.tsrx'));
+		expect(second.projectVersion).toBe(first.projectVersion);
+	});
+
+	it('discovers each symlinked reference config at its own relative location', () => {
+		const source = `import type { Label } from './right/Model.tsrx'; export function Main(props: { value: Label }) @{ <p>{props.value}</p> }`;
+		const consumer = fixture({
+			'Main.tsrx': source,
+			'left/Model.tsrx': `export type Label = string; export function Model() @{ <i>left</i> }`,
+			'right/Model.tsrx': `export type Label = string; export function Model() @{ <i>right</i> }`,
+			'shared/project.json': '{ "extends": "./base.json" }',
+		});
+		const config = JSON.parse(readFileSync(consumer.tsconfig, 'utf8'));
+		delete config.include;
+		config.files = ['Main.tsrx'];
+		config.references = [{ path: './left' }, { path: './right' }];
+		consumer.write('tsconfig.json', JSON.stringify(config));
+		for (const name of ['left', 'right']) {
+			consumer.write(
+				`${name}/base.json`,
+				JSON.stringify({
+					compilerOptions: { ...config.compilerOptions, composite: true },
+					files: ['Model.tsrx'],
+				}),
+			);
+			symlinkSync(consumer.file('shared/project.json'), consumer.file(`${name}/tsconfig.json`));
+		}
+		consumer.project.invalidate();
+		const first = consumer.project.snapshot(consumer.file('Main.tsrx'));
+		expect(stringChildren(source, first)).toEqual(['props.value']);
+		consumer.write(
+			'right/base.json',
+			readFileSync(consumer.file('right/base.json'), 'utf8') + '\n// changed second location',
+		);
+		consumer.project.invalidate(consumer.file('right/base.json'));
+		const second = consumer.project.snapshot(consumer.file('Main.tsrx'));
+		expect(stringChildren(source, second)).toEqual(['props.value']);
+		expect(second.sourceVersion).toBe(first.sourceVersion);
+		expect(second.projectVersion).not.toBe(first.projectVersion);
+	});
+
+	it.each([
+		{ include: ['*.tsx'], exclude: [], main: 'Main.tsx', unused: 'Unused.tsrx' },
+		{ include: ['*.tsrx'], exclude: [], main: 'Main.tsrx', unused: 'Unused.tsx' },
+		{ include: ['**/*'], exclude: ['*.tsx'], main: 'Main.tsrx', unused: 'Unused.tsx' },
+	])(
+		'keeps authored include and exclude membership for $main',
+		({ include, exclude, main, unused }) => {
+			const source = main.endsWith('.tsrx')
+				? `export function Main(props: { value: string }) @{ <p>{props.value}</p> }`
+				: `/** @jsxImportSource octane */ export function Main(props: { value: string }) { return <p>{props.value}</p>; }`;
+			const other = unused.endsWith('.tsrx')
+				? `export function Unused() @{ <i>unused</i> }`
+				: `/** @jsxImportSource octane */ export function Unused() { return <i>unused</i>; }`;
+			const consumer = fixture({ [main]: source, [unused]: other });
+			const config = JSON.parse(readFileSync(consumer.tsconfig, 'utf8'));
+			config.include = include;
+			config.exclude = exclude;
+			writeFileSync(consumer.tsconfig, JSON.stringify(config));
+			consumer.project.invalidate();
+			const first = consumer.project.snapshot(consumer.file(main));
+			expect(stringChildren(source, first)).toEqual(['props.value']);
+			consumer.write(unused, other + '\n// outside the configured source graph');
+			consumer.project.invalidate(consumer.file(unused));
+			const second = consumer.project.snapshot(consumer.file(main));
+			expect(second.projectVersion).toBe(first.projectVersion);
+		},
+	);
+
+	it('keeps an authored TSX filename ending in .tsrx.tsx in the ordinary project', () => {
+		const source = `/** @jsxImportSource octane */ export function Main(props: { value: string }) { return <p>{props.value}</p>; }`;
+		const consumer = fixture({ 'Main.tsrx.tsx': source });
+		expect(
+			stringChildren(source, consumer.project.snapshot(consumer.file('Main.tsrx.tsx'))),
+		).toEqual(['props.value']);
+	});
+
+	it('checks imported JSON data without treating it as a project configuration', () => {
+		const source = `import labels from './labels.json'; export function Main(props: { index: number }) @{ <p>{labels[props.index] ?? ''}</p> }`;
+		const consumer = fixture(
+			{ 'Main.tsrx': source, 'labels.json': '["ready"]' },
+			{ resolveJsonModule: true },
+		);
+		expect(stringChildren(source, consumer.project.snapshot(consumer.file('Main.tsrx')))).toEqual([
+			"labels[props.index] ?? ''",
+		]);
+	});
+
+	it('supplies JSX preservation when the consumer omits a JSX setting', () => {
+		const source = `export function Label(props: { value: string }) @{ <p>{props.value}</p> }`;
+		const consumer = fixture({ 'Label.tsrx': source });
+		const config = JSON.parse(readFileSync(consumer.tsconfig, 'utf8'));
+		delete config.compilerOptions.jsx;
+		writeFileSync(consumer.tsconfig, JSON.stringify(config));
+		consumer.project.invalidate();
+		expect(stringChildren(source, consumer.project.snapshot(consumer.file('Label.tsrx')))).toEqual([
+			'props.value',
+		]);
 	});
 
 	it('uses control-flow narrowing at the individual child, not at the symbol declaration', () => {
@@ -298,6 +493,24 @@ export function Imported(props: { label: Label }) @{
 		expect(() => consumer.project.dispose()).not.toThrow();
 	});
 
+	it('keeps unchanged JSX facts usable across repeated native project snapshots', () => {
+		const original = `export function Label(props: { value: string }) @{ <p>{props.value}</p> }`;
+		const consumer = fixture({ 'Label.tsrx': original });
+		const filename = consumer.file('Label.tsrx');
+		for (const source of [
+			original,
+			original + '\n// edit one',
+			original + '\n// edit two',
+			original,
+		]) {
+			const facts = consumer.project.snapshot(filename, source);
+			expect(stringChildren(source, facts)).toEqual(['props.value']);
+			expect(facts.sourceVersion).not.toBe('');
+			for (const mode of ['client', 'server'] as const)
+				expect(() => compile(source, filename, { mode, textTypeFacts: facts })).not.toThrow();
+		}
+	});
+
 	it('binds cached facts to the requested filename spelling on case-insensitive filesystems', ({
 		skip,
 	}) => {
@@ -305,7 +518,7 @@ export function Imported(props: { label: Label }) @{
 		const consumer = fixture({ 'Case.tsrx': source });
 		const upper = consumer.file('Case.tsrx');
 		const lower = consumer.file('case.tsrx');
-		if (ts.sys.useCaseSensitiveFileNames || !existsSync(lower)) skip();
+		if (!existsSync(lower)) skip();
 		for (const filename of [upper, lower, upper]) {
 			const facts = consumer.project.snapshot(filename);
 			expect(facts.filename).toBe(filename.replaceAll('\\', '/'));
@@ -339,16 +552,16 @@ export function Errors(props: { sound: string }) @{
 		expect(proven).toContain('String(props.value)');
 		const virtual = compileToVolarMappings(source, filename);
 		const checkFile = consumer.write('Conversion.check.tsx', virtual.code);
-		const program = ts.createProgram([checkFile], {
-			strict: true,
-			noEmit: true,
-			target: ts.ScriptTarget.ESNext,
-			module: ts.ModuleKind.ESNext,
-			moduleResolution: ts.ModuleResolutionKind.Bundler,
-			jsx: ts.JsxEmit.ReactJSX,
-			types: [],
-		});
-		expect(ts.getPreEmitDiagnostics(program).map(({ code }) => code)).toEqual([2352]);
+		const api = new API({ cwd: consumer.directory });
+		try {
+			const snapshot = api.updateSnapshot({ openProjects: [consumer.tsconfig] });
+			const project = snapshot.getProject(consumer.tsconfig)!;
+			expect(project.program.getSemanticDiagnostics(checkFile).map(({ code }) => code)).toEqual([
+				2352,
+			]);
+		} finally {
+			api.close();
+		}
 	});
 
 	it('maps UTF-16 source offsets exactly when non-ASCII text precedes a child', () => {

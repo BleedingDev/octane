@@ -314,6 +314,73 @@ test('enforces coded messages in covered signal, hydration, and DOM binding modu
 	}
 });
 
+test('uses native AST ranges and preserves wrapped formatter expressions', () => {
+	for (const message of [
+		'(formatClientError(1, value) as string)! satisfies string',
+		'<string>formatClientError(1, value)',
+	]) {
+		assert.doesNotThrow(() =>
+			validateRuntimeUsages(catalog(), [
+				['runtime.ts', `// 🧪 Error("comment-only")\nthrow new Error(${message});`],
+			]),
+		);
+	}
+	assert.throws(
+		() =>
+			validateRuntimeUsages(catalog(), [
+				[
+					'runtime.ts',
+					'const emoji = "🧪";\n  throw new RangeError("uncoded");\nthrow Error(formatClientError(1, value));',
+				],
+			]),
+		/runtime\.ts:2:9 constructs RangeError without a direct formatClientError/,
+	);
+});
+
+test('preserves cross-file inherited and shifted Error message arguments', () => {
+	const shared = catalog({
+		codes: { 1: { ...catalog().codes[1], runtime: ['client', 'server'] } },
+	});
+	const classes = [
+		[
+			'signals/leaf.ts',
+			'class WrappedError extends ShiftedError { constructor(message: string) { super(0, message); } }',
+		],
+		[
+			'signals/parent.ts',
+			'class ShiftedError extends Error { constructor(reason: number, message: string) { super(message as string); } }',
+		],
+	];
+	assert.doesNotThrow(() =>
+		validateRuntimeUsages(shared, [
+			...classes,
+			['signals/engine.ts', 'throw new WrappedError(formatClientError(1, value));'],
+		]),
+	);
+	assert.throws(
+		() =>
+			validateRuntimeUsages(shared, [
+				...classes,
+				['signals/engine.ts', 'throw new WrappedError("uncoded");'],
+			]),
+		/signals\/engine\.ts:1:7 constructs WrappedError without a direct formatClientError/,
+	);
+});
+
+test('reports native syntax errors before accepting recovered call sites', () => {
+	assert.throws(
+		() =>
+			validateRuntimeUsages(catalog(), [
+				['runtime.ts', 'throw new Error(formatClientError(1, value));\nconst broken = ;'],
+			]),
+		(error) => {
+			assert.equal(error.name, 'NativeSyntaxError');
+			assert(error.diagnostics.some((diagnostic) => diagnostic.code === 1109));
+			return true;
+		},
+	);
+});
+
 test('keeps published codes append-only while allowing retirement and additions', () => {
 	const previous = catalog();
 	const retiredAndExtended = catalog({

@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import ts from 'typescript';
+import * as ts from 'typescript/unstable/ast';
+import { withNativeSyntaxProject } from '../lib/native-syntax-project.mjs';
 import {
 	APPROVED_LICENSE_IDENTIFIERS,
 	fingerprint,
@@ -721,52 +722,56 @@ function normalizeReimplementationProof(proof) {
 }
 
 const SHIPPED_SOURCE_EXTENSIONS = ['.ts', '.tsx', '.tsrx', '.js', '.jsx', '.mjs', '.cjs'];
+const isStringLiteralLike = (node) =>
+	ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
 
 function staticModuleSpecifiers(filePath) {
-	const source = ts.createSourceFile(
-		filePath,
-		readFileSync(filePath, 'utf8'),
-		ts.ScriptTarget.Latest,
-		false,
-		/\.(?:tsx|tsrx|jsx)$/.test(filePath) ? ts.ScriptKind.TSX : undefined,
+	const syntaxPath = filePath.endsWith('.tsrx') ? `${filePath}.tsx` : filePath;
+	return withNativeSyntaxProject(
+		[[syntaxPath, readFileSync(filePath, 'utf8')]],
+		({ sourceFiles }) => {
+			const specifiers = [];
+			function visit(node) {
+				if (
+					ts.isImportDeclaration(node) &&
+					node.moduleSpecifier &&
+					isStringLiteralLike(node.moduleSpecifier) &&
+					!node.importClause?.isTypeOnly
+				) {
+					specifiers.push(node.moduleSpecifier.text);
+				} else if (
+					ts.isExportDeclaration(node) &&
+					node.moduleSpecifier &&
+					isStringLiteralLike(node.moduleSpecifier) &&
+					!node.isTypeOnly
+				) {
+					specifiers.push(node.moduleSpecifier.text);
+				} else if (
+					ts.isImportEqualsDeclaration(node) &&
+					ts.isExternalModuleReference(node.moduleReference) &&
+					node.moduleReference.expression &&
+					isStringLiteralLike(node.moduleReference.expression) &&
+					!node.isTypeOnly
+				) {
+					specifiers.push(node.moduleReference.expression.text);
+				} else if (
+					ts.isCallExpression(node) &&
+					node.arguments.length === 1 &&
+					isStringLiteralLike(node.arguments[0]) &&
+					(node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+						(ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+				) {
+					specifiers.push(node.arguments[0].text);
+				}
+				node.forEachChild(visit);
+			}
+			visit(sourceFiles[0][1]);
+			return specifiers;
+		},
+		// This closure scanner recovers module facts from authored TSRX syntax.
+		// Syntax validation belongs to the separate compiler/policy gates.
+		{ allowParseDiagnostics: true },
 	);
-	const specifiers = [];
-	function visit(node) {
-		if (
-			ts.isImportDeclaration(node) &&
-			node.moduleSpecifier &&
-			ts.isStringLiteralLike(node.moduleSpecifier) &&
-			!node.importClause?.isTypeOnly
-		) {
-			specifiers.push(node.moduleSpecifier.text);
-		} else if (
-			ts.isExportDeclaration(node) &&
-			node.moduleSpecifier &&
-			ts.isStringLiteralLike(node.moduleSpecifier) &&
-			!node.isTypeOnly
-		) {
-			specifiers.push(node.moduleSpecifier.text);
-		} else if (
-			ts.isImportEqualsDeclaration(node) &&
-			ts.isExternalModuleReference(node.moduleReference) &&
-			node.moduleReference.expression &&
-			ts.isStringLiteralLike(node.moduleReference.expression) &&
-			!node.isTypeOnly
-		) {
-			specifiers.push(node.moduleReference.expression.text);
-		} else if (
-			ts.isCallExpression(node) &&
-			node.arguments.length === 1 &&
-			ts.isStringLiteralLike(node.arguments[0]) &&
-			(node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-				(ts.isIdentifier(node.expression) && node.expression.text === 'require'))
-		) {
-			specifiers.push(node.arguments[0].text);
-		}
-		ts.forEachChild(node, visit);
-	}
-	visit(source);
-	return specifiers;
 }
 
 function resolveRelativeSource(fromFile, specifier) {

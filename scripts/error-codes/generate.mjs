@@ -3,7 +3,8 @@ import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { format, resolveConfig } from 'prettier';
-import ts from 'typescript';
+import * as ts from 'typescript/unstable/ast';
+import { withNativeSyntaxProject } from '../lib/native-syntax-project.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const catalogFile = join(root, 'packages/octane/error-codes/codes.json');
@@ -206,16 +207,32 @@ export function frameworkErrorSurface(filename) {
 
 export function validateRuntimeUsages(catalog, sources) {
 	const used = { client: new Set(), server: new Set() };
-	const covered = [];
-	for (const [filename, source] of sources) {
-		const surface = frameworkErrorSurface(filename);
-		if (surface === undefined) continue;
-		const sourceFile = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
-		covered.push([filename, sourceFile, surface]);
-	}
-	const errorClasses = collectErrorClasses(covered.map(([, sourceFile]) => sourceFile));
-	for (const [filename, sourceFile, surface] of covered) {
-		validateFrameworkErrorConstruction(filename, sourceFile, surface, catalog, used, errorClasses);
+	const selected = sources.filter(([filename]) => frameworkErrorSurface(filename) !== undefined);
+	if (selected.length > 0) {
+		const sourceDir = join(root, 'packages/octane/src');
+		const authoredNames = new Map(
+			selected.map(([filename]) => [join(sourceDir, filename), filename]),
+		);
+		withNativeSyntaxProject(
+			selected,
+			({ sourceFiles }) => {
+				const errorClasses = collectErrorClasses(sourceFiles.map(([, sourceFile]) => sourceFile));
+				for (const [nativeFilename, sourceFile] of sourceFiles) {
+					const filename = authoredNames.get(nativeFilename);
+					if (filename === undefined)
+						fail(`the native project returned an unselected source ${nativeFilename}.`);
+					validateFrameworkErrorConstruction(
+						filename,
+						sourceFile,
+						frameworkErrorSurface(filename),
+						catalog,
+						used,
+						errorClasses,
+					);
+				}
+			},
+			{ cwd: sourceDir },
+		);
 	}
 	for (const [rawCode, entry] of Object.entries(catalog.codes)) {
 		if (entry.status !== 'active') continue;
@@ -250,8 +267,8 @@ function extendedClassName(node) {
 
 function findSuperCall(node) {
 	if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.SuperKeyword) return node;
-	if (ts.isFunctionLike(node) || ts.isClassLike(node)) return undefined;
-	return ts.forEachChild(node, findSuperCall);
+	if (ts.isFunctionLikeDeclaration(node) || ts.isClassLikeDeclaration(node)) return undefined;
+	return node.forEachChild(findSuperCall);
 }
 
 function forwardedParameterIndex(constructor, message) {
@@ -275,8 +292,8 @@ function collectErrorClasses(sourceFiles) {
 	const declarations = [];
 	for (const sourceFile of sourceFiles) {
 		const visit = (node) => {
-			if (ts.isClassLike(node) && node.name !== undefined) declarations.push(node);
-			ts.forEachChild(node, visit);
+			if (ts.isClassLikeDeclaration(node) && node.name !== undefined) declarations.push(node);
+			node.forEachChild(visit);
 		};
 		visit(sourceFile);
 	}
@@ -305,7 +322,7 @@ function unwrapExpression(node) {
 	while (
 		ts.isParenthesizedExpression(node) ||
 		ts.isAsExpression(node) ||
-		ts.isTypeAssertionExpression(node) ||
+		ts.isTypeAssertion(node) ||
 		ts.isNonNullExpression(node) ||
 		ts.isSatisfiesExpression(node)
 	) {
@@ -491,14 +508,17 @@ function validateFrameworkErrorConstruction(
 
 	function validateSuperCall(node) {
 		let owner = node.parent;
-		while (owner !== undefined && !ts.isClassLike(owner)) owner = owner.parent;
+		while (owner !== undefined && !ts.isClassLikeDeclaration(owner)) owner = owner.parent;
 		const parent = owner && extendedClassName(owner);
 		const messageIndex = parent === undefined ? undefined : errorClasses.get(parent);
 		// A null index means the parent formats its own message; super() then
 		// passes data, not a message.
 		if (messageIndex === undefined || messageIndex === null) return;
 		const message = node.arguments[messageIndex];
-		const constructor = ts.findAncestor(node, ts.isConstructorDeclaration);
+		let constructor = node.parent;
+		while (constructor !== undefined && !ts.isConstructorDeclaration(constructor)) {
+			constructor = constructor.parent;
+		}
 		// Forwarding a constructor parameter is checked at each construction site.
 		if (constructor !== undefined && forwardedParameterIndex(constructor, message) !== -1) return;
 		validateMessage(node, `${parent} via super()`, message);
@@ -516,7 +536,7 @@ function validateFrameworkErrorConstruction(
 				validateMessage(node, node.expression.text, node.arguments?.[messageIndex]);
 			}
 		}
-		ts.forEachChild(node, visit);
+		node.forEachChild(visit);
 	}
 
 	visit(sourceFile);

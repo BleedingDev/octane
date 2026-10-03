@@ -96,7 +96,7 @@ function showProject(config) {
 		config,
 		files,
 		fileSet: new Set(files),
-		checker: files.some((file) => file.endsWith('.tsrx')) ? 'tsrx-tsc' : 'tsgo',
+		checker: files.some((file) => file.endsWith('.tsrx')) ? 'tsrx-tsc' : 'tsc',
 		incremental: Boolean(shown.compilerOptions?.composite || shown.compilerOptions?.incremental),
 	};
 }
@@ -194,7 +194,7 @@ function runProjects(selectedProjects, workingDirectory) {
 			const roots = [...new Set([...files, ...declarationFiles])].sort();
 			const hasJavaScript = [...files].some((file) => /\.[cm]?jsx?$/.test(file));
 			const hasTsrx = [...files].some((file) => file.endsWith('.tsrx'));
-			const checker = project.checker === 'tsrx-tsc' || hasTsrx ? 'tsrx-tsc' : 'tsgo';
+			const checker = project.checker === 'tsrx-tsc' || hasTsrx ? 'tsrx-tsc' : 'tsc';
 			const temporaryConfig = path.join(temporaryDirectory, `tsconfig-${index}.json`);
 			writeFileSync(
 				temporaryConfig,

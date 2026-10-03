@@ -1,22 +1,28 @@
 import { build } from 'esbuild';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	readdirSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import ts from 'typescript';
+import { createScanner, LanguageVariant, SyntaxKind } from 'typescript/unstable/ast';
 
 const LICENSE_FILE = /^licen[cs]e(?:\.[^.]+)?$/i;
 
 function declarationTokens(source) {
-	const scanner = ts.createScanner(
-		ts.ScriptTarget.Latest,
-		true,
-		ts.LanguageVariant.Standard,
-		source,
-	);
+	const scanner = createScanner(true, LanguageVariant.Standard, source);
 	const tokens = [];
-	for (let kind = scanner.scan(); kind !== ts.SyntaxKind.EndOfFileToken; kind = scanner.scan()) {
+	for (let kind = scanner.scan(); kind !== SyntaxKind.EndOfFile; kind = scanner.scan()) {
 		tokens.push([
 			kind,
-			kind === ts.SyntaxKind.StringLiteral ? scanner.getTokenValue() : scanner.getTokenText(),
+			kind === SyntaxKind.StringLiteral ? scanner.getTokenValue() : scanner.getTokenText(),
 		]);
 	}
 	// The declaration is formatted by Prettier in source. Whitespace, comments,
@@ -24,59 +30,77 @@ function declarationTokens(source) {
 	return JSON.stringify(
 		tokens.filter(([kind], index) => {
 			if (
-				kind === ts.SyntaxKind.SemicolonToken &&
-				tokens[index + 1]?.[0] === ts.SyntaxKind.CloseBraceToken
+				kind === SyntaxKind.SemicolonToken &&
+				tokens[index + 1]?.[0] === SyntaxKind.CloseBraceToken
 			) {
 				return false;
 			}
-			if (kind !== ts.SyntaxKind.CommaToken) return true;
+			if (kind !== SyntaxKind.CommaToken) return true;
 			return ![
-				ts.SyntaxKind.CloseParenToken,
-				ts.SyntaxKind.CloseBraceToken,
-				ts.SyntaxKind.CloseBracketToken,
+				SyntaxKind.CloseParenToken,
+				SyntaxKind.CloseBraceToken,
+				SyntaxKind.CloseBracketToken,
 			].includes(tokens[index + 1]?.[0]);
 		}),
 	);
 }
 
-function assertVolarDeclaration(packageDir) {
+export function assertVolarDeclaration(packageDir) {
 	const source = join(packageDir, 'src/compiler/volar.js');
 	const declaration = join(packageDir, 'src/compiler/volar.d.ts');
-	const program = ts.createProgram([source], {
-		allowJs: true,
-		declaration: true,
-		emitDeclarationOnly: true,
-		module: ts.ModuleKind.ESNext,
-		moduleResolution: ts.ModuleResolutionKind.Bundler,
-		target: ts.ScriptTarget.ESNext,
-		strict: true,
-		types: [],
-		outDir: join(packageDir, '.volar-declaration-check'),
-	});
-	const sourceFile = program.getSourceFile(source);
-	let generated;
-	// Only capture TypeScript's declaration for the authored entry. No compiler
-	// JS, generated bundle or dependency declaration is used as a typing façade.
-	const emitted = program.emit(
-		sourceFile,
-		(_path, text) => {
-			generated = text;
-		},
-		undefined,
-		true,
-	);
-	const diagnostics = [...program.getSyntacticDiagnostics(sourceFile), ...emitted.diagnostics];
-	if (diagnostics.length || generated === undefined) {
-		throw new Error(
-			`Could not emit the authored Volar declaration: ${diagnostics
-				.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'))
-				.join('\n')}`,
+	const manifestPath = createRequire(import.meta.url).resolve('typescript/package.json');
+	const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+	const compiler = resolve(dirname(manifestPath), manifest.bin.tsc);
+	const temporaryDirectory = mkdtempSync(join(tmpdir(), 'octane-volar-declaration-'));
+	try {
+		const config = join(temporaryDirectory, 'tsconfig.json');
+		const output = join(temporaryDirectory, 'output');
+		writeFileSync(
+			config,
+			JSON.stringify({
+				compilerOptions: {
+					allowJs: true,
+					declaration: true,
+					emitDeclarationOnly: true,
+					module: 'esnext',
+					moduleResolution: 'bundler',
+					target: 'esnext',
+					strict: true,
+					types: [],
+					noEmitOnError: true,
+					rootDir: join(packageDir, 'src'),
+					outDir: output,
+				},
+				files: [source],
+			}),
 		);
-	}
-	if (declarationTokens(readFileSync(declaration, 'utf8')) !== declarationTokens(generated)) {
-		throw new Error(
-			'volar.d.ts is stale: update it from the declaration emitted by volar.js JSDoc',
-		);
+		// The native API prints AST nodes, while its CLI owns declaration emit.
+		// Compare only the authored entry, then remove every temporary output.
+		const emitted = spawnSync(process.execPath, [compiler, '-p', config, '--pretty', 'false'], {
+			cwd: packageDir,
+			encoding: 'utf8',
+			maxBuffer: 32 * 1024 * 1024,
+		});
+		const generated = join(output, 'compiler/volar.d.ts');
+		if (emitted.error || emitted.status !== 0 || !existsSync(generated)) {
+			throw new Error(
+				`Could not emit the authored Volar declaration: ${[emitted.stdout, emitted.stderr]
+					.filter(Boolean)
+					.join('\n')
+					.trim()}`,
+				{ cause: emitted.error },
+			);
+		}
+		if (
+			declarationTokens(readFileSync(declaration, 'utf8')) !==
+			declarationTokens(readFileSync(generated, 'utf8'))
+		) {
+			throw new Error(
+				'volar.d.ts is stale: update it from the declaration emitted by volar.js JSDoc',
+			);
+		}
+	} finally {
+		rmSync(temporaryDirectory, { recursive: true, force: true });
 	}
 }
 

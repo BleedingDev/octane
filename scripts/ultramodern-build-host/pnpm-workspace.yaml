@@ -4,6 +4,9 @@ packageImportMethod: clone-or-copy
 autoInstallPeers: false
 strictPeerDependencies: true
 patchedDependencies:
+  '@typescript-eslint/types@8.71.0': ../../patches/@typescript-eslint__types@8.71.0.patch
   '@tsrx/prettier-plugin@0.4.10': ../../patches/@tsrx__prettier-plugin@0.4.10.patch
 minimumReleaseAgeExclude:
   - '@tsrx/typescript-plugin@0.6.0'
+allowBuilds:
+  esbuild: true

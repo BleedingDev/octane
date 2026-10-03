@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { nativeTypesRecipe, verifyNativeTypeDependency } from './pack-native-types.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const packageRoot = resolve(root, 'packages/octane');
@@ -29,6 +30,8 @@ const corpus = [
 	'packages/octane',
 	'scripts/ultramodern-build-host',
 	'scripts/error-codes',
+	'scripts/lib/native-syntax-project.mjs',
+	'patches/@typescript-eslint__types@8.71.0.patch',
 	'scripts/build-package-commonjs.mjs',
 	'benchmarks/scoped-signals/native-presentation',
 	'LICENSE',
@@ -186,10 +189,20 @@ for (const key of ['main', 'module', 'types', 'imports', 'exports']) {
 		`Native ${key} publish contract`,
 	);
 }
+let nativeTypeDependencyVerified = false;
 for (const [name, pin] of Object.entries(sourceManifest.dependencies)) {
-	assert.match(pin, /^\d+\.\d+\.\d+$/, `Exact native dependency ${name}`);
 	assert.equal(packedManifest.dependencies[name], pin);
+	if (name === nativeTypesRecipe.name) {
+		await verifyNativeTypeDependency(pin, source.nativeTypeDependency, output);
+		nativeTypeDependencyVerified = true;
+	} else {
+		assert.match(pin, /^\d+\.\d+\.\d+$/, `Exact native dependency ${name}`);
+	}
 }
+assert(
+	nativeTypeDependencyVerified,
+	'The native compiler requires its verified canonical type package.',
+);
 const entries = execFileSync('tar', ['-tzf', artifact], { encoding: 'utf8' }).trim().split('\n');
 assert(entries.includes('package/LICENSE'), 'Retain the upstream MIT license.');
 assert(entries.includes('package/dist/index.js'), 'Native browser output is required.');

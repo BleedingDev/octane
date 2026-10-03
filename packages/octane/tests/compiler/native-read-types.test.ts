@@ -1,8 +1,9 @@
 // @vitest-environment node
 
 import { fileURLToPath } from 'node:url';
-import ts from 'typescript';
-import { describe, expect, it } from 'vitest';
+import { API } from 'typescript/unstable/sync';
+import { createVirtualFileSystem } from 'typescript/unstable/fs';
+import { afterEach, describe, expect, it } from 'vitest';
 import { validateNativeSignalNames } from '../../src/compiler/native-read-types.js';
 
 const SIGNALS = fileURLToPath(new URL('../../src/signals/index.ts', import.meta.url));
@@ -22,46 +23,50 @@ function fixture(source: string, otherFiles: Record<string, string> = {}) {
 			([name, text]) => [`${ROOT}/${name}`, text] as [string, string],
 		),
 	]);
-	const options: ts.CompilerOptions = {
-		target: ts.ScriptTarget.ES2022,
-		module: ts.ModuleKind.ESNext,
-		moduleResolution: ts.ModuleResolutionKind.Bundler,
-		strict: true,
-		jsx: ts.JsxEmit.Preserve,
-		noEmit: true,
-		skipLibCheck: true,
-		types: [],
-		paths: {
-			'octane/signals': [SIGNALS],
-			octane: [OCTANE],
-			'octane/jsx-runtime': [fileURLToPath(new URL('../../src/jsx-runtime.d.ts', import.meta.url))],
-			'octane/signals/client': [CLIENT_HOOKS],
-			'octane/signals/server': [SERVER_HOOKS],
+	const config = `${ROOT}/tsconfig.json`;
+	const virtual = createVirtualFileSystem({
+		...Object.fromEntries(files),
+		[config]: JSON.stringify({
+			compilerOptions: {
+				target: 'ES2022',
+				module: 'ESNext',
+				moduleResolution: 'Bundler',
+				strict: true,
+				jsx: 'preserve',
+				noEmit: true,
+				types: [],
+				paths: {
+					'octane/signals': [SIGNALS],
+					octane: [OCTANE],
+					'octane/jsx-runtime': [
+						fileURLToPath(new URL('../../src/jsx-runtime.d.ts', import.meta.url)),
+					],
+					'octane/signals/client': [CLIENT_HOOKS],
+					'octane/signals/server': [SERVER_HOOKS],
+				},
+			},
+			files: [...files.keys()],
+		}),
+	});
+	const api = new API({
+		cwd: ROOT,
+		fs: {
+			readFile: virtual.readFile,
+			fileExists: (path) => virtual.fileExists?.(path) || undefined,
+			directoryExists: (path) => virtual.directoryExists?.(path) || undefined,
+			getAccessibleEntries: virtual.getAccessibleEntries,
 		},
-	};
-	const host = ts.createCompilerHost(options);
-	const readFile = host.readFile;
-	const fileExists = host.fileExists;
-	const directoryExists = host.directoryExists;
-	const getSourceFile = host.getSourceFile;
-	host.readFile = (path) => files.get(path) ?? readFile(path);
-	host.fileExists = (path) => files.has(path) || fileExists(path);
-	host.directoryExists = (path) => path === ROOT || directoryExists?.(path) === true;
-	host.getSourceFile = (path, languageVersion, onError, shouldCreateNewSourceFile) => {
-		const text = files.get(path);
-		return text === undefined
-			? getSourceFile(path, languageVersion, onError, shouldCreateNewSourceFile)
-			: ts.createSourceFile(path, text, languageVersion, true);
-	};
-	const program = ts.createProgram({ rootNames: [...files.keys()], options, host });
-	const sourceFile = program.getSourceFile(filename)!;
-	const errors = program.getSemanticDiagnostics(sourceFile);
-	expect(
-		errors.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')),
-	).toEqual([]);
-	const diagnostics = validateNativeSignalNames(program, sourceFile);
+	});
+	apis.push(api);
+	const snapshot = api.updateSnapshot({ openProjects: [config] });
+	const project = snapshot.getProject(config)!;
+	const sourceFile = project.program.getSourceFile(filename)!;
+	const errors = project.program.getSemanticDiagnostics(filename);
+	expect(errors.map((diagnostic) => diagnostic.text)).toEqual([]);
+	const diagnostics = validateNativeSignalNames(project, sourceFile);
+
 	return {
-		program,
+		project,
 		sourceFile,
 		diagnostics,
 		names: diagnostics
@@ -69,6 +74,11 @@ function fixture(source: string, otherFiles: Record<string, string> = {}) {
 			.map((diagnostic) => source.slice(diagnostic.start.offset, diagnostic.end.offset)),
 	};
 }
+
+const apis: API[] = [];
+afterEach(() => {
+	for (const api of apis.splice(0)) api.close();
+});
 
 describe('optional native signal type validation', () => {
 	it('follows owner-facade return types through the nominal handle brand', () => {
@@ -291,11 +301,11 @@ const namespace = Octane.useMemo(() => task$.snapshot());
 		expect(result.names).toEqual([]);
 	});
 
-	it('rejects a stale SourceFile from another Program', () => {
+	it('rejects a stale SourceFile from another Project', () => {
 		const first = fixture(`${PRELUDE}const alias$ = task$;`);
 		const second = fixture(`${PRELUDE}const alias$ = task$;`);
-		expect(() => validateNativeSignalNames(second.program, first.sourceFile)).toThrow(
-			/current Program/,
+		expect(() => validateNativeSignalNames(second.project, first.sourceFile)).toThrow(
+			/current Project/,
 		);
 	});
 });

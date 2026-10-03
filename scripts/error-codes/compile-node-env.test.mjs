@@ -148,3 +148,43 @@ test('reads it cannot compile fail the build instead of shipping a live lookup',
 		assert.throws(() => compileNodeEnvReads(source, 'module.ts'), reason, source);
 	}
 });
+
+test('JavaScript modules retain comments and report authored UTF-16 locations', async () => {
+	const source = `// 🐙 Keep the build annotation attached.
+/* @__NO_SIDE_EFFECTS__ */ export function dev() {
+	return process.env.NODE_ENV !== 'production';
+}`;
+	for (const filename of ['module.js', 'module.mjs', 'module.cjs']) {
+		const compiled = compileNodeEnvReads(source, filename);
+		assert.ok(compiled.includes(source.slice(0, source.indexOf('export'))));
+		const { exports } = await evaluate(compiled, { NODE_ENV: 'production' });
+		assert.equal(exports.dev(), false);
+	}
+	const invalid = `const emoji = '🐙'; process.env.NODE_ENV;`;
+	const column = invalid.indexOf('NODE_ENV') + 1;
+	assert.throws(() => compileNodeEnvReads(invalid, 'module.js'), {
+		message: `module.js:1:${column}: compare process.env.NODE_ENV directly with 'production'`,
+	});
+	assert.throws(() => compileNodeEnvReads('process.env.NODE_ENV === ;', 'module.ts'), {
+		message: 'module.ts: cannot compile environment reads in a module with parse errors',
+	});
+});
+
+test('specialized executable modules preserve their hashbang before generated statements', async () => {
+	const source = `#!/usr/bin/env node
+import { formatClientError } from './error-codes.client.generated.js';
+export function fail() { throw new Error(formatClientError(313)); }`;
+	const specialized = specializeErrorCalls(source, 'dom-bindings.ts', catalog);
+	assert.ok(specialized.startsWith('#!/usr/bin/env node\n'));
+	const compiled = compileNodeEnvReads(specialized, 'dom-bindings.ts');
+	assert.ok(compiled.startsWith('#!/usr/bin/env node\n'));
+	for (const mode of ['development', 'production']) {
+		const { exports, context } = await evaluate(compiled, { NODE_ENV: mode });
+		delete context.process;
+		assert.throws(exports.fail, {
+			name: 'Error',
+			message:
+				mode === 'production' ? formatProdErrorMessage(313, []) : catalog.codes['313'].message,
+		});
+	}
+});

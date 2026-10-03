@@ -1,0 +1,21 @@
+diff --git a/dist/generated/ast-spec.d.ts b/dist/generated/ast-spec.d.ts
+--- a/dist/generated/ast-spec.d.ts
++++ b/dist/generated/ast-spec.d.ts
+@@ -7,7 +7,7 @@
+  *   MAKE CHANGES TO ast-spec AND THEN RUN    *
+  *                 pnpm run build             *
+  **********************************************/
+-import type { SyntaxKind } from 'typescript';
++import type { SyntaxKind } from 'typescript/unstable/ast';
+ export declare type Accessibility = 'private' | 'protected' | 'public';
+ export declare type AccessorProperty = AccessorPropertyComputedName | AccessorPropertyNonComputedName;
+ export declare interface AccessorPropertyComputedName extends PropertyDefinitionComputedNameBase {
+diff --git a/dist/parser-options.d.ts b/dist/parser-options.d.ts
+--- a/dist/parser-options.d.ts
++++ b/dist/parser-options.d.ts
+@@ -1,4 +1,4 @@
+-import type { Program } from 'typescript';
++import type { Program } from 'typescript/unstable/sync';
+ import type { Lib } from './lib';
+ export type DebugLevel = boolean | ('eslint' | 'typescript' | 'typescript-eslint')[];
+ export type CacheDurationSeconds = number | 'Infinity';

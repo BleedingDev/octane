@@ -1,6 +1,8 @@
 // @vitest-environment node
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { createVirtualFileSystem } from 'typescript/unstable/fs';
+import { API } from 'typescript/unstable/sync';
 import { describe, expect, it } from 'vitest';
 
 // `octane/compiler` is imported directly by browser consumers — the website
@@ -49,6 +51,98 @@ function findNodeBuiltins(
 }
 
 describe('octane/compiler in the browser', () => {
+	it.each([
+		[
+			'octane/compiler',
+			`import { compile, compileToVolarMappings, type TextTypeFacts } from 'octane/compiler';
+const facts: TextTypeFacts = {
+	version: 1,
+	filename: '/browser.tsrx',
+	sourceVersion: 'source',
+	projectVersion: 'project',
+	stringChildRanges: [[0, 1]],
+	primitiveTextChildRanges: [[2, 3]],
+};
+const result = compile('', facts.filename, { textTypeFacts: facts });
+const diagnostics: readonly { message: string }[] = result.diagnostics;
+const mappings: readonly { sourceOffsets: number[] }[] = compileToVolarMappings('').mappings;
+// @ts-expect-error The serializable facts retain their versioned contract.
+const invalid: TextTypeFacts = { ...facts, version: 2 };
+`,
+		],
+		[
+			'octane/compiler/volar',
+			`import { compileToVolarMappings, compileTypesInspection } from 'octane/compiler/volar';
+const mappings: readonly { sourceOffsets: number[] }[] = compileToVolarMappings('').mappings;
+const kind: 'Program' = compileTypesInspection('').sourceAst.type;
+`,
+		],
+	])('type-checks %s with only browser declarations', (entry, source) => {
+		const consumer = resolve(COMPILER_SRC, '..', '..', 'browser-compiler-consumer.ts');
+		const config = resolve(COMPILER_SRC, '..', '..', 'browser-compiler.tsconfig.json');
+		const virtual = createVirtualFileSystem({
+			[consumer]: source,
+			[config]: JSON.stringify({
+				compilerOptions: {
+					lib: ['es2022', 'dom'],
+					module: 'ESNext',
+					moduleResolution: 'Bundler',
+					noEmit: true,
+					strict: true,
+					types: [],
+				},
+				files: [consumer],
+			}),
+		});
+		const api = new API({
+			cwd: dirname(config),
+			fs: {
+				readFile: virtual.readFile,
+				fileExists: (file) => virtual.fileExists?.(file) || undefined,
+			},
+		});
+		try {
+			const snapshot = api.updateSnapshot({ openProjects: [config] });
+			const project = snapshot.getProject(config);
+			if (!project) throw new Error(`Missing browser declaration project: ${config}`);
+			const program = project.program;
+			const dependencies = program
+				.getSourceFileNames()
+				.map((file) => (file === consumer ? consumer : realpathSync(file)).replaceAll('\\', '/'));
+			expect(
+				dependencies.filter(
+					(file) =>
+						file.endsWith('/compiler/typescript.d.ts') ||
+						file.includes('/@typescript/native-preview/') ||
+						file.includes('/@types/node/') ||
+						file.includes('/typescript/dist/api/') ||
+						file.includes('/typescript/dist/ast/'),
+				),
+			).toEqual([]);
+			for (const declaration of [
+				'index.d.ts',
+				'text-type-facts.d.ts',
+				...(entry.endsWith('/volar') ? ['volar.d.ts'] : []),
+			]) {
+				expect(dependencies).toContain(
+					realpathSync(join(COMPILER_SRC, declaration)).replaceAll('\\', '/'),
+				);
+			}
+			expect(
+				[
+					...program.getConfigFileParsingDiagnostics(),
+					...program.getProgramDiagnostics(),
+					...program.getGlobalDiagnostics(),
+					...program.getSyntacticDiagnostics(),
+					...program.getBindDiagnostics(),
+					...program.getSemanticDiagnostics(),
+				].map((diagnostic) => `${diagnostic.code}: ${diagnostic.text}`),
+			).toEqual([]);
+		} finally {
+			api.close();
+		}
+	});
+
 	it('reaches no Node builtin from the compiler entry', () => {
 		const offenders = findNodeBuiltins(join(COMPILER_SRC, 'index.js'));
 

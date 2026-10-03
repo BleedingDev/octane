@@ -1,5 +1,6 @@
 /** Optional TypeScript-only validation. Never imported by the ordinary compiler. */
-import ts from 'typescript';
+import * as ts from 'typescript/unstable/ast';
+import { ObjectFlags, SignatureKind, SymbolFlags, TypeFlags } from 'typescript/unstable/sync';
 import { NATIVE_SIGNAL_NAME, NATIVE_MEMO_READ, nativeReadDiagnostic } from './native-read-facts.js';
 
 const NATIVE_MODULES = new Set([
@@ -9,49 +10,49 @@ const NATIVE_MODULES = new Set([
 ]);
 
 /**
- * Validate native capabilities in an existing TypeScript Program. The caller
+ * Validate native capabilities in an existing native TypeScript Project. The caller
  * owns project lifetime and source-map translation for virtual .tsrx files.
- * Diagnostics refer to the exact SourceFile text in this Program; this entry
+ * Diagnostics refer to the exact SourceFile text in this Project; this entry
  * neither reads a second source snapshot nor creates a hidden type project.
  *
  * The SIGNAL_HANDLE marker is resolved as a nominal TypeScript symbol from
  * octane/signals. No runtime symbol property, name heuristic, or object shape
  * makes an unrelated value a native signal.
- * @param {import('typescript').Program} program
- * @param {string | import('typescript').SourceFile} file
+ * @param {import('typescript/unstable/sync').Project} project
+ * @param {string | import('typescript/unstable/ast').SourceFile} file
  * @returns {import('./index.js').CompileDiagnostic[]}
  */
-export function validateNativeSignalNames(program, file) {
+export function validateNativeSignalNames(project, file) {
+	const { program, checker } = project;
 	const sourceFile = typeof file === 'string' ? program.getSourceFile(file) : file;
 	if (sourceFile === undefined || program.getSourceFile(sourceFile.fileName) !== sourceFile) {
 		throw new TypeError(
-			'Native signal type validation requires a SourceFile from the current Program.',
+			'Native signal type validation requires a SourceFile from the current Project.',
 		);
 	}
-	const checker = program.getTypeChecker();
 	const brands = new Set();
 	const nativeReadSignatures = new Set();
 	const memoSignatures = new Set();
 	const inspectedModules = new Set();
 	function canonical(symbol) {
 		const seen = new Set();
-		while (symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0 && !seen.has(symbol)) {
+		while (symbol && (symbol.flags & SymbolFlags.Alias) !== 0 && !seen.has(symbol)) {
 			seen.add(symbol);
 			symbol = checker.getAliasedSymbol(symbol);
 		}
 		return symbol;
 	}
 	function symbolType(symbol) {
-		const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
+		const declaration = (symbol.valueDeclaration ?? symbol.declarations[0])?.resolve(project);
 		return declaration ? checker.getTypeOfSymbolAtLocation(symbol, declaration) : null;
 	}
 	function recordSignatures(type, into) {
-		if (type === null) return;
-		for (const signature of checker.getSignaturesOfType(type, ts.SignatureKind.Call))
-			if (signature.declaration) into.add(signature.declaration);
+		if (!type) return;
+		for (const signature of checker.getSignaturesOfType(type, SignatureKind.Call))
+			if (signature.declaration) into.add(signature.declaration.resolve(project));
 	}
 	function recordReads(type, names) {
-		if (type === null) return;
+		if (!type) return;
 		for (const name of names) {
 			const property = checker.getPropertyOfType(type, name);
 			if (property) recordSignatures(symbolType(property), nativeReadSignatures);
@@ -61,11 +62,14 @@ export function validateNativeSignalNames(program, file) {
 		const factory = exports.get(name);
 		const type = factory && symbolType(factory);
 		if (!type) return;
-		for (const signature of checker.getSignaturesOfType(type, ts.SignatureKind.Call)) {
+		for (const signature of checker.getSignaturesOfType(type, SignatureKind.Call)) {
 			const returned = checker.getReturnTypeOfSignature(signature);
+			if (!returned) continue;
 			recordReads(returned, ['get', 'latest', 'snapshot']);
 			for (const property of checker.getPropertiesOfType(returned)) {
-				for (const declaration of property.declarations ?? []) {
+				for (const handle of property.declarations) {
+					const declaration = handle.resolve(project);
+					if (!declaration) continue;
 					if (!declaration.name || !ts.isComputedPropertyName(declaration.name)) continue;
 					const marker = canonical(checker.getSymbolAtLocation(declaration.name.expression));
 					if (marker?.name === 'SIGNAL_HANDLE') brands.add(marker);
@@ -91,7 +95,7 @@ export function validateNativeSignalNames(program, file) {
 			const factory = exports.get('createScope');
 			const type = factory && symbolType(factory);
 			if (type)
-				for (const signature of checker.getSignaturesOfType(type, ts.SignatureKind.Call))
+				for (const signature of checker.getSignaturesOfType(type, SignatureKind.Call))
 					recordReads(checker.getReturnTypeOfSignature(signature), ['get']);
 			for (const name of ['signal$', 'derived$', 'query$']) recordFactory(exports, name);
 		} else if (NATIVE_MODULES.has(request)) {
@@ -106,7 +110,8 @@ export function validateNativeSignalNames(program, file) {
 			if (memo) recordSignatures(symbolType(memo), memoSignatures);
 		}
 	}
-	for (const moduleFile of program.getSourceFiles()) {
+	for (const filename of program.getSourceFileNames()) {
+		const moduleFile = program.getSourceFile(filename);
 		for (const statement of moduleFile.statements) {
 			if (
 				(ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) &&
@@ -119,26 +124,39 @@ export function validateNativeSignalNames(program, file) {
 			}
 		}
 	}
-	for (const symbol of checker.getAmbientModules()) {
-		const request = symbol.name.slice(1, -1);
-		if (NATIVE_MODULES.has(request) || request === 'octane') inspectModule(symbol, request);
+	// Ambient module symbols are exposed through their string-literal AST
+	// names in the native checker, including nested declaration namespaces.
+	function inspectAmbient(node) {
+		if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name)) {
+			const request = node.name.text;
+			if (NATIVE_MODULES.has(request) || request === 'octane')
+				inspectModule(checker.getSymbolAtLocation(node.name), request);
+		}
+		node.forEachChild(inspectAmbient);
 	}
+	for (const filename of program.getSourceFileNames())
+		program.getSourceFile(filename)?.forEachChild(inspectAmbient);
+
 	if (brands.size === 0) return [];
 	const handleCache = new Map();
 	function isHandle(type, active = new Set()) {
+		if (!type) return false;
 		if (handleCache.has(type)) return handleCache.get(type);
-		if (!type || active.has(type) || (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0)
+		if (!type || active.has(type) || (type.flags & (TypeFlags.Any | TypeFlags.Unknown)) !== 0)
 			return false;
 		active.add(type);
 		let result = false;
-		if (type.isUnionOrIntersection()) result = type.types.some((part) => isHandle(part, active));
-		if (!result && (type.flags & ts.TypeFlags.TypeParameter) !== 0) {
+		if (type.isUnionType() || type.isIntersectionType())
+			result = type.getTypes().some((part) => isHandle(part, active));
+		if (!result && (type.flags & TypeFlags.TypeParameter) !== 0) {
 			const constraint = checker.getBaseConstraintOfType(type);
 			if (constraint && constraint !== type) result = isHandle(constraint, active);
 		}
 		if (!result)
 			for (const property of checker.getPropertiesOfType(type)) {
-				for (const declaration of property.declarations ?? []) {
+				for (const handle of property.declarations) {
+					const declaration = handle.resolve(project);
+					if (!declaration) continue;
 					if (
 						declaration.name &&
 						ts.isComputedPropertyName(declaration.name) &&
@@ -147,7 +165,7 @@ export function validateNativeSignalNames(program, file) {
 						const getter = checker.getPropertyOfType(type, 'get');
 						result =
 							getter !== undefined &&
-							checker.getSignaturesOfType(symbolType(getter), ts.SignatureKind.Call).length > 0;
+							checker.getSignaturesOfType(symbolType(getter), SignatureKind.Call).length > 0;
 						break;
 					}
 				}
@@ -159,17 +177,17 @@ export function validateNativeSignalNames(program, file) {
 	}
 	function containsHandle(type, active = new Set()) {
 		if (isHandle(type)) return true;
-		if (!type || active.has(type) || (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0)
+		if (!type || active.has(type) || (type.flags & (TypeFlags.Any | TypeFlags.Unknown)) !== 0)
 			return false;
 		active.add(type);
-		if (type.isUnionOrIntersection())
-			return type.types.some((part) => containsHandle(part, active));
-		if ((type.flags & ts.TypeFlags.Object) === 0) return false;
+		if (type.isUnionType() || type.isIntersectionType())
+			return type.getTypes().some((part) => containsHandle(part, active));
+		if ((type.flags & TypeFlags.Object) === 0) return false;
 		// A Scope contains callable factory methods; holding that ordinary owner
 		// object does not itself expose a handle. Returned aggregate fields do.
-		if (checker.getSignaturesOfType(type, ts.SignatureKind.Call).length > 0) return false;
+		if (checker.getSignaturesOfType(type, SignatureKind.Call).length > 0) return false;
 		if (
-			(type.objectFlags & ts.ObjectFlags.Reference) !== 0 &&
+			(type.objectFlags & ObjectFlags.Reference) !== 0 &&
 			checker.getTypeArguments(type).some((argument) => containsHandle(argument, active))
 		)
 			return true;
@@ -179,9 +197,10 @@ export function validateNativeSignalNames(program, file) {
 		return false;
 	}
 	function exposesHandle(type) {
+		if (!type) return false;
 		if (isHandle(type)) return true;
 		return checker
-			.getSignaturesOfType(type, ts.SignatureKind.Call)
+			.getSignaturesOfType(type, SignatureKind.Call)
 			.some((signature) => containsHandle(checker.getReturnTypeOfSignature(signature)));
 	}
 	const functionReadCache = new Map();
@@ -193,9 +212,9 @@ export function validateNativeSignalNames(program, file) {
 		active.add(fn);
 		let reads = false;
 		function visit(node) {
-			if (reads || (node !== fn.body && ts.isFunctionLike(node))) return;
+			if (reads || (node !== fn.body && ts.isFunctionLikeDeclaration(node))) return;
 			if (ts.isCallExpression(node)) {
-				const declaration = checker.getResolvedSignature(node)?.declaration;
+				const declaration = checker.getResolvedSignature(node)?.declaration?.resolve(project);
 				if (
 					declaration &&
 					(nativeReadSignatures.has(declaration) || readsLive(declaration, active))
@@ -204,7 +223,7 @@ export function validateNativeSignalNames(program, file) {
 					return;
 				}
 			}
-			ts.forEachChild(node, visit);
+			node.forEachChild(visit);
 		}
 		visit(fn.body);
 		active.delete(fn);
@@ -215,8 +234,8 @@ export function validateNativeSignalNames(program, file) {
 		if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return [node];
 		const type = checker.getTypeAtLocation(node);
 		return checker
-			.getSignaturesOfType(type, ts.SignatureKind.Call)
-			.map((signature) => signature.declaration)
+			.getSignaturesOfType(type, SignatureKind.Call)
+			.map((signature) => signature.declaration?.resolve(project))
 			.filter(Boolean);
 	}
 	const jsxFunctions = new Map();
@@ -224,12 +243,12 @@ export function validateNativeSignalNames(program, file) {
 		if (jsxFunctions.has(fn)) return jsxFunctions.get(fn);
 		let found = false;
 		function visit(node) {
-			if (found || (node !== fn.body && ts.isFunctionLike(node))) return;
+			if (found || (node !== fn.body && ts.isFunctionLikeDeclaration(node))) return;
 			if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || ts.isJsxFragment(node)) {
 				found = true;
 				return;
 			}
-			ts.forEachChild(node, visit);
+			node.forEachChild(visit);
 		}
 		if (fn.body) visit(fn.body);
 		jsxFunctions.set(fn, found);
@@ -242,7 +261,8 @@ export function validateNativeSignalNames(program, file) {
 			if (!signature) continue;
 			const type = checker.getReturnTypeOfSignature(signature);
 			if (
-				(type.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined | ts.TypeFlags.Never)) === 0 &&
+				type &&
+				(type.flags & (TypeFlags.Void | TypeFlags.Undefined | TypeFlags.Never)) === 0 &&
 				readsLive(fn)
 			)
 				return true;
@@ -261,7 +281,7 @@ export function validateNativeSignalNames(program, file) {
 		);
 	}
 	function checkName(name, value = name) {
-		if (!name || (!ts.isIdentifier(name) && !ts.isStringLiteralLike(name))) return;
+		if (!name || (!ts.isIdentifier(name) && !ts.isStringLiteralLikeNode(name))) return;
 		const text = name.text;
 		if (text.endsWith('$') || !/^[$A-Z_a-z][$\w]*$/.test(text)) return;
 		if (exposesHandle(checker.getTypeAtLocation(value)) || exposesLiveRead(value))
@@ -276,7 +296,7 @@ export function validateNativeSignalNames(program, file) {
 			node &&
 			(ts.isParenthesizedExpression(node) ||
 				ts.isAsExpression(node) ||
-				ts.isTypeAssertionExpression(node) ||
+				ts.isTypeAssertion(node) ||
 				ts.isNonNullExpression(node) ||
 				ts.isSatisfiesExpression(node))
 		) {
@@ -345,7 +365,7 @@ export function validateNativeSignalNames(program, file) {
 					checkName(node.left.argumentExpression, node.right);
 			}
 		} else if (ts.isCallExpression(node)) {
-			const declaration = checker.getResolvedSignature(node)?.declaration;
+			const declaration = checker.getResolvedSignature(node)?.declaration?.resolve(project);
 			if (
 				declaration &&
 				memoSignatures.has(declaration) &&
@@ -361,7 +381,7 @@ export function validateNativeSignalNames(program, file) {
 				);
 			}
 		}
-		ts.forEachChild(node, visit);
+		node.forEachChild(visit);
 	}
 	visit(sourceFile);
 	diagnostics.sort((left, right) => left.start.offset - right.start.offset);

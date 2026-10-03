@@ -69,7 +69,6 @@ export declare function map_iterable<T, U>(values: Iterable<T> | Iterator<T>, ca
 				jsxImportSource: 'octane',
 				strict: true,
 				noEmit: true,
-				skipLibCheck: true,
 				types: [],
 				...compilerOptions,
 			},

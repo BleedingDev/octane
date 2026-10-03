@@ -505,3 +505,60 @@ test('parses generic arrows in TypeScript source without treating them as JSX', 
 	const policy = readBindingSurfacePolicy(root);
 	assert.equal(policy.valid, true, policy.issues.join('\n'));
 });
+
+test('native lexical symbols distinguish imported values from erased and shadowed names', (t) => {
+	const { root, write } = fixture(t);
+	for (const source of [
+		"import Octane from 'octane'; export function useEngine() { return Octane.useEffect; }",
+		"import { useEffect as effect } from 'octane/signals/client'; export function useEngine() { return { effect }; }",
+		"import * as Octane from 'octane'; export const useEngine = () => Octane.useEffect(() => {});",
+	]) {
+		write('src/hook.ts', source);
+		const policy = readBindingSurfacePolicy(root);
+		assert.equal(policy.valid, true, policy.issues.join('\n'));
+	}
+	for (const source of [
+		"import { useEffect } from 'octane'; type Hook = typeof useEffect; export function useEngine(value: Hook) { return value; }",
+		"import { type useEffect } from 'octane'; export function useEngine() { return useEffect; }",
+		"import { useEffect } from 'octane'; export function useEngine({ useEffect = () => 1 }) { return { useEffect }; }",
+		"import * as Octane from 'octane'; export function useEngine(Octane) { return Octane.useEffect(); }",
+		"import * as Octane from 'octane'; const adapter = () => Octane.useEffect(() => {}); export const useEngine = adapter;",
+	]) {
+		write('src/hook.ts', source);
+		const policy = readBindingSurfacePolicy(root);
+		assert.equal(policy.valid, false, source);
+		assert.ok(policy.issues.some((issue) => issue.includes('needs observed Octane integration')));
+		assert.equal(policy.requiresCopiedEvidence, true);
+	}
+});
+
+test('source extensions retain their existing TypeScript and JSX parsing contracts', (t) => {
+	const { root, write, surfaces } = fixture(t);
+	for (const extension of ['.tsx', '.jsx', '.tsrx', '.js', '.mjs', '.cjs']) {
+		const file = `src/adapter${extension}`;
+		const source = ['.tsx', '.jsx', '.tsrx'].includes(extension)
+			? "import { useEffect } from 'octane'; export function useEngine() { useEffect(() => {}); return <div />; }"
+			: "import { useEffect } from 'octane'; const identity = <T>(value: T) => value; export function useEngine() { useEffect(() => { identity(1); }); }";
+		write(file, source);
+		write(
+			'src/index.ts',
+			`export * from 'engine'; export { useEngine } from './adapter${extension}';`,
+		);
+		write('status.json', { surfaces: [surfaces[0], { ...surfaces[1], files: [file] }] });
+		const policy = readBindingSurfacePolicy(root);
+		assert.equal(policy.valid, true, `${extension}: ${policy.issues.join('\n')}`);
+	}
+});
+
+test('recovered syntax cannot establish ownership and reports the authored source', (t) => {
+	const { root, write } = fixture(t);
+	write(
+		'src/hook.ts',
+		"import { useEffect } from 'octane'; export function useEngine() { useEffect(() => {}); const broken = ; }",
+	);
+	const policy = readBindingSurfacePolicy(root);
+	assert.equal(policy.valid, false);
+	assert.ok(policy.issues.includes('Unparsed source coverage requires review: src/hook.ts'));
+	assert.equal(policy.requiresCopiedEvidence, true);
+	assert.equal(requiresUpstreamEvidence(policy), true);
+});

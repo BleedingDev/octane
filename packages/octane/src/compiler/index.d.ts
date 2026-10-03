@@ -1,7 +1,7 @@
 import type { CodeInformation, Mapping } from '@volar/language-core';
-import type { TextTypeFacts } from './typescript.js';
+import type { TextTypeFacts } from './text-type-facts.js';
 
-export type { TextTypeFacts } from './typescript.js';
+export type { TextTypeFacts } from './text-type-facts.js';
 
 export interface CompileRenderer {
 	id: string;

@@ -15,7 +15,8 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { checkTsrxProject } from './check-tsrx-project.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const packageRoot = resolve(root, 'packages/tanstack-router');
@@ -256,15 +257,19 @@ try {
 	checkerConfig.include = [resolve(packageStage, 'src/**/*')];
 	const checkerPath = resolve(stage, 'tsconfig.json');
 	writeFileSync(checkerPath, `${JSON.stringify(checkerConfig, null, 2)}\n`);
-	execFileSync(
-		process.execPath,
-		[
-			resolve(root, 'node_modules/@tsrx/typescript-plugin/dist/tsc.js'),
-			'-p',
-			checkerPath,
-			'--noEmit',
-		],
-		{ cwd: stage, stdio: 'inherit' },
+	const nativeCompiler = await import(
+		pathToFileURL(resolve(runtimeStage, 'package', runtimeManifest.exports['./compiler/volar']))
+			.href
+	);
+	const checked = checkTsrxProject({
+		configPath: checkerPath,
+		compileToVolarMappings: nativeCompiler.compileToVolarMappings,
+	});
+	if (checked.diagnostics.length) console.error(JSON.stringify(checked.diagnostics, null, 2));
+	assert.equal(
+		checked.diagnostics.length,
+		0,
+		'The frozen native router must pass its complete strict TypeScript 7 project.',
 	);
 	assertFrozenSource();
 	const inventory = [];

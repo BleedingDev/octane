@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, symlink, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, test } from 'node:test';
@@ -11,6 +11,7 @@ import {
 	EVIDENCE_MATRIX_SCHEMA_VERSION,
 	evaluateVerificationReadiness,
 	inspectBindingPackage,
+	inspectShippedSources,
 	migrateEvidenceMatrix,
 	recordEvidence,
 	validateUpstreamCrosswalk,
@@ -61,6 +62,113 @@ function cleanRoomProof(localEvidence) {
 		localEvidence,
 	};
 }
+
+async function shippedFixture(t, manifest, sources) {
+	const root = await mkdtemp(path.join(tmpdir(), 'native-shipped-module-facts-'));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	await writeFile(path.join(root, 'package.json'), JSON.stringify(manifest));
+	for (const [file, source] of Object.entries(sources)) {
+		await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+		await writeFile(path.join(root, file), source);
+	}
+	return root;
+}
+
+describe('native shipped module facts', () => {
+	test('retains runtime import, export, and literal-call rules', async (t) => {
+		const root = await shippedFixture(
+			t,
+			{ exports: './src/index.ts' },
+			{
+				'src/index.ts': `
+import 'side-effect';
+import { value } from '@scope/imported/path';
+import type { TypeOnly } from 'type-only-import';
+import { type InlineType } from 'inline-type-import';
+export { value } from 'forwarded/path';
+export * as namespace from 'namespace-export';
+export type { ExportOnly } from 'type-only-export';
+export { type InlineExport } from 'inline-type-export';
+import assigned = require('import-equals');
+import type assignedType = require('type-only-equals');
+type ImportQuery = import('type-query').Thing;
+async function load(name: string) {
+  await import('dynamic/path');
+  await import(name);
+  await import('import-with-options', {});
+  require('require/path');
+  require(\`template-require/path\`);
+  require('multiple-require', {});
+  loader.require('property-require');
+  const text = "import 'string-decoy'";
+  // require('comment-decoy');
+}
+`,
+			},
+		);
+		assert.deepEqual(inspectShippedSources(root), {
+			files: ['src/index.ts'],
+			runtimeDependencies: [
+				'@scope/imported',
+				'dynamic',
+				'forwarded',
+				'import-equals',
+				'inline-type-export',
+				'inline-type-import',
+				'namespace-export',
+				'require',
+				'side-effect',
+				'template-require',
+			],
+		});
+	});
+
+	test('follows authored TSRX and conditional package imports without projected imports', async (t) => {
+		const root = await shippedFixture(
+			t,
+			{
+				exports: './src/index.tsx',
+				imports: {
+					'#platform': { browser: './src/browser.jsx', default: 'external-platform/server' },
+				},
+				dependencies: { 'declared-runtime': '1.0.0' },
+				optionalDependencies: { 'optional-runtime': '1.0.0' },
+				peerDependencies: { 'peer-runtime': '1.0.0' },
+			},
+			{
+				'src/index.tsx': "import './Widget.tsrx'; import '#platform'; export const node = <div />;",
+				'src/Widget.tsrx': "import 'authored-tsrx-runtime'; export function Widget() @{ <div /> }",
+				'src/browser.jsx': "import './helper.mjs'; export const browser = <span />;",
+				'src/helper.mjs': "export * from 'transitive-runtime/subpath';",
+			},
+		);
+		assert.deepEqual(inspectShippedSources(root), {
+			files: ['src/Widget.tsrx', 'src/browser.jsx', 'src/helper.mjs', 'src/index.tsx'],
+			runtimeDependencies: [
+				'authored-tsrx-runtime',
+				'declared-runtime',
+				'external-platform',
+				'optional-runtime',
+				'peer-runtime',
+				'transitive-runtime',
+			],
+		});
+	});
+
+	test('recovers module facts from malformed source without claiming syntax validation', async (t) => {
+		const root = await shippedFixture(
+			t,
+			{ exports: './src/index.ts' },
+			{
+				'src/index.ts': "import 'before-error'; export const broken = ; import 'after-error';",
+			},
+		);
+		assert.deepEqual(inspectShippedSources(root), {
+			files: ['src/index.ts'],
+			runtimeDependencies: ['after-error', 'before-error'],
+		});
+	});
+});
 
 describe('evidence matrix', () => {
 	test('explicit migration removes dependency suite obligations and retains only immutable identity evidence', async () => {

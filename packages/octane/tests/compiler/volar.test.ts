@@ -1,11 +1,21 @@
 // @vitest-environment node
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+	mkdtempSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import ts from 'typescript';
+import { API, type Diagnostic, type Program, type Snapshot } from 'typescript/unstable/sync';
+import * as ast from 'typescript/unstable/ast';
 import { describe, it, expect } from 'vitest';
 import { compileToVolarMappings, compileTypesInspection } from 'octane/compiler/volar';
 import { bundleVolarCompiler } from '../../scripts/bundle-volar.mjs';
@@ -20,6 +30,111 @@ const OBJECT_RENDERERS = {
 	},
 	rules: [{ include: '**/*.object.tsrx', renderer: 'object' }],
 };
+
+/** Keep the native compiler session alive until all diagnostic/AST queries finish. */
+function openNativeProject(
+	rootFiles: string[],
+	compilerOptions: Record<string, unknown>,
+	virtualSources?: ReadonlyMap<string, string>,
+) {
+	const firstFile = rootFiles[0];
+	if (!firstFile) throw new Error('A native Volar project requires at least one source file.');
+	const root = dirname(firstFile);
+	const configDirectory = mkdtempSync(join(root, '.volar-native-project-'));
+	const configFile = join(configDirectory, 'tsconfig.json');
+	let api: API | undefined;
+	let snapshot: Snapshot | undefined;
+	const dispose = () => {
+		try {
+			snapshot?.dispose();
+		} finally {
+			try {
+				api?.close();
+			} finally {
+				rmSync(configDirectory, { recursive: true, force: true });
+			}
+		}
+	};
+	try {
+		writeFileSync(
+			configFile,
+			JSON.stringify({ compilerOptions: { rootDir: root, ...compilerOptions }, files: rootFiles }),
+		);
+		api = new API({
+			cwd: root,
+			...(virtualSources
+				? {
+						fs: {
+							readFile: (filename) => virtualSources.get(filename),
+							fileExists: (filename) => virtualSources.has(filename) || undefined,
+						},
+					}
+				: {}),
+		});
+		snapshot = api.updateSnapshot({ openProjects: [configFile] });
+		const project = snapshot.getProject(configFile);
+		if (!project) throw new Error('The native compiler did not open the Volar fixture project.');
+		return { project, [Symbol.dispose]: dispose };
+	} catch (error) {
+		dispose();
+		throw error;
+	}
+}
+
+function parseNativeSource(fileName: string, code: string) {
+	const root = mkdtempSync(join(tmpdir(), 'octane-volar-native-ast-'));
+	let native: ReturnType<typeof openNativeProject> | undefined;
+	const dispose = () => {
+		try {
+			native?.[Symbol.dispose]();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	};
+	try {
+		const file = join(root, fileName);
+		writeFileSync(file, code);
+		native = openNativeProject([file], {
+			jsx: 'preserve',
+			noEmit: true,
+			noLib: true,
+			noResolve: true,
+			types: [],
+		});
+		const sourceFile = native.project.program.getSourceFile(file);
+		if (!sourceFile) {
+			throw new Error('The native compiler did not parse the virtual TSX.');
+		}
+		return {
+			sourceFile,
+			[Symbol.dispose]: dispose,
+		};
+	} catch (error) {
+		dispose();
+		throw error;
+	}
+}
+
+function diagnosticText(diagnostic: Diagnostic, separator = '\n', depth = 0): string {
+	const prefix = depth ? separator + '  '.repeat(depth) : '';
+	return (
+		prefix +
+		diagnostic.text +
+		(diagnostic.messageChain ?? [])
+			.map((child) => diagnosticText(child, separator, depth + 1))
+			.join('')
+	);
+}
+
+function allDiagnostics(program: Program): readonly Diagnostic[] {
+	return [
+		...program.getConfigFileParsingDiagnostics(),
+		...program.getProgramDiagnostics(),
+		...program.getSyntacticDiagnostics(),
+		...program.getGlobalDiagnostics(),
+		...program.getSemanticDiagnostics(),
+	];
+}
 
 /**
  * Minimal `octane/jsx-runtime` stub for the type-level programs below: the DOM
@@ -72,19 +187,13 @@ describe('compileToVolarMappings', () => {
 		const source = `export function Text() @{ <p><3 and 1 < 2 and <= 3</p> }`;
 		const result = compileToVolarMappings(source, 'text.tsrx');
 		expect(result.errors).toEqual([]);
-		const parsed = ts.createSourceFile(
-			'text.tsx',
-			result.code,
-			ts.ScriptTarget.Latest,
-			true,
-			ts.ScriptKind.TSX,
-		);
+		using parsed = parseNativeSource('text.tsx', result.code);
 		const text: string[] = [];
-		function visit(node: ts.Node) {
-			if (ts.isJsxText(node)) text.push(node.text);
-			ts.forEachChild(node, visit);
+		function visit(node: ast.Node) {
+			if (ast.isJsxText(node)) text.push(node.text);
+			node.forEachChild(visit);
 		}
-		visit(parsed);
+		visit(parsed.sourceFile);
 		expect(text.join('')).toContain('&lt;3 and 1 &lt; 2 and &lt;= 3');
 	});
 
@@ -201,35 +310,32 @@ export function Repeated() @{
 				expect(invalid.errors).toEqual([]);
 				const invalidFile = join(root, 'Invalid.tsx');
 				writeFileSync(invalidFile, invalid.code);
-				const program = ts.createProgram({
-					rootNames: [...files, invalidFile],
-					options: {
-						jsx: ts.JsxEmit.Preserve,
-						module: ts.ModuleKind.ESNext,
-						moduleResolution: ts.ModuleResolutionKind.Bundler,
-						noEmit: true,
-						noUnusedLocals: true,
-						skipLibCheck: false,
-						strict: true,
-						target: ts.ScriptTarget.ESNext,
-						types: [],
-					},
+				using nativeProgram = openNativeProject([...files, invalidFile], {
+					jsx: 'preserve',
+					module: 'esnext',
+					moduleResolution: 'bundler',
+					noEmit: true,
+					noUnusedLocals: true,
+					skipLibCheck: false,
+					strict: true,
+					target: 'esnext',
+					types: [],
 				});
+				const program = nativeProgram.project.program;
 				// Check the editor's virtual files against the real Octane declarations;
 				// this fixture does not type-check Octane's implementation sources.
 				const diagnostics = [...files, invalidFile].flatMap((file) => {
-					const sourceFile = program.getSourceFile(file)!;
 					return [
-						...program.getSyntacticDiagnostics(sourceFile),
-						...program.getSemanticDiagnostics(sourceFile),
+						...program.getSyntacticDiagnostics(file),
+						...program.getSemanticDiagnostics(file),
 					];
 				});
 				expect(
 					diagnostics
-						.filter(({ file }) => file?.fileName !== invalidFile)
-						.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')),
+						.filter(({ fileName }) => fileName !== invalidFile)
+						.map((diagnostic) => diagnosticText(diagnostic)),
 				).toEqual([]);
-				const invalidDiagnostics = diagnostics.filter(({ file }) => file?.fileName === invalidFile);
+				const invalidDiagnostics = diagnostics.filter(({ fileName }) => fileName === invalidFile);
 				expect(invalidDiagnostics.map(({ code }) => code)).toEqual([2339]);
 				const authoredError = invalidSource.lastIndexOf('toUpperCase');
 				expect(
@@ -237,7 +343,7 @@ export function Repeated() @{
 						mapping.sourceOffsets.some(
 							(offset, index) =>
 								offset === authoredError &&
-								mapping.generatedOffsets[index] === invalidDiagnostics[0].start,
+								mapping.generatedOffsets[index] === invalidDiagnostics[0].pos,
 						),
 					),
 				).toBe(true);
@@ -278,23 +384,19 @@ export function Repeated() @{
 					invalid,
 					"import { ratio } from './tuple';\nratio([20, 'wrong']);\nratio(20, 10);\n",
 				);
-				const program = ts.createProgram({
-					rootNames: [valid, invalid],
-					options: {
-						jsx: ts.JsxEmit.Preserve,
-						module: ts.ModuleKind.ESNext,
-						moduleResolution: ts.ModuleResolutionKind.Bundler,
-						noEmit: true,
-						skipLibCheck: false,
-						strict: true,
-						target: ts.ScriptTarget.ESNext,
-						types: [],
-					},
+				using nativeProgram = openNativeProject([valid, invalid], {
+					jsx: 'preserve',
+					module: 'esnext',
+					moduleResolution: 'bundler',
+					noEmit: true,
+					skipLibCheck: false,
+					strict: true,
+					target: 'esnext',
+					types: [],
 				});
+				const program = nativeProgram.project.program;
 				expect(
-					ts
-						.getPreEmitDiagnostics(program)
-						.map(({ file, code }) => ({ file: file?.fileName, code })),
+					allDiagnostics(program).map(({ fileName, code }) => ({ file: fileName, code })),
 				).toEqual([
 					{ file: invalid, code: 2322 },
 					{ file: invalid, code: 2554 },
@@ -585,24 +687,23 @@ declare module '@fixture/object-intrinsics/jsx-runtime' {
 			writeFileSync(objectFile, object.code);
 			writeFileSync(invalidDomFile, invalidDom.code);
 
-			const program = ts.createProgram({
-				rootNames: [augmentationFile, domFile, objectFile, invalidDomFile],
-				options: {
-					jsx: ts.JsxEmit.Preserve,
-					module: ts.ModuleKind.ESNext,
-					moduleResolution: ts.ModuleResolutionKind.Bundler,
+			using nativeProgram = openNativeProject(
+				[augmentationFile, domFile, objectFile, invalidDomFile],
+				{
+					jsx: 'preserve',
+					module: 'esnext',
+					moduleResolution: 'bundler',
 					noEmit: true,
-					skipLibCheck: true,
+					skipLibCheck: false,
 					strict: true,
-					target: ts.ScriptTarget.ESNext,
+					target: 'esnext',
 				},
-			});
-			const diagnostics = ts.getPreEmitDiagnostics(program);
-			expect(diagnostics).toHaveLength(1);
-			expect(diagnostics[0].file?.fileName).toBe(invalidDomFile);
-			expect(ts.flattenDiagnosticMessageText(diagnostics[0].messageText, '\n')).toMatch(
-				/customThing.*JSX\.IntrinsicElements/,
 			);
+			const program = nativeProgram.project.program;
+			const diagnostics = allDiagnostics(program);
+			expect(diagnostics).toHaveLength(1);
+			expect(diagnostics[0].fileName).toBe(invalidDomFile);
+			expect(diagnosticText(diagnostics[0])).toMatch(/customThing.*JSX\.IntrinsicElements/);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -763,27 +864,24 @@ declare module '@fixture/object-intrinsics/jsx-runtime' {
 				return { name, file };
 			});
 
-			const program = ts.createProgram({
-				rootNames: files.map(({ file }) => file),
-				options: {
-					jsx: ts.JsxEmit.Preserve,
-					module: ts.ModuleKind.ESNext,
-					moduleResolution: ts.ModuleResolutionKind.Bundler,
+			using nativeProgram = openNativeProject(
+				files.map(({ file }) => file),
+				{
+					jsx: 'preserve',
+					module: 'esnext',
+					moduleResolution: 'bundler',
 					noEmit: true,
-					skipLibCheck: true,
+					skipLibCheck: false,
 					strict: true,
-					target: ts.ScriptTarget.ESNext,
+					target: 'esnext',
 				},
-			});
-			const undefinedNames = ts
-				.getPreEmitDiagnostics(program)
+			);
+			const program = nativeProgram.project.program;
+			const undefinedNames = allDiagnostics(program)
 				.filter((diagnostic) => diagnostic.code === 2304)
 				.map((diagnostic) => {
-					const position = files.find(({ file }) => file === diagnostic.file?.fileName);
-					return `${position?.name ?? diagnostic.file?.fileName}: ${ts.flattenDiagnosticMessageText(
-						diagnostic.messageText,
-						' ',
-					)}`;
+					const position = files.find(({ file }) => file === diagnostic.fileName);
+					return `${position?.name ?? diagnostic.fileName}: ${diagnosticText(diagnostic, ' ')}`;
 				});
 			expect(undefinedNames).toEqual([]);
 		} finally {
@@ -799,35 +897,30 @@ declare module '@fixture/object-intrinsics/jsx-runtime' {
 		// ref nested one level deeper than the runtime ever produces.
 		for (const [name, source] of refSpreadModules()) {
 			const compiled = compileToVolarMappings(source, '/src/Chart.tsrx');
-			const generated = ts.createSourceFile(
-				'/src/Chart.tsx',
-				compiled.code,
-				ts.ScriptTarget.ESNext,
-				true,
-				ts.ScriptKind.TSX,
-			);
+			using parsed = parseNativeSource('Chart.tsx', compiled.code);
+			const generated = parsed.sourceFile;
 
-			const refArrays: ts.ArrayLiteralExpression[] = [];
-			const visit = (node: ts.Node): void => {
+			const refArrays: ast.ArrayLiteralExpression[] = [];
+			const visit = (node: ast.Node): void => {
 				if (
-					ts.isJsxAttribute(node) &&
-					ts.isIdentifier(node.name) &&
+					ast.isJsxAttribute(node) &&
+					ast.isIdentifier(node.name) &&
 					node.name.text === 'ref' &&
 					node.initializer &&
-					ts.isJsxExpression(node.initializer) &&
+					ast.isJsxExpression(node.initializer) &&
 					node.initializer.expression &&
-					ts.isArrayLiteralExpression(node.initializer.expression)
+					ast.isArrayLiteralExpression(node.initializer.expression)
 				) {
 					refArrays.push(node.initializer.expression);
 				}
-				ts.forEachChild(node, visit);
+				node.forEachChild(visit);
 			};
 			visit(generated);
 
 			// One composed ref per element: the authored ref and the spread bag's.
 			expect(refArrays, name).toHaveLength(1);
 			const nested = refArrays[0].elements
-				.filter((element) => ts.isArrayLiteralExpression(element))
+				.filter((element) => ast.isArrayLiteralExpression(element))
 				.map((element) => element.getText(generated));
 			expect(nested, name).toEqual([]);
 		}
@@ -913,25 +1006,21 @@ export function Invalid() @{
 				invalidFile,
 				compileStylexToVolarMappings(invalid, join(stylexRoot, 'Invalid.tsrx')).code,
 			);
-			const program = ts.createProgram({
-				rootNames: [validFile, invalidFile],
-				options: {
-					jsx: ts.JsxEmit.Preserve,
-					module: ts.ModuleKind.ESNext,
-					moduleResolution: ts.ModuleResolutionKind.Bundler,
-					strict: true,
-					skipLibCheck: true,
-					noEmit: true,
-					target: ts.ScriptTarget.ESNext,
-					types: [],
-				},
+			using nativeProgram = openNativeProject([validFile, invalidFile], {
+				jsx: 'preserve',
+				module: 'esnext',
+				moduleResolution: 'bundler',
+				strict: true,
+				skipLibCheck: false,
+				noEmit: true,
+				target: 'esnext',
+				types: [],
 			});
+			const program = nativeProgram.project.program;
 			expect(
-				program
-					.getSemanticDiagnostics(program.getSourceFile(validFile))
-					.map((error) => ts.flattenDiagnosticMessageText(error.messageText, ' ')),
+				program.getSemanticDiagnostics(validFile).map((error) => diagnosticText(error, ' ')),
 			).toEqual([]);
-			const invalidDiagnostics = program.getSemanticDiagnostics(program.getSourceFile(invalidFile));
+			const invalidDiagnostics = program.getSemanticDiagnostics(invalidFile);
 			expect(invalidDiagnostics.map(({ code }) => code)).toEqual([
 				2345, 2345, 2345, 2322, 2322, 2322, 2322, 2322, 2322, 2322,
 			]);
@@ -964,64 +1053,85 @@ compileToVolarMappings(42);
 const invalid: number = knownAttributeSpreads[0].fields[0];
 `,
 			);
-			writeFileSync(
-				join(stylexRoot, 'tsconfig.json'),
-				JSON.stringify({
-					compilerOptions: {
-						jsx: 'preserve',
-						module: 'nodenext',
-						moduleResolution: 'nodenext',
-						strict: true,
-						skipLibCheck: true,
-						noEmit: true,
-						target: 'esnext',
-						types: [],
-					},
-					tsrx: { compiler: '@octanejs/stylex/compiler' },
-					include: ['Panel.tsrx', 'Invalid.tsrx', 'config.mts'],
-				}),
-			);
-			const checkConsumer = () => {
-				try {
-					execFileSync(
-						process.execPath,
-						[
-							fileURLToPath(
-								new URL(
-									'../../../../node_modules/@tsrx/typescript-plugin/dist/tsc.js',
-									import.meta.url,
-								),
-							),
-							'--noEmit',
-							'-p',
-							join(stylexRoot, 'tsconfig.json'),
-						],
-						{ encoding: 'utf8', timeout: 30_000 },
-					);
-				} catch (error) {
-					throw new Error(String((error as { stdout?: string }).stdout ?? error));
-				}
+			const consumerConfig = {
+				compilerOptions: {
+					jsx: 'preserve',
+					module: 'nodenext',
+					moduleResolution: 'nodenext',
+					strict: true,
+					skipLibCheck: false,
+					noEmit: true,
+					target: 'esnext',
+					types: [],
+				},
+				tsrx: { compiler: '@octanejs/stylex/compiler' },
+				include: ['Panel.tsrx', 'Invalid.tsrx', 'config.mts'],
 			};
-			let consumerDiagnostics = '';
-			try {
-				checkConsumer();
-			} catch (error) {
-				consumerDiagnostics = String((error as { stdout?: string }).stdout ?? error);
-			}
-			// One compiler invocation checks both fixtures and the provider's public
-			// types. Every error must belong to the deliberately invalid fixture.
-			const errorLines = consumerDiagnostics
-				.split('\n')
-				.filter((line) => line.includes('error TS'));
-			expect(errorLines.map((line) => Number(/error TS(\d+):/.exec(line)?.[1]))).toEqual([
+			const configFile = join(stylexRoot, 'tsconfig.json');
+			writeFileSync(configFile, JSON.stringify(consumerConfig));
+			const selectedProvider = createRequire(configFile).resolve(consumerConfig.tsrx.compiler);
+			expect(realpathSync(selectedProvider)).toBe(
+				realpathSync(fileURLToPath(new URL('../../../stylex/src/compiler.js', import.meta.url))),
+			);
+			const projections = ['Panel.tsrx', 'Invalid.tsrx'].map((name) => {
+				const authoredFile = join(stylexRoot, name);
+				const source = readFileSync(authoredFile, 'utf8');
+				const result = compileStylexToVolarMappings(source, authoredFile);
+				expect(result.errors).toEqual([]);
+				expect(result.diagnostics).toEqual([]);
+				return { authoredFile, source, result, file: `${authoredFile}.tsx` };
+			});
+			using consumer = openNativeProject(
+				[...projections.map(({ file }) => file), join(stylexRoot, 'config.mts')],
+				consumerConfig.compilerOptions,
+				new Map(projections.map(({ file, result }) => [file, result.code])),
+			);
+			// Native TypeScript checks both provider projections and its public
+			// declaration contract, including the deliberately invalid call sites.
+			const consumerDiagnostics = allDiagnostics(consumer.project.program);
+			expect(consumerDiagnostics.map(({ code }) => code)).toEqual([
 				2345, 2345, 2345, 2322, 2322, 2322, 2322, 2322, 2322, 2322,
 			]);
-			for (const line of errorLines) expect(line).toMatch(/Invalid\.tsrx\(\d+,\d+\): error TS/);
-			expect(consumerDiagnostics).toContain("Argument of type 'boolean'");
+			const invalidProjection = projections.find(({ authoredFile }) =>
+				authoredFile.endsWith('/Invalid.tsrx'),
+			);
+			if (!invalidProjection)
+				throw new Error('The selected provider did not receive the invalid fixture.');
+			for (const diagnostic of consumerDiagnostics) {
+				expect(diagnostic.fileName).toBe(invalidProjection.file);
+				expect(
+					invalidProjection.result.mappings.some((mapping) =>
+						mapping.generatedOffsets.some(
+							(offset, index) =>
+								diagnostic.pos >= offset &&
+								diagnostic.pos <
+									offset + (mapping.generatedLengths?.[index] ?? mapping.lengths[index]),
+						),
+					),
+				).toBe(true);
+			}
+			expect(
+				consumerDiagnostics.map((diagnostic) => diagnosticText(diagnostic)).join('\n'),
+			).toContain("Argument of type 'boolean'");
 			const wrongLine = invalid
 				.slice(0, invalid.indexOf('styles.height(wrong$)'))
 				.split('\n').length;
-			expect(consumerDiagnostics).toContain(`Invalid.tsrx(${wrongLine},`);
+			const wrongOffset = invalid.indexOf('wrong$', invalid.indexOf('styles.height(wrong$)'));
+			const wrongDiagnostic = consumerDiagnostics.find((diagnostic) =>
+				diagnosticText(diagnostic).includes("Argument of type 'boolean'"),
+			);
+			if (!wrongDiagnostic)
+				throw new Error('The native compiler did not reject the boolean StyleX argument.');
+			expect(
+				invalidProjection.result.mappings.some((mapping) =>
+					mapping.sourceOffsets.some(
+						(offset, index) =>
+							offset === wrongOffset &&
+							mapping.generatedOffsets[index] === wrongDiagnostic.pos &&
+							invalidProjection.source.slice(0, offset).split('\n').length === wrongLine,
+					),
+				),
+			).toBe(true);
 		} finally {
 			rmSync(stylexRoot, { recursive: true, force: true });
 		}
@@ -1227,32 +1337,27 @@ export function Invalid(value: SignalHandle<string>) @{ <p>{value as string}</p>
 				writeFileSync(file, compiled.code);
 				return file;
 			});
-			const program = ts.createProgram({
-				rootNames: [...files.map(({ file }) => file), ...invalidFiles],
-				options: {
-					jsx: ts.JsxEmit.Preserve,
-					module: ts.ModuleKind.ESNext,
-					moduleResolution: ts.ModuleResolutionKind.Bundler,
-					noEmit: true,
-					skipLibCheck: false,
-					strict: true,
-					target: ts.ScriptTarget.ESNext,
-					types: [],
-				},
+			using nativeProgram = openNativeProject([...files.map(({ file }) => file), ...invalidFiles], {
+				jsx: 'preserve',
+				module: 'esnext',
+				moduleResolution: 'bundler',
+				noEmit: true,
+				skipLibCheck: false,
+				strict: true,
+				target: 'esnext',
+				types: [],
 			});
-			const diagnostics = ts.getPreEmitDiagnostics(program);
+			const program = nativeProgram.project.program;
+			const diagnostics = allDiagnostics(program);
 			const validDiagnostics = diagnostics
-				.filter((diagnostic) => !invalidFiles.includes(diagnostic.file?.fileName ?? ''))
+				.filter((diagnostic) => !invalidFiles.includes(diagnostic.fileName ?? ''))
 				.map((diagnostic) => {
-					const position = files.find(({ file }) => file === diagnostic.file?.fileName);
-					return `${position?.name ?? diagnostic.file?.fileName}: ${ts.flattenDiagnosticMessageText(
-						diagnostic.messageText,
-						' ',
-					)}`;
+					const position = files.find(({ file }) => file === diagnostic.fileName);
+					return `${position?.name ?? diagnostic.fileName}: ${diagnosticText(diagnostic, ' ')}`;
 				});
 			expect(validDiagnostics).toEqual([]);
 			for (const [index, file] of invalidFiles.entries()) {
-				const errors = diagnostics.filter((diagnostic) => diagnostic.file?.fileName === file);
+				const errors = diagnostics.filter((diagnostic) => diagnostic.fileName === file);
 				expect(
 					errors.map(({ code }) => code),
 					file,
@@ -1267,8 +1372,8 @@ export function Invalid(value: SignalHandle<string>) @{ <p>{value as string}</p>
 								(offset, position) =>
 									offset <= authored &&
 									authored < offset + mapping.lengths[position] &&
-									mapping.generatedOffsets[position] <= diagnostic.start! &&
-									diagnostic.start! <
+									mapping.generatedOffsets[position] <= diagnostic.pos &&
+									diagnostic.pos <
 										mapping.generatedOffsets[position] +
 											(mapping.generatedLengths?.[position] ?? mapping.lengths[position]),
 							),
@@ -1321,19 +1426,17 @@ export function Invalid(value: SignalHandle<string>) @{ <p>{value as string}</p>
 		try {
 			const virtualFile = join(root, 'ambient-global.tsx');
 			writeFileSync(virtualFile, result.code);
-			const program = ts.createProgram({
-				rootNames: [virtualFile],
-				options: {
-					jsx: ts.JsxEmit.Preserve,
-					module: ts.ModuleKind.ESNext,
-					moduleResolution: ts.ModuleResolutionKind.Bundler,
-					noEmit: true,
-					skipLibCheck: true,
-					strict: true,
-					target: ts.ScriptTarget.ESNext,
-				},
+			using nativeProgram = openNativeProject([virtualFile], {
+				jsx: 'preserve',
+				module: 'esnext',
+				moduleResolution: 'bundler',
+				noEmit: true,
+				skipLibCheck: false,
+				strict: true,
+				target: 'esnext',
 			});
-			expect(ts.getPreEmitDiagnostics(program)).toHaveLength(0);
+			const program = nativeProgram.project.program;
+			expect(allDiagnostics(program)).toHaveLength(0);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -1408,30 +1511,24 @@ export function Invalid(value: SignalHandle<string>) @{ <p>{value as string}</p>
 			// block import's only uses sit INSIDE the namespace, which count.
 			const options = {
 				allowImportingTsExtensions: true,
-				jsx: ts.JsxEmit.Preserve,
-				module: ts.ModuleKind.ESNext,
-				moduleResolution: ts.ModuleResolutionKind.Bundler,
+				jsx: 'preserve',
+				module: 'esnext',
+				moduleResolution: 'bundler',
 				noEmit: true,
 				noUnusedLocals: true,
-				skipLibCheck: true,
+				skipLibCheck: false,
 				strict: true,
-				target: ts.ScriptTarget.ESNext,
+				target: 'esnext',
 			};
-			const program = ts.createProgram({
-				rootNames: [appFile],
-				options,
-			});
-			expect(ts.getPreEmitDiagnostics(program)).toHaveLength(0);
+			using nativeProgram = openNativeProject([appFile], options);
+			const program = nativeProgram.project.program;
+			expect(allDiagnostics(program)).toHaveLength(0);
 
-			const misuseProgram = ts.createProgram({
-				rootNames: [misuseFile],
-				options,
-			});
-			const misuseDiagnostics = ts.getPreEmitDiagnostics(misuseProgram);
+			using nativeMisuseProgram = openNativeProject([misuseFile], options);
+			const misuseProgram = nativeMisuseProgram.project.program;
+			const misuseDiagnostics = allDiagnostics(misuseProgram);
 			expect(misuseDiagnostics).toHaveLength(1);
-			expect(ts.flattenDiagnosticMessageText(misuseDiagnostics[0].messageText, '\n')).toMatch(
-				/Promise<number>/,
-			);
+			expect(diagnosticText(misuseDiagnostics[0])).toMatch(/Promise<number>/);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -1467,25 +1564,26 @@ export const ordinaryResult: string = ordinary('draft', { count: 1 });
 					expect(result.errors).toEqual([]);
 					const file = join(root, 'Calls.tsx');
 					writeFileSync(file, result.code);
-					const program = ts.createProgram({
-						rootNames: [file],
-						options: {
-							module: ts.ModuleKind.ESNext,
-							moduleResolution: ts.ModuleResolutionKind.Bundler,
-							noEmit: true,
-							skipLibCheck: true,
-							strict: true,
-							target: ts.ScriptTarget.ESNext,
-							paths: {
-								'octane/server': [
-									fileURLToPath(new URL('../../src/server-call.ts', import.meta.url)),
-								],
-							},
+					using nativeProgram = openNativeProject([file], {
+						// TS5 inferred the common root of this temporary fixture and
+						// the imported authored server module. TS7 defaults to the config directory.
+						rootDir: '/',
+						module: 'esnext',
+						moduleResolution: 'bundler',
+						noEmit: true,
+						skipLibCheck: false,
+						strict: true,
+						target: 'esnext',
+						paths: {
+							'octane/server': [
+								fileURLToPath(new URL('../../src/server-call.ts', import.meta.url)),
+							],
 						},
 					});
-					return ts.getPreEmitDiagnostics(program).map((diagnostic) => ({
+					const program = nativeProgram.project.program;
+					return allDiagnostics(program).map((diagnostic) => ({
 						code: diagnostic.code,
-						message: ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'),
+						message: diagnosticText(diagnostic),
 					}));
 				};
 				expect(check(source)).toEqual([]);
@@ -1537,23 +1635,17 @@ export const ordinaryResult: string = ordinary('draft', { count: 1 });
 			writeOctaneJsxRuntimeStub(root, '\t\tp: { children?: unknown };');
 			const file = join(root, 'Overloaded.tsx');
 			writeFileSync(file, result.code);
-			const program = ts.createProgram({
-				rootNames: [file],
-				options: {
-					jsx: ts.JsxEmit.Preserve,
-					module: ts.ModuleKind.ESNext,
-					moduleResolution: ts.ModuleResolutionKind.Bundler,
-					noEmit: true,
-					skipLibCheck: true,
-					strict: true,
-					target: ts.ScriptTarget.ESNext,
-				},
+			using nativeProgram = openNativeProject([file], {
+				jsx: 'preserve',
+				module: 'esnext',
+				moduleResolution: 'bundler',
+				noEmit: true,
+				skipLibCheck: false,
+				strict: true,
+				target: 'esnext',
 			});
-			expect(
-				ts
-					.getPreEmitDiagnostics(program)
-					.map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n')),
-			).toEqual([]);
+			const program = nativeProgram.project.program;
+			expect(allDiagnostics(program).map((d) => diagnosticText(d))).toEqual([]);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -1610,24 +1702,18 @@ export const ordinaryResult: string = ordinary('draft', { count: 1 });
 			writeOctaneJsxRuntimeStub(root, '\t\tp: { children?: unknown };');
 			const file = join(root, 'Steps.tsx');
 			writeFileSync(file, result.code);
-			const program = ts.createProgram({
-				rootNames: [file],
-				options: {
-					jsx: ts.JsxEmit.Preserve,
-					module: ts.ModuleKind.ESNext,
-					moduleResolution: ts.ModuleResolutionKind.Bundler,
-					noEmit: true,
-					noImplicitOverride: true,
-					skipLibCheck: true,
-					strict: true,
-					target: ts.ScriptTarget.ESNext,
-				},
+			using nativeProgram = openNativeProject([file], {
+				jsx: 'preserve',
+				module: 'esnext',
+				moduleResolution: 'bundler',
+				noEmit: true,
+				noImplicitOverride: true,
+				skipLibCheck: false,
+				strict: true,
+				target: 'esnext',
 			});
-			expect(
-				ts
-					.getPreEmitDiagnostics(program)
-					.map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n')),
-			).toEqual([]);
+			const program = nativeProgram.project.program;
+			expect(allDiagnostics(program).map((d) => diagnosticText(d))).toEqual([]);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -1742,24 +1828,21 @@ describe('awaited @for bodies', () => {
 			const invalidFile = join(root, 'Invalid.tsx');
 			writeFileSync(validFile, valid.code);
 			writeFileSync(invalidFile, invalid.code);
-			const program = ts.createProgram({
-				rootNames: [validFile, invalidFile],
-				options: {
-					jsx: ts.JsxEmit.Preserve,
-					module: ts.ModuleKind.ESNext,
-					moduleResolution: ts.ModuleResolutionKind.Bundler,
-					noEmit: true,
-					skipLibCheck: false,
-					strict: true,
-					target: ts.ScriptTarget.ESNext,
-					types: [],
-				},
+			using nativeProgram = openNativeProject([validFile, invalidFile], {
+				jsx: 'preserve',
+				module: 'esnext',
+				moduleResolution: 'bundler',
+				noEmit: true,
+				skipLibCheck: false,
+				strict: true,
+				target: 'esnext',
+				types: [],
 			});
+			const program = nativeProgram.project.program;
 			const codes = (file: string) => {
-				const sourceFile = program.getSourceFile(file)!;
 				return [
-					...program.getSyntacticDiagnostics(sourceFile),
-					...program.getSemanticDiagnostics(sourceFile),
+					...program.getSyntacticDiagnostics(file),
+					...program.getSemanticDiagnostics(file),
 				].map(({ code }) => code);
 			};
 			expect(codes(validFile)).toEqual([ASYNC_ELEMENT]);

@@ -1,6 +1,6 @@
 // TypeScript's declaration emit from volar.js JSDoc is checked against this
 // formatted file at build time, before the standalone entry is bundled.
-export function compileToVolarMappings(
+export declare function compileToVolarMappings(
 	source: string,
 	filename?: string,
 	options?: {
@@ -12,7 +12,7 @@ export function compileToVolarMappings(
 ): import('./index.js').VolarCompileResult;
 
 /** Virtual TSX and authored ranges used by compiler inspection tooling. */
-export function compileTypesInspection(
+export declare function compileTypesInspection(
 	source: string,
 	filename?: string,
 	options?: { renderers?: unknown },

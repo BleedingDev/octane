@@ -343,7 +343,7 @@ const octaneTransformWithAuthoredSuspense = createJsxTransform({
 	},
 });
 
-/** @param {import('@tsrx/core/types').AST.Program} ast */
+/** @param {import('@tsrx/core/types/estree').Program} ast */
 function selectOctaneTransform(ast) {
 	const hasSuspenseImport = ast.body.some(
 		(statement) =>
@@ -463,7 +463,7 @@ function markNativeTemplateBodies(root) {
 export function compileToVolarMappings(source, filename, options) {
 	/** @type {import('@tsrx/core/types').CompileError[]} */
 	const errors = [];
-	/** @type {import('@tsrx/core/types').AST.CommentWithLocation[]} */
+	/** @type {import('@tsrx/core/types/estree').CommentWithLocation[]} */
 	const comments = [];
 	const ast = parseModule(source, filename, {
 		collect: true,
@@ -795,7 +795,7 @@ function collectDirectiveOrigins(ast, source) {
 export function compileTypesInspection(source, filename, options) {
 	/** @type {import('@tsrx/core/types').CompileError[]} */
 	const errors = [];
-	/** @type {import('@tsrx/core/types').AST.CommentWithLocation[]} */
+	/** @type {import('@tsrx/core/types/estree').CommentWithLocation[]} */
 	const comments = [];
 	const ast = parseModule(source, filename, {
 		collect: true,

@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
-import ts from 'typescript';
+import * as ts from 'typescript/unstable/ast';
+import { NativeSyntaxError, withNativeSyntaxProject } from './lib/native-syntax-project.mjs';
 
 const OWNERSHIP = new Set(['imported', 'adapter', 'copied']);
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.tsrx', '.js', '.jsx', '.mjs', '.cjs'];
@@ -35,30 +36,38 @@ function sourceFacts(root, file, manifest, seen = new Set()) {
 	seen = new Set([...seen, file]);
 	const source = readFileSync(path.join(root, file), 'utf8');
 	const sourcePath = path.resolve(root, file);
-	const ast = ts.createSourceFile(
-		sourcePath,
-		source,
-		ts.ScriptTarget.Latest,
-		true,
-		/\.(?:tsx|jsx|tsrx)$/.test(file) ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-	);
-	if (ast.parseDiagnostics.length)
-		throw new Error(`Unparsed source coverage requires review: ${file}`);
+	// Native projects select script kind from the extension. Retain this
+	// policy's TSX parsing for JSX/TSRX and TypeScript parsing for other sources.
+	const syntaxPath = /\.(?:jsx|tsrx)$/.test(file)
+		? `${sourcePath}.tsx`
+		: /\.(?:js|mjs|cjs)$/.test(file)
+			? `${sourcePath}.ts`
+			: sourcePath;
+	try {
+		return withNativeSyntaxProject([[syntaxPath, source]], ({ project, sourceFiles }) =>
+			boundSourceFacts(root, file, manifest, seen, sourceFiles[0][1], project),
+		);
+	} catch (error) {
+		if (error instanceof NativeSyntaxError)
+			throw new Error(`Unparsed source coverage requires review: ${file}`);
+		throw error;
+	}
+}
+
+function boundSourceFacts(root, file, manifest, seen, ast, project) {
 	const exports = [];
 	const files = new Set([file]);
 	const forwarding = new Map([[file, true]]);
-	// Bind only this source file: lexical references need no dependency resolution or libraries.
-	const options = { noResolve: true, noLib: true, types: [], allowNonTsExtensions: true };
-	const checker = ts
-		.createProgram([sourcePath], options, {
-			...ts.createCompilerHost(options),
-			getSourceFile: (name) => (name === sourcePath ? ast : undefined),
-		})
-		.getTypeChecker();
+	// The syntax project's noResolve/noLib scope retains lexical binding facts
+	// without resolving the imported runtime or admitting dependency declarations.
+	const checker = project.checker;
 	const runtimeBindings = new Set();
 	const addRuntimeBinding = (name) => {
 		const symbol = checker.getSymbolAtLocation(name);
-		if (symbol?.declarations?.length === 1 && symbol.declarations[0] === name.parent)
+		if (
+			symbol?.declarations?.length === 1 &&
+			symbol.declarations[0].resolve(project) === name.parent
+		)
 			runtimeBindings.add(symbol);
 	};
 	for (const statement of ast.statements) {
@@ -88,7 +97,7 @@ function sourceFacts(root, file, manifest, seen = new Set()) {
 						: checker.getSymbolAtLocation(node);
 				if (runtimeBindings.has(symbol)) found = true;
 			}
-			ts.forEachChild(node, visit);
+			node.forEachChild(visit);
 		};
 		visit(statement);
 		return found;
@@ -176,13 +185,13 @@ function sourceFacts(root, file, manifest, seen = new Set()) {
 				(ts.isIdentifier(node.expression) && node.expression.text === 'require'))
 		) {
 			reference = node.arguments[0];
-			if (!reference || !ts.isStringLiteralLike(reference))
+			if (!reference || !ts.isStringLiteralLikeNode(reference))
 				throw new Error(`Nonliteral module load requires review: ${file}`);
 		}
-		if (reference && ts.isStringLiteralLike(reference))
+		if (reference && ts.isStringLiteralLikeNode(reference))
 			for (const resolved of resolveModule(reference.text))
 				if (resolved.file) childFacts(resolved.file);
-		ts.forEachChild(node, visit);
+		node.forEachChild(visit);
 	};
 	visit(ast);
 	for (const statement of ast.statements) {

@@ -1,4 +1,8 @@
-import ts from 'typescript';
+import * as ts from 'typescript/unstable/ast';
+import {
+	NativeSyntaxError,
+	withNativeSyntaxProject,
+} from '../../../scripts/lib/native-syntax-project.mjs';
 
 // Node evaluates the published runtime unbundled, so nothing substitutes
 // process.env.NODE_ENV: every guard crosses into the host environment
@@ -48,10 +52,10 @@ function declaresProcess(node) {
 	const parent = node.parent;
 	if (!parent || parent.name !== node) return false;
 	if (ts.isVariableDeclaration(parent)) {
-		return (ts.getCombinedModifierFlags(parent) & ts.ModifierFlags.Ambient) === 0;
+		return (parent.flags & ts.NodeFlags.Ambient) === 0;
 	}
 	return (
-		ts.isParameter(parent) ||
+		ts.isParameterDeclaration(parent) ||
 		ts.isBindingElement(parent) ||
 		ts.isFunctionDeclaration(parent) ||
 		ts.isFunctionExpression(parent) ||
@@ -71,16 +75,21 @@ function declaresProcess(node) {
 // rather than shipping one.
 export function compileNodeEnvReads(source, filename) {
 	if (!source.includes('NODE_ENV')) return source;
-	const sourceFile = ts.createSourceFile(
-		filename,
-		source,
-		ts.ScriptTarget.Latest,
-		true,
-		/\.[cm]?js$/.test(filename) ? ts.ScriptKind.JS : ts.ScriptKind.TS,
-	);
-	if (sourceFile.parseDiagnostics.length !== 0) {
-		throw new Error(`${filename}: cannot compile environment reads in a module with parse errors`);
+	try {
+		return withNativeSyntaxProject([[filename, source]], ({ sourceFiles }) => {
+			return compileParsedEnvironmentReads(source, filename, sourceFiles[0][1]);
+		});
+	} catch (error) {
+		if (error instanceof NativeSyntaxError) {
+			throw new Error(
+				`${filename}: cannot compile environment reads in a module with parse errors`,
+			);
+		}
+		throw error;
 	}
+}
+
+function compileParsedEnvironmentReads(source, filename, sourceFile) {
 	const fail = (node, reason) => {
 		const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
 		throw new Error(`${filename}:${line + 1}:${character + 1}: ${reason}`);
@@ -118,12 +127,12 @@ export function compileNodeEnvReads(source, filename) {
 			}
 		} else if (
 			ts.isElementAccessExpression(node) &&
-			ts.isStringLiteralLike(node.argumentExpression) &&
+			ts.isStringLiteralLikeNode(node.argumentExpression) &&
 			node.argumentExpression.text === 'NODE_ENV'
 		) {
 			fail(node, 'read NODE_ENV as process.env.NODE_ENV');
 		}
-		ts.forEachChild(node, visit);
+		node.forEachChild(visit);
 	}
 	visit(sourceFile);
 	if (edits.length === 0) return source;
@@ -139,11 +148,13 @@ export function compileNodeEnvReads(source, filename) {
 	) {
 		index++;
 	}
-	const insertAt = index === 0 ? 0 : sourceFile.statements[index - 1].end;
+	const insertAt =
+		index === 0 ? (ts.getShebang(source)?.length ?? 0) : sourceFile.statements[index - 1].end;
 	edits.push({
 		start: insertAt,
 		end: insertAt,
-		text: index === 0 ? `${DEVELOPMENT_FLAG_DECLARATION}\n` : `\n${DEVELOPMENT_FLAG_DECLARATION}`,
+		text:
+			insertAt === 0 ? `${DEVELOPMENT_FLAG_DECLARATION}\n` : `\n${DEVELOPMENT_FLAG_DECLARATION}`,
 	});
 
 	let output = source;

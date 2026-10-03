@@ -329,19 +329,21 @@
     "@tsrx/core": "0.4.0",
     "@types/react": "19.2.18",
     "@volar/language-core": "2.4.28",
-    "@volar/typescript": "2.4.28",
     "alien-signals": "3.2.0",
     "csstype": "3.2.3",
     "devalue": "5.8.2",
     "entities": "7.0.1",
     "es-module-lexer": "1.7.0",
     "esrap": "2.3.2",
-    "@tsrx/oxc": "0.16.0"
+    "@tsrx/oxc": "0.16.0",
+    "@typescript-eslint/types": "8.71.0",
+    "vscode-languageserver-types": "3.18.4",
+    "source-map": "0.8.0"
   },
   "peerDependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "typescript": "^5.9.3",
+    "typescript": "7.0.2",
     "vite": "^8.0.16"
   },
   "peerDependenciesMeta": {

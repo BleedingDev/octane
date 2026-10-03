@@ -111,3 +111,40 @@ test('preserves module directives and pure annotations on surrounding expression
 	});
 	assert.doesNotMatch(compiled.code, /sideEffect/);
 });
+
+test('replacements preserve precedence, escaped messages and surrounding source comments', async () => {
+	const source = `'use client';
+${importFormatter}
+// 🐙 Preserve this heading and its UTF-16 offsets.
+export function values() {
+	/* Keep this comment before the expressions. */
+	return [
+		formatClientError(313).length,
+		2 * formatClientError(313).length,
+		!formatClientError(313),
+		'prefix:' + formatClientError(313),
+	]; // Preserve the trailing comment.
+}
+/* Preserve the final comment. */`;
+	const specialized = specializeErrorCalls(source, 'dom-bindings.ts', catalog);
+	assert.equal(specializeErrorCalls(source, 'dom-bindings.ts', catalog), specialized);
+	for (const comment of [
+		'// 🐙 Preserve this heading and its UTF-16 offsets.',
+		'/* Keep this comment before the expressions. */',
+		'// Preserve the trailing comment.',
+		'/* Preserve the final comment. */',
+	])
+		assert.ok(specialized.includes(comment), comment);
+	const result = await execute(specialized);
+	for (const mode of ['development', 'production']) {
+		result.process.env.NODE_ENV = mode;
+		const message =
+			mode === 'production' ? formatProdErrorMessage(313, []) : catalog.codes['313'].message;
+		assert.deepEqual(
+			[...result.exports.values()],
+			[message.length, 2 * message.length, !message, 'prefix:' + message],
+		);
+	}
+	const malformed = `${importFormatter} export const broken = formatClientError(313 + ;`;
+	assert.equal(specializeErrorCalls(malformed, 'dom-bindings.ts', catalog), malformed);
+});
