@@ -24,9 +24,10 @@ const options = {
 	types: [],
 	noEmit: true,
 };
-// Resolve the consumer's explicit dependency from Octane's declared installation.
-const sourcePath = resolve(packageRoot, 'ultramodern-native-public-types.ts');
-const source = [
+// Keep browser declarations independent of Node's ambient types. The existing
+// server entry includes the typed Node stream API, so check producer consumers
+// separately with the declared Node environment rather than weakening this case.
+const clientSource = [
 	"import type { ReactiveNode } from 'alien-signals/system';",
 	"import type { ScopedNode, SignalObserver } from './dist/signals/graph.js';",
 	'declare const node: ScopedNode;',
@@ -34,27 +35,49 @@ const source = [
 	'const nativeNode: ReactiveNode = node;',
 	'const nativeObserver: ReactiveNode = observer;',
 	'void nativeNode; void nativeObserver;',
-	"import { createContext, externalSnapshotBoundary, registerExternalSnapshotContext } from './dist/index.js';",
+	"import { createContext, decodeExternalSnapshotRequest, externalSnapshotBoundary, registerExternalSnapshotContext } from './dist/index.js';",
 	"import type { ComponentBody, ExternalSnapshotAuthority, ExternalSnapshot } from './dist/index.js';",
-	"import { decodeExternalSnapshotRequest, renderExternalSnapshot, serializeExternalSnapshot } from './dist/server/index.js';",
 	"const Theme = createContext({ title: 'host' });",
 	"const unregister = registerExternalSnapshotContext(Theme, { key: 'theme', encode: value => value.title, decode: async (value, signal) => { signal?.throwIfAborted(); return { title: String(value) }; } });",
-	"const Local = createContext({ name: 'local' });",
 	"const authority: ExternalSnapshotAuthority = { publisherBuildId: 'published-client', runtimeABI: 1 };",
 	'declare const nativeComponent: ComponentBody<{ count: number }>;',
 	'declare const snapshot: ExternalSnapshot;',
 	'const Boundary = externalSnapshotBoundary({ authority, component: nativeComponent, contextKeys: ["theme"], snapshot: async (request, signal) => {',
 	'  const admitted = decodeExternalSnapshotRequest(request, authority);',
-	'  const result = await renderExternalSnapshot(() => "publisher output", admitted, { authority, ...(signal === undefined ? {} : { signal }), initializeContexts(provide) { provide(Local, { name: "endpoint" }); } });',
-	'  serializeExternalSnapshot(result); return snapshot;',
+	'  void admitted; void signal; return snapshot;',
 	'} });',
 	'const typedBoundary: ComponentBody<{ count: number }> = Boundary;',
 	'void typedBoundary; unregister();',
 ].join('\n');
-const configPath = resolve(packageRoot, 'ultramodern-native-public-types.tsconfig.json');
+const serverSource = [
+	"import { createContext, decodeExternalSnapshotRequest, renderExternalSnapshot, serializeExternalSnapshot } from './dist/server/index.js';",
+	"import type { ExternalSnapshotAuthority, ExternalSnapshotRequest } from './dist/server/index.js';",
+	"const Local = createContext({ name: 'local' });",
+	"const authority: ExternalSnapshotAuthority = { publisherBuildId: 'published-client', runtimeABI: 1 };",
+	'declare const request: ExternalSnapshotRequest;',
+	'declare const signal: AbortSignal;',
+	'const admitted = decodeExternalSnapshotRequest(request, authority);',
+	'const result = await renderExternalSnapshot(() => "publisher output", admitted, { authority, signal, initializeContexts(provide) { provide(Local, { name: "endpoint" }); } });',
+	'serializeExternalSnapshot(result);',
+].join('\n');
+const consumers = [
+	{ name: 'client', source: clientSource, types: [] },
+	{ name: 'server', source: serverSource, types: ['node'] },
+].map((consumer) => ({
+	...consumer,
+	sourcePath: resolve(packageRoot, `ultramodern-native-${consumer.name}-public-types.ts`),
+	configPath: resolve(
+		packageRoot,
+		`ultramodern-native-${consumer.name}-public-types.tsconfig.json`,
+	),
+}));
 const virtualFiles = createVirtualFileSystem({
-	[sourcePath]: source,
-	[configPath]: JSON.stringify({ compilerOptions: options, files: [sourcePath] }),
+	...Object.fromEntries(
+		consumers.flatMap(({ sourcePath, source, configPath, types }) => [
+			[sourcePath, source],
+			[configPath, JSON.stringify({ compilerOptions: { ...options, types }, files: [sourcePath] })],
+		]),
+	),
 });
 const api = new API({
 	cwd: packageRoot,
@@ -64,24 +87,28 @@ const api = new API({
 	},
 });
 try {
-	const snapshot = api.updateSnapshot({ openProjects: [configPath] });
+	const snapshot = api.updateSnapshot({
+		openProjects: consumers.map(({ configPath }) => configPath),
+	});
 	try {
-		const project = snapshot.getProject(configPath);
-		assert(project, 'The native TypeScript consumer project must load.');
-		const { program } = project;
-		const diagnostics = [
-			...program.getConfigFileParsingDiagnostics(),
-			...program.getProgramDiagnostics(),
-			...program.getGlobalDiagnostics(),
-			...program.getSyntacticDiagnostics(),
-			...program.getSemanticDiagnostics(),
-		];
-		if (diagnostics.length) console.error(JSON.stringify(diagnostics, null, 2));
-		assert.equal(
-			diagnostics.length,
-			0,
-			'Published native graph and snapshot types must honor canonical consumer flags.',
-		);
+		for (const { name, configPath } of consumers) {
+			const project = snapshot.getProject(configPath);
+			assert(project, 'The native TypeScript consumer project must load.');
+			const { program } = project;
+			const diagnostics = [
+				...program.getConfigFileParsingDiagnostics(),
+				...program.getProgramDiagnostics(),
+				...program.getGlobalDiagnostics(),
+				...program.getSyntacticDiagnostics(),
+				...program.getSemanticDiagnostics(),
+			];
+			if (diagnostics.length) console.error(JSON.stringify(diagnostics, null, 2));
+			assert.equal(
+				diagnostics.length,
+				0,
+				`Published native ${name} types must honor canonical consumer flags.`,
+			);
+		}
 	} finally {
 		snapshot.dispose();
 	}
@@ -89,5 +116,5 @@ try {
 	api.close();
 }
 console.log(
-	'Native graph and snapshot declarations: canonical strict flags, types:[], skipLibCheck:false passed.',
+	'Native declarations: strict browser types:[] and server types:[node], skipLibCheck:false passed.',
 );
