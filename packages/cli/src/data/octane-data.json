@@ -1294,7 +1294,7 @@
     },
     {
       "name": "@octanejs/tanstack-router",
-      "version": "0.1.60+ultramodern.6c31d4be4768",
+      "version": "0.1.60+ultramodern.0b9f76ee3003",
       "category": "Routing",
       "upstream": { "package": "@tanstack/react-router", "version": "1.170.18" },
       "surface": "Octane's TanStack Router binding: typed route factories and hooks, the full Match pipeline and lifecycle, file routes with TSRX-aware generator integration, full Link navigation/preloading/masking behavior, blocking, Await/deferred hydration, scroll restoration, lazy routes, not-found handling, document/head assets, and client/server SSR entries.",

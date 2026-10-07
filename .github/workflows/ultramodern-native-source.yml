@@ -1,0 +1,127 @@
+name: UltraModern native source
+
+on:
+  pull_request:
+    branches: [ultramodern/signal-owner-0.7.1]
+  push:
+    branches: [ultramodern/signal-owner-0.7.1, "fix/ultramodern-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native_source:
+    name: native build, RPC, compiler, and public types
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 11.15.1
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.10.0
+
+      # This host is a separate one-package workspace. Running root pnpm
+      # commands would also install the unrelated binding workspaces.
+      - name: Install frozen native build host
+        working-directory: scripts/ultramodern-build-host
+        run: >-
+          pnpm install --frozen-lockfile
+          --store-dir "$RUNNER_TEMP/pnpm-store"
+          --package-import-method clone-or-copy
+
+      - name: Prepare independent native source tools
+        run: node scripts/ultramodern-build-host/prepare.mjs
+
+      - name: Test native build helpers
+        run: >-
+          node --test
+          packages/octane/scripts/bundle-volar.test.mjs
+          scripts/ultramodern-build-host/check-tsrx-project.test.mjs
+
+      - name: Test RPC and private compiler entrypoints in development
+        env:
+          OCTANE_TEST_COMPILE_MODE: dev
+        run: >-
+          scripts/ultramodern-build-host/node_modules/.bin/vitest run
+          --config scripts/ultramodern-build-host/vitest.config.mjs
+          --silent=false
+          packages/octane/tests/server-rpc.test.ts
+          packages/octane/tests/compiler/private-runtime-entrypoints.test.ts
+
+      - name: Test RPC and private compiler entrypoints in production
+        env:
+          OCTANE_TEST_COMPILE_MODE: prod
+        run: >-
+          scripts/ultramodern-build-host/node_modules/.bin/vitest run
+          --config scripts/ultramodern-build-host/vitest.config.mjs
+          --silent=false
+          packages/octane/tests/server-rpc.test.ts
+          packages/octane/tests/compiler/private-runtime-entrypoints.test.ts
+
+      - name: Check native error codes
+        run: node scripts/error-codes/generate.mjs --check
+
+      - name: Build native package
+        run: node packages/octane/scripts/build.mjs
+
+      - name: Check built public types
+        run: node scripts/ultramodern-build-host/check-public-types.mjs
+
+      - name: Exercise built Node RPC with patched devalue
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { Buffer } from 'node:buffer';
+          import { readFileSync } from 'node:fs';
+          import * as devalue from 'devalue';
+          import { executeServerFunction } from './packages/octane/dist/node/server/index.js';
+
+          const dependency = JSON.parse(readFileSync('node_modules/devalue/package.json', 'utf8'));
+          const manifest = JSON.parse(readFileSync('packages/octane/package.json', 'utf8'));
+          assert.equal(dependency.version, manifest.dependencies.devalue);
+          assert.equal(dependency.version, '5.9.3');
+
+          const backing = new Uint8Array(64).fill(99);
+          backing.set([12, 34], 10);
+          const response = await executeServerFunction(
+            () => Buffer.from(backing.buffer, 10, 2),
+            devalue.stringify([]),
+          );
+          const bytes = devalue.parse(response).value;
+          assert.deepEqual([...bytes], [12, 34]);
+          assert.deepEqual([...new Uint8Array(bytes.buffer)], [12, 34]);
+
+          const payload = {
+            when: new Date(0),
+            tags: new Map([['a', 1]]),
+            set: new Set([1, 2]),
+            missing: undefined,
+            large: 42n,
+            negativeZero: -0,
+          };
+          const roundTrip = await executeServerFunction(value => value, devalue.stringify([payload]));
+          assert.deepEqual(devalue.parse(roundTrip).value, payload);
+          console.log('Built Node RPC preserved Buffer bounds and rich values.');
+          NODE
+
+      - name: Verify source and frozen lockfiles stayed unchanged
+        run: >-
+          git diff --exit-code --
+          packages/octane/src
+          pnpm-lock.yaml
+          scripts/ultramodern-build-host/pnpm-lock.yaml
