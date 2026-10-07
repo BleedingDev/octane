@@ -2,9 +2,9 @@ name: UltraModern native source
 
 on:
   pull_request:
-    branches: [ultramodern/signal-owner-0.7.1]
+    branches: [ultramodern/signal-owner-0.7.1, fix/ultramodern-devalue-5.9.3]
   push:
-    branches: [ultramodern/signal-owner-0.7.1, "fix/ultramodern-*"]
+    branches: [ultramodern/signal-owner-0.7.1, "fix/ultramodern-*", feat/ultramodern-external-snapshot]
   workflow_dispatch:
 
 permissions:
@@ -75,6 +75,44 @@ jobs:
 
       - name: Check native error codes
         run: node scripts/error-codes/generate.mjs --check
+
+      - name: Test snapshot and document ownership in development
+        env:
+          OCTANE_TEST_COMPILE_MODE: dev
+        run: >-
+          node_modules/.bin/vitest run
+          --config scripts/ultramodern-build-host/vitest.config.mjs
+          packages/octane/tests/hydration/external-snapshot.test.ts
+          packages/octane/tests/hydration/all-component-root.test.ts
+          packages/octane/tests/hydration/streamed-authority.test.ts
+          packages/octane/tests/hydration/provider-ssr-hydrate.test.ts
+          packages/octane/tests/hydration/initial-document-signals.test.ts
+          packages/octane/tests/hydration/stream-delivery.test.ts
+          packages/octane/tests/hydration/automatic-signal-stream.test.ts
+          packages/octane/tests/hydration/document-lifecycle.test.ts
+          packages/octane/tests/hydration/document-signal-owner.test.ts
+          packages/octane/tests/hydration/independent-parent.test.ts
+          packages/octane/tests/hydration/nested-head.test.ts
+          packages/octane/tests/ssr-render-phase-state.test.ts
+
+      - name: Test snapshot and document ownership in production
+        env:
+          OCTANE_TEST_COMPILE_MODE: prod
+        run: >-
+          node_modules/.bin/vitest run
+          --config scripts/ultramodern-build-host/vitest.config.mjs
+          packages/octane/tests/hydration/external-snapshot.test.ts
+          packages/octane/tests/hydration/all-component-root.test.ts
+          packages/octane/tests/hydration/streamed-authority.test.ts
+          packages/octane/tests/hydration/provider-ssr-hydrate.test.ts
+          packages/octane/tests/hydration/initial-document-signals.test.ts
+          packages/octane/tests/hydration/stream-delivery.test.ts
+          packages/octane/tests/hydration/automatic-signal-stream.test.ts
+          packages/octane/tests/hydration/document-lifecycle.test.ts
+          packages/octane/tests/hydration/document-signal-owner.test.ts
+          packages/octane/tests/hydration/independent-parent.test.ts
+          packages/octane/tests/hydration/nested-head.test.ts
+          packages/octane/tests/ssr-render-phase-state.test.ts
 
       - name: Build native package
         run: node packages/octane/scripts/build.mjs
