@@ -10,3 +10,5 @@ minimumReleaseAgeExclude:
   - '@tsrx/typescript-plugin@0.6.0'
 allowBuilds:
   esbuild: true
+  # Match the root policy: this updater is opt-in and unnecessary for sync.
+  tldjs: false

@@ -4,7 +4,8 @@ on:
   pull_request:
     branches: [ultramodern/signal-owner-0.7.1, fix/ultramodern-devalue-5.9.3]
   push:
-    branches: [ultramodern/signal-owner-0.7.1, "fix/ultramodern-*", feat/ultramodern-external-snapshot]
+    branches:
+      [ultramodern/signal-owner-0.7.1, "fix/ultramodern-*", feat/ultramodern-external-snapshot]
   workflow_dispatch:
 
 permissions:
@@ -46,6 +47,14 @@ jobs:
 
       - name: Prepare independent native source tools
         run: node scripts/ultramodern-build-host/prepare.mjs
+
+      - name: Prepare installed peers for repository sync
+        run: node scripts/ultramodern-build-host/prepare-sync.mjs
+
+      - name: Synchronize generated repository metadata
+        env:
+          pnpm_config_verify_deps_before_run: warn
+        run: pnpm --config.verify-deps-before-run=warn sync
 
       - name: Test native build helpers
         run: >-
@@ -158,8 +167,4 @@ jobs:
           NODE
 
       - name: Verify source and frozen lockfiles stayed unchanged
-        run: >-
-          git diff --exit-code --
-          packages/octane/src
-          pnpm-lock.yaml
-          scripts/ultramodern-build-host/pnpm-lock.yaml
+        run: git diff --exit-code

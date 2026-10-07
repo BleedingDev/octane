@@ -1294,7 +1294,7 @@
     },
     {
       "name": "@octanejs/tanstack-router",
-      "version": "0.1.60+ultramodern.0b9f76ee3003",
+      "version": "0.1.60+ultramodern.161c3f681f3c",
       "category": "Routing",
       "upstream": { "package": "@tanstack/react-router", "version": "1.170.18" },
       "surface": "Octane's TanStack Router binding: typed route factories and hooks, the full Match pipeline and lifecycle, file routes with TSRX-aware generator integration, full Link navigation/preloading/masking behavior, blocking, Await/deferred hydration, scroll restoration, lazy routes, not-found handling, document/head assets, and client/server SSR entries.",
@@ -3517,6 +3517,36 @@
     "336": {
       "message": "`<textarea>` children must be text: strings, numbers, or arrays of them. One child was %s. A textarea's content is its default value, so it cannot contain elements; render them outside the textarea or pass a string.",
       "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "337": {
+      "message": "Invalid native external snapshot payload or runtime ABI.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "338": {
+      "message": "External snapshot contexts require unique registered codecs and every required ancestor provider.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "339": {
+      "message": "External snapshot authority does not match its publisher, document, boundary, or request.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "340": {
+      "message": "External snapshots require a trusted document ID configured on the host renderer.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "341": {
+      "message": "An external snapshot boundary cannot change publisher authority during its mounted lifetime.",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "342": {
+      "message": "External snapshot load exceeded its boundary deadline.",
+      "runtime": ["server"],
       "status": "active"
     }
   }
