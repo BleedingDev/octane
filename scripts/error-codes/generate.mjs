@@ -164,7 +164,7 @@ export function generateFiles(catalog) {
 // independent-hydration-protocol.ts shares its manifest message with
 // hydration/independent-island.ts, so it is covered with the hydration modules.
 const COVERED_MODULE =
-	/^(?:signals\/[^/]+|hydration\/[^/]+|dom-bindings?(?:-[a-z-]+)?|independent-hydration-protocol)\.ts$/;
+	/^(?:signals\/[^/]+|hydration\/[^/]+|dom-bindings?(?:-[a-z-]+)?|independent-hydration-protocol|external-snapshot-protocol)\.ts$/;
 // Surfaces follow static import reachability from the package entries: modules
 // reachable only from client entries are "client"; only from server entries
 // (runtime.server.ts, octane/server, octane/signals/server, ...) are "server".

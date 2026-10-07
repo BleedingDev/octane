@@ -6,7 +6,36 @@ import {
 	Outlet,
 	Link,
 	createLink,
+	routerContext as RouterContext,
 } from '@octanejs/tanstack-router';
+import type { AnyRouter } from '@tanstack/router-core';
+
+export function ExternalLinkSurface(props: {
+	router: AnyRouter;
+	to: string;
+	disabled?: boolean;
+	target?: string;
+}) @{
+	<RouterContext value={props.router}>
+		<nav>
+			<Link
+				to={props.to}
+				disabled={props.disabled}
+				target={props.target}
+				preload="render"
+				class="l-current"
+			>Catalog</Link>
+			<Link
+				to="//catalog.example/products?sort=price#featured"
+				disabled
+				class="l-disabled-relative"
+			>Disabled catalog</Link>
+			<Link to="https://catalog.example/products" disabled class="l-disabled-absolute">
+				Disabled catalog
+			</Link>
+		</nav>
+	</RouterContext>
+}
 
 let lastLinkEvent: Event | undefined;
 let lastLinkRef: HTMLAnchorElement | undefined;

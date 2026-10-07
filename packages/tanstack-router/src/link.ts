@@ -168,10 +168,13 @@ export function useLinkProps(...args: any[]): Record<string, any> {
 			return hrefOption.href;
 		}
 		if (isSafeInternal(to)) return undefined;
-		if (typeof to !== 'string' || to.indexOf(':') === -1) return undefined;
+		if (typeof to !== 'string' || (to.indexOf(':') === -1 && !to.startsWith('//'))) {
+			return undefined;
+		}
 		try {
-			new URL(to);
-			if (isDangerousProtocol(to, router.protocolAllowlist)) return undefined;
+			// Resolve authored "//" only for validation; the browser keeps the raw href.
+			const url = new URL(to, to.startsWith('//') ? router.origin : undefined);
+			if (isDangerousProtocol(url.href, router.protocolAllowlist)) return undefined;
 			return to;
 		} catch {
 			/* not an absolute URL */
@@ -320,7 +323,7 @@ export function useLinkProps(...args: any[]): Record<string, any> {
 		return {
 			...propsSafeToSpread,
 			ref: composedRef,
-			href: externalLink,
+			href: disabled ? undefined : externalLink,
 			...(target !== undefined && { target }),
 			...(disabled !== undefined && { disabled }),
 			...(resolvedStyle !== undefined && { style: resolvedStyle }),
@@ -331,6 +334,7 @@ export function useLinkProps(...args: any[]): Record<string, any> {
 			...(onMouseEnter && { onMouseEnter }),
 			...(onMouseLeave && { onMouseLeave }),
 			...(onTouchStart && { onTouchStart }),
+			...(disabled && STATIC_DISABLED_PROPS),
 		};
 	}
 
@@ -368,7 +372,7 @@ export function useLinkProps(...args: any[]): Record<string, any> {
 		...propsSafeToSpread,
 		...resolvedActiveProps,
 		...resolvedInactiveProps,
-		href: hrefOption?.href,
+		href: hrefOption?.external ? undefined : hrefOption?.href,
 		ref: composedRef,
 		onClick: composeHandlers([onClick, handleClick]),
 		onBlur: composeHandlers([onBlur, handleLeave]),

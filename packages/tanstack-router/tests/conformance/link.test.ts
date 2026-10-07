@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { mount, nextPaint } from '../_helpers';
 import { RouterProvider } from '@octanejs/tanstack-router';
-import { makeLinkRouter } from '../_fixtures/link.tsrx';
+import { ExternalLinkSurface, makeLinkRouter } from '../_fixtures/link.tsrx';
 
 async function flush() {
 	for (let i = 0; i < 6; i++) {
@@ -66,6 +66,119 @@ describe('@octanejs/tanstack-router — Link', () => {
 		const dangerHref = r.find('.l-danger').getAttribute('href');
 		expect(dangerHref === null || !dangerHref.startsWith('javascript:')).toBe(true);
 		r.unmount();
+	});
+
+	it('preserves an authored protocol-relative href, target, and browser click behavior', async () => {
+		const router = makeLinkRouter('/about');
+		router.update({ origin: 'https://app.example' });
+		await router.load();
+		const navigate = vi.spyOn(router, 'navigate');
+		const preload = vi.spyOn(router, 'preloadRoute');
+		const href = '//catalog.example/products?sort=price#featured';
+		const r = mount(ExternalLinkSurface, { router, to: href, target: '_blank' });
+		try {
+			await flush();
+			const link = r.find('.l-current');
+			expect(link.getAttribute('href')).toBe(href);
+			expect(link.getAttribute('target')).toBe('_blank');
+			expect(link.getAttribute('aria-current')).toBeNull();
+			const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+			link.dispatchEvent(click);
+			await flush();
+			expect(click.defaultPrevented).toBe(false);
+			expect(navigate).not.toHaveBeenCalled();
+			expect(preload).not.toHaveBeenCalled();
+			expect(router.state.location.pathname).toBe('/about');
+		} finally {
+			r.unmount();
+			navigate.mockRestore();
+			preload.mockRestore();
+			router.history.destroy();
+		}
+	});
+
+	it('updates an external link to its current href and disabled state', async () => {
+		const router = makeLinkRouter('/');
+		router.update({ origin: 'https://app.example' });
+		await router.load();
+		const r = mount(ExternalLinkSurface, {
+			router,
+			to: '//catalog.example/first',
+			target: '_blank',
+		});
+		try {
+			expect(r.find('.l-current').getAttribute('href')).toBe('//catalog.example/first');
+			r.update(ExternalLinkSurface, {
+				router,
+				to: '//checkout.example/next?sku=tractor#paid',
+				target: '_self',
+			});
+			expect(r.find('.l-current').getAttribute('href')).toBe(
+				'//checkout.example/next?sku=tractor#paid',
+			);
+			expect(r.find('.l-current').getAttribute('target')).toBe('_self');
+			r.update(ExternalLinkSurface, { router, to: '//checkout.example/next', disabled: true });
+			expect(r.find('.l-current').getAttribute('href')).toBeNull();
+			expect(r.find('.l-current').getAttribute('aria-disabled')).toBe('true');
+			expect(r.find('.l-current').getAttribute('role')).toBe('link');
+			r.update(ExternalLinkSurface, { router, to: 'https://catalog.example/enabled' });
+			expect(r.find('.l-current').getAttribute('href')).toBe('https://catalog.example/enabled');
+			expect(r.find('.l-current').getAttribute('aria-disabled')).toBeNull();
+			expect(r.find('.l-current').getAttribute('role')).toBeNull();
+			expect(r.find('.l-current').getAttribute('target')).toBeNull();
+		} finally {
+			r.unmount();
+			router.history.destroy();
+		}
+	});
+
+	it('constant-disabled external links have no live href and expose their disabled state', async () => {
+		const router = makeLinkRouter('/');
+		await router.load();
+		const r = mount(ExternalLinkSurface, { router, to: '/about' });
+		try {
+			for (const selector of ['.l-disabled-relative', '.l-disabled-absolute']) {
+				const link = r.find(selector);
+				expect(link.getAttribute('href')).toBeNull();
+				expect(link.getAttribute('aria-disabled')).toBe('true');
+				expect(link.getAttribute('role')).toBe('link');
+			}
+		} finally {
+			r.unmount();
+			router.history.destroy();
+		}
+	});
+
+	it.each([
+		'javascript:alert(1)',
+		'JaVaScRiPt:alert(1)',
+		'java\nscript:alert(1)',
+		'\tjavascript:alert(1)',
+		'data:text/html,unsafe',
+	])('never exposes an unsafe authored protocol: %s', async (to) => {
+		const router = makeLinkRouter('/');
+		await router.load();
+		const r = mount(ExternalLinkSurface, { router, to });
+		try {
+			const href = r.find('.l-current').getAttribute('href');
+			expect(href === null || new URL(href, router.origin).protocol === 'http:').toBe(true);
+		} finally {
+			r.unmount();
+			router.history.destroy();
+		}
+	});
+
+	it('does not expose an unsafe origin-changing rewrite as a live href', async () => {
+		const router = makeLinkRouter('/');
+		await router.load();
+		router.update({ rewrite: { output: () => new URL('data:text/html,unsafe') } });
+		const r = mount(ExternalLinkSurface, { router, to: '/about' });
+		try {
+			expect(r.find('.l-current').getAttribute('href')).toBeNull();
+		} finally {
+			r.unmount();
+			router.history.destroy();
+		}
 	});
 
 	it('disabled links drop the href and expose role="link" + aria-disabled', async () => {

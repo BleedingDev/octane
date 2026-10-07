@@ -8,6 +8,7 @@ let defaultInstalled = false;
 /** @internal Actual document capability, shared with an optional renderer. */
 export let signalDocumentEnabled = false;
 export let streamedSignalOwnerActivator: ((owner: SignalOwner) => void) | undefined;
+const streamedOwnerActivators = new Map<SignalOwnerIdentity, (owner: SignalOwner) => void>();
 
 /** @internal Shared document identity for state-only and component consumers. */
 export function documentSignalOwner(container: Node): SignalOwnerIdentity {
@@ -37,12 +38,19 @@ export function enableSignalDocument(abi = 1): void {
 /** @internal Instance activation is optional; global results need no component root. */
 export function installStreamedSignalOwnerActivator(
 	activate: (owner: SignalOwner) => void,
+	documentOwner: SignalOwnerIdentity,
 ): () => void {
-	if (streamedSignalOwnerActivator !== undefined) {
+	if (streamedOwnerActivators.has(documentOwner)) {
 		throw new Error(formatClientError(124));
 	}
-	streamedSignalOwnerActivator = activate;
+	streamedOwnerActivators.set(documentOwner, activate);
+	streamedSignalOwnerActivator ??= (owner) => {
+		const identity = 'documentOwner' in owner ? owner.documentOwner : owner;
+		streamedOwnerActivators.get(identity)?.(owner);
+	};
 	return () => {
-		if (streamedSignalOwnerActivator === activate) streamedSignalOwnerActivator = undefined;
+		if (streamedOwnerActivators.get(documentOwner) !== activate) return;
+		streamedOwnerActivators.delete(documentOwner);
+		if (streamedOwnerActivators.size === 0) streamedSignalOwnerActivator = undefined;
 	};
 }

@@ -251,3 +251,23 @@ export {
 	warmMemo,
 	warmChild,
 } from '../runtime.server.js';
+
+export {
+	externalSnapshotBoundary,
+	renderExternalSnapshot,
+	type ExternalSnapshotRenderOptions,
+} from '../runtime.server.js';
+export {
+	registerExternalSnapshotContext,
+	decodeExternalSnapshot,
+	decodeExternalSnapshotRequest,
+	serializeExternalSnapshot,
+	serializeExternalSnapshotRequest,
+} from '../external-snapshot-protocol.js';
+export type {
+	ExternalSnapshot,
+	ExternalSnapshotRequest,
+	ExternalSnapshotAuthority,
+	ExternalSnapshotContextCodec,
+	ExternalSnapshotBoundaryOptions,
+} from '../external-snapshot-protocol.js';

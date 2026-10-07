@@ -241,6 +241,11 @@ type ServerErrorArguments = {
 	334: [unknown];
 	335: [unknown];
 	336: [unknown];
+	337: [];
+	338: [];
+	339: [];
+	340: [];
+	342: [];
 };
 
 export function formatServerError<Code extends keyof ServerErrorArguments>(
@@ -990,6 +995,31 @@ export function formatServerError<Code extends keyof ServerErrorArguments>(
 			case 336:
 				return formatDevErrorMessage(
 					"`<textarea>` children must be text: strings, numbers, or arrays of them. One child was %s. A textarea's content is its default value, so it cannot contain elements; render them outside the textarea or pass a string.",
+					args,
+				);
+			case 337:
+				return formatDevErrorMessage(
+					'Invalid native external snapshot payload or runtime ABI.',
+					args,
+				);
+			case 338:
+				return formatDevErrorMessage(
+					'External snapshot contexts require unique registered codecs and every required ancestor provider.',
+					args,
+				);
+			case 339:
+				return formatDevErrorMessage(
+					'External snapshot authority does not match its publisher, document, boundary, or request.',
+					args,
+				);
+			case 340:
+				return formatDevErrorMessage(
+					'External snapshots require a trusted document ID configured on the host renderer.',
+					args,
+				);
+			case 342:
+				return formatDevErrorMessage(
+					'External snapshot load exceeded its boundary deadline.',
 					args,
 				);
 			default:

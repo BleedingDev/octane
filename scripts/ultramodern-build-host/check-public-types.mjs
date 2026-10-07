@@ -34,6 +34,22 @@ const source = [
 	'const nativeNode: ReactiveNode = node;',
 	'const nativeObserver: ReactiveNode = observer;',
 	'void nativeNode; void nativeObserver;',
+	"import { createContext, externalSnapshotBoundary, registerExternalSnapshotContext } from './dist/index.js';",
+	"import type { ComponentBody, ExternalSnapshotAuthority, ExternalSnapshot } from './dist/index.js';",
+	"import { decodeExternalSnapshotRequest, renderExternalSnapshot, serializeExternalSnapshot } from './dist/server/index.js';",
+	"const Theme = createContext({ title: 'host' });",
+	"const unregister = registerExternalSnapshotContext(Theme, { key: 'theme', encode: value => value.title, decode: async (value, signal) => { signal?.throwIfAborted(); return { title: String(value) }; } });",
+	"const Local = createContext({ name: 'local' });",
+	"const authority: ExternalSnapshotAuthority = { publisherBuildId: 'published-client', runtimeABI: 1 };",
+	'declare const nativeComponent: ComponentBody<{ count: number }>;',
+	'declare const snapshot: ExternalSnapshot;',
+	'const Boundary = externalSnapshotBoundary({ authority, component: nativeComponent, contextKeys: ["theme"], snapshot: async (request, signal) => {',
+	'  const admitted = decodeExternalSnapshotRequest(request, authority);',
+	'  const result = await renderExternalSnapshot(() => "publisher output", admitted, { authority, ...(signal === undefined ? {} : { signal }), initializeContexts(provide) { provide(Local, { name: "endpoint" }); } });',
+	'  serializeExternalSnapshot(result); return snapshot;',
+	'} });',
+	'const typedBoundary: ComponentBody<{ count: number }> = Boundary;',
+	'void typedBoundary; unregister();',
 ].join('\n');
 const configPath = resolve(packageRoot, 'ultramodern-native-public-types.tsconfig.json');
 const virtualFiles = createVirtualFileSystem({
@@ -64,7 +80,7 @@ try {
 		assert.equal(
 			diagnostics.length,
 			0,
-			'Published native graph types must honor canonical consumer flags.',
+			'Published native graph and snapshot types must honor canonical consumer flags.',
 		);
 	} finally {
 		snapshot.dispose();
@@ -73,5 +89,5 @@ try {
 	api.close();
 }
 console.log(
-	'Native graph declaration closure: canonical strict flags, types:[], skipLibCheck:false passed.',
+	'Native graph and snapshot declarations: canonical strict flags, types:[], skipLibCheck:false passed.',
 );

@@ -315,6 +315,11 @@ type ClientErrorArguments = {
 	330: [];
 	331: [];
 	336: [unknown];
+	337: [];
+	338: [];
+	339: [];
+	340: [];
+	341: [];
 };
 
 export function formatClientError<Code extends keyof ClientErrorArguments>(
@@ -1374,6 +1379,31 @@ export function formatClientError<Code extends keyof ClientErrorArguments>(
 			case 336:
 				return formatDevErrorMessage(
 					"`<textarea>` children must be text: strings, numbers, or arrays of them. One child was %s. A textarea's content is its default value, so it cannot contain elements; render them outside the textarea or pass a string.",
+					args,
+				);
+			case 337:
+				return formatDevErrorMessage(
+					'Invalid native external snapshot payload or runtime ABI.',
+					args,
+				);
+			case 338:
+				return formatDevErrorMessage(
+					'External snapshot contexts require unique registered codecs and every required ancestor provider.',
+					args,
+				);
+			case 339:
+				return formatDevErrorMessage(
+					'External snapshot authority does not match its publisher, document, boundary, or request.',
+					args,
+				);
+			case 340:
+				return formatDevErrorMessage(
+					'External snapshots require a trusted document ID configured on the host renderer.',
+					args,
+				);
+			case 341:
+				return formatDevErrorMessage(
+					'An external snapshot boundary cannot change publisher authority during its mounted lifetime.',
 					args,
 				);
 			default:

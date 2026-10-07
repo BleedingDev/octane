@@ -86,6 +86,7 @@ export {
 	Suspense,
 	ErrorBoundary,
 	Hydrate,
+	externalSnapshotBoundary,
 	__HydrateCompiled,
 	Activity,
 	// React shipped Activity as unstable_Activity before 19.2 — alias it so
@@ -318,3 +319,18 @@ export { batchServerCalls, type ServerCallBatchOptions } from './server-rpc-batc
 
 // Semi-public compiler target for inferred method-call dependencies.
 export { __methodDep } from './method-dep.js';
+
+export {
+	registerExternalSnapshotContext,
+	decodeExternalSnapshot,
+	decodeExternalSnapshotRequest,
+	serializeExternalSnapshot,
+	serializeExternalSnapshotRequest,
+} from './external-snapshot-protocol.js';
+export type {
+	ExternalSnapshot,
+	ExternalSnapshotRequest,
+	ExternalSnapshotAuthority,
+	ExternalSnapshotContextCodec,
+	ExternalSnapshotBoundaryOptions,
+} from './external-snapshot-protocol.js';

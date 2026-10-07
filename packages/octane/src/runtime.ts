@@ -134,6 +134,15 @@ import type {
 	HydrationStrategy,
 	HydrationWhen,
 } from './hydration/types.js';
+import {
+	EXTERNAL_SNAPSHOT_ATTR,
+	decodeExternalSnapshotRequest,
+	externalSnapshotOwnerKey,
+	validateExternalSnapshotAuthority,
+	type ExternalSnapshotBoundaryOptions,
+	type ExternalSnapshotAuthority,
+} from './external-snapshot-protocol.js';
+import { bootstrapStreamedSignalHydration } from './hydration/streamed-signals.js';
 import type {
 	IndependentHydrateActivationContext,
 	IndependentHydrateActivator,
@@ -970,7 +979,7 @@ function stampSignalInstance(
 function scopeSignalOwner(scope: Scope | null): SignalOwner | undefined {
 	if (scope === null) return;
 	const root = scope.block.idState.renderOwner;
-	let documentOwner = root?.signalOwner;
+	let documentOwner = scope.block.idState.dataOwner ?? root?.signalOwner;
 	if (documentOwner === undefined && signalDocumentEnabled) {
 		documentOwner = documentSignalOwner(scope.block.parentNode);
 		if (root !== undefined) root.signalOwner = documentOwner;
@@ -988,7 +997,11 @@ function scopeSignalOwner(scope: Scope | null): SignalOwner | undefined {
 		// its parent's cells, and a retired fragment must never reacquire them.
 		let parent = scope.parent ?? scope.block.parentBlock;
 		if (parent instanceof LiteBlockImpl) parent = parent.scope;
-		if (parent !== null) {
+		if (
+			parent !== null &&
+			(parent.block.idState.dataOwner ?? parent.block.idState.renderOwner?.signalOwner) ===
+				documentOwner
+		) {
 			SCOPE_SIGNAL_OWNERS.set(scope, false);
 			return scopeSignalOwner(parent);
 		}
@@ -1586,6 +1599,13 @@ function takeNativeFreshArm(
 		prefix: ids.prefix + 'n' + (nextClientRootId++).toString(36) + '-',
 		next: 0,
 		renderOwner: ids.renderOwner,
+		...(ids.dataOwner === undefined
+			? {}
+			: {
+					dataOwner: ids.dataOwner,
+					externalNamespace: true as const,
+					signalState: ids.signalState,
+				}),
 	};
 }
 
@@ -1861,6 +1881,9 @@ const RENDER_RETRYING = 2;
 type OutputHandler = (block: Block, value: unknown, reset?: true) => void;
 
 interface RootIdState {
+	/** Optional data authority for a parent-owned externally rendered boundary. */
+	dataOwner?: SignalOwner;
+	externalNamespace?: true;
 	prefix: string;
 	next: number;
 	/** Shared deterministic namespace for lazily used module-signal instances. */
@@ -3526,6 +3549,7 @@ let TRANSITION_JOURNAL_DEPTH = 0;
 let TRANSITION_JOURNAL_REPLAYING = false;
 
 interface RootRenderOwner {
+	externalSnapshotDocumentId?: string;
 	current: Block | null;
 	/** Shared document/account data owner; distinct from this root's presentation owner. */
 	signalOwner?: SignalOwner;
@@ -14381,7 +14405,23 @@ const HYDRATE_STREAM_SCAN_MASK = 1 /* SHOW_ELEMENT */ | 128; /* SHOW_COMMENT */
 
 type HydrateLoadResult = ComponentBody | { default: ComponentBody };
 
+interface ExternalHydrateDescriptor {
+	readonly authority: ExternalSnapshotAuthority;
+	readonly initialize: (
+		wrapper: HTMLElement,
+		boundaryId: string,
+		documentId: string,
+		serverPreserved: boolean,
+	) => { owner: SignalOwner; identifierPrefix: string };
+	readonly openStream: (
+		owner: SignalOwner,
+		documentId: string,
+		target: Record<string, unknown>,
+	) => () => void;
+}
+
 type InternalHydrateProps = HydrateProps & {
+	readonly __external?: ExternalHydrateDescriptor;
 	/** Compiler-injected split-child loader. */
 	__load?: () => Promise<HydrateLoadResult>;
 	/** Latest lexical values consumed by the compiler-generated split child. */
@@ -15365,7 +15405,7 @@ function createHydrateSlot(
 	let seedRaw: string | null = null;
 	let nativeSeedRaw: string | null = null;
 	let idState = parentBlock.idState;
-	if (serverPreserved) {
+	if (serverPreserved && props.__external === undefined) {
 		const rawCount = (STAGED_DOM?.view(wrapper) ?? wrapper).getAttribute(HYDRATE_ID_COUNT_ATTR);
 		const parsedCount = rawCount === null ? 0 : Number(rawCount);
 		const idCount = Number.isSafeInteger(parsedCount) && parsedCount >= 0 ? parsedCount : 0;
@@ -15379,8 +15419,38 @@ function createHydrateSlot(
 			limit: childStart + idCount,
 			overflow: rootIds,
 			renderOwner: rootIds.renderOwner,
+			...(rootIds.dataOwner === undefined
+				? {}
+				: {
+						dataOwner: rootIds.dataOwner,
+						externalNamespace: true as const,
+						signalState: rootIds.signalState,
+					}),
 		};
 		(STAGED_DOM?.view(wrapper) ?? wrapper).removeAttribute(HYDRATE_ID_COUNT_ATTR);
+	}
+	let externalOwner: SignalOwner | undefined;
+	let releaseExternalStream: (() => void) | undefined;
+	if (props.__external !== undefined) {
+		const documentId = parentBlock.idState.renderOwner?.externalSnapshotDocumentId;
+		if (typeof documentId !== 'string' || documentId.length === 0)
+			throw new TypeError(formatClientError(340));
+		const identity = props.__external.initialize(wrapper, boundaryId, documentId, serverPreserved);
+		externalOwner = identity.owner;
+		idState = {
+			prefix: identity.identifierPrefix,
+			next: 0,
+			signalState: { prefix: identity.identifierPrefix, next: 0 },
+			renderOwner: parentBlock.idState.renderOwner,
+			dataOwner: externalOwner,
+			externalNamespace: true,
+		};
+		if (serverPreserved)
+			releaseExternalStream = props.__external.openStream(
+				externalOwner,
+				documentId,
+				wrapper.ownerDocument.defaultView as unknown as Record<string, unknown>,
+			);
 	}
 	// An independent root may already have compacted its server ranges. The
 	// parent reserves its IDs but owns only the wrapper, never its child list or
@@ -15423,6 +15493,15 @@ function createHydrateSlot(
 		undefined,
 	);
 	block.idState = idState;
+	if (externalOwner !== undefined) {
+		stampSignalInstanceKey(block, rootSignalInstanceKey(idState));
+		const owner = externalOwner;
+		const releaseStream = releaseExternalStream;
+		registerHookCleanup(block, () => {
+			releaseStream?.();
+			retireRendererSignalOwner(owner);
+		});
+	}
 	let state!: HydrateSlot;
 	const intentBoundary: HydrationIntentBoundary = (eventType, intent) =>
 		handleRegisteredHydrationIntent(state, eventType, intent);
@@ -15616,6 +15695,13 @@ function activateHydrateBoundary(state: HydrateSlot): void {
 			prefix: state.idState.prefix + 'n' + (nextClientRootId++).toString(36) + '-',
 			next: 0,
 			renderOwner: state.idState.renderOwner,
+			...(state.idState.dataOwner === undefined
+				? {}
+				: {
+						dataOwner: state.idState.dataOwner,
+						externalNamespace: true as const,
+						signalState: state.idState.signalState,
+					}),
 		};
 		const recoveryCapture = createOffscreenCapture();
 		const recoveryHydration = currentHydration;
@@ -15832,6 +15918,12 @@ function initializeHydrateComponent(
 			if (state === undefined) {
 				state = createHydrateSlot(props, scope, boundaryId, boundaryBody);
 			} else {
+				if (
+					state.props.__external?.authority.publisherBuildId !==
+						props.__external?.authority.publisherBuildId ||
+					state.props.__external?.authority.runtimeABI !== props.__external?.authority.runtimeABI
+				)
+					throw new TypeError(formatClientError(341));
 				if (state.independent !== (props.__independent !== undefined)) {
 					throw new Error(formatClientError(66));
 				}
@@ -15911,6 +16003,64 @@ export const Hydrate: ComponentBody<HydrateProps> =
 /** Compiler-owned template children with no authored fallback; never a descriptor entry point. */
 export const __HydrateCompiled: ComponentBody<HydrateProps> =
 	/* @__PURE__ */ initializeHydrateComponent(compiledHydrateBoundaryBody);
+
+/** Adopt external native output inside the existing parent scope and render owner. */
+export function externalSnapshotBoundary<P>(
+	options: ExternalSnapshotBoundaryOptions<P, ComponentBody<P>>,
+): ComponentBody<P> {
+	validateExternalSnapshotAuthority(options.authority);
+	const authority = Object.freeze({ ...options.authority });
+	// Only this opt-in factory reaches the streamed transport implementation.
+	const descriptor: ExternalHydrateDescriptor = {
+		authority,
+		initialize: (wrapper, boundaryId, documentId, serverPreserved) => {
+			if (serverPreserved) {
+				const sidecar = findHydrateSeedSidecar(wrapper, EXTERNAL_SNAPSHOT_ATTR);
+				if (sidecar === null) throw new TypeError(formatClientError(339));
+				const request = decodeExternalSnapshotRequest(domNode(sidecar).textContent ?? '');
+				if (
+					request.authority.publisherBuildId !== authority.publisherBuildId ||
+					request.authority.runtimeABI !== authority.runtimeABI ||
+					request.documentId !== documentId ||
+					request.boundaryId !== boundaryId ||
+					domNode(wrapper).getAttribute(HYDRATE_ID_ATTR) !== boundaryId ||
+					domNode(wrapper).getAttribute(HYDRATE_ID_COUNT_ATTR) !== '0'
+				)
+					throw new TypeError(formatClientError(339));
+				domNode(sidecar).remove();
+				domNode(wrapper).removeAttribute(HYDRATE_ID_COUNT_ATTR);
+			}
+			return {
+				owner: Object.freeze({ scopeKey: externalSnapshotOwnerKey(documentId, boundaryId) }),
+				identifierPrefix: boundaryId + '-external-',
+			};
+		},
+		openStream: (signalOwner, documentId, target) => {
+			const bridge = bootstrapStreamedSignalHydration({
+				buildId: authority.publisherBuildId,
+				documentId,
+				signalOwner,
+				target,
+			});
+			return () => bridge.dispose();
+		},
+	};
+	return markComponentFlags(
+		function ExternalSnapshotBoundary(props, scope, extra) {
+			Hydrate(
+				{
+					when: { _t: 'load' },
+					children: createElement(options.component, props),
+					__external: descriptor,
+				} as InternalHydrateProps,
+				scope,
+				extra,
+			);
+		},
+		COMPONENT_FLAG_BOUNDARY,
+		'ExternalSnapshotBoundary',
+	);
+}
 
 /**
  * `<Suspense fallback={…}>…</Suspense>` — the JSX component form of
@@ -18508,8 +18658,9 @@ class HydrationCapability {
 	private readonly unframedRootRanges = new WeakMap<Node, Node>();
 	/** Pairs discovered while matching an outer range; released with this hydration pass. */
 	private matchingCloses: WeakMap<Node, Comment> | null = null;
-	/** First unclaimed root sibling after a compiled root clone; undefined until known. */
+	/** First recorded root-range remainder; complete templates keep it fixed. */
 	private rootRemainder: Node | null | undefined;
+	private rootTemplateClaimed = false;
 	private rootCleanupBoundary: Node | null = null;
 	readonly deferredActivities: Array<() => void> = [];
 	readonly liteRanges = new WeakMap<Scope, HydratedLiteRange>();
@@ -19113,15 +19264,39 @@ class HydrationCapability {
 		const cursor = this.node;
 		const isFragment =
 			template !== null ? (template as any).__oct_frag === true : isLazyFragment(lazy!);
-		// Lite/no-template wrappers can render the logical root while sharing the
-		// public root Block, and return-based wrappers render it in a child Block.
-		// Identify the first top-level cursor by DOM ownership, then claim its
-		// remainder ONCE so later lite descendant clones cannot overwrite it.
-		const claimsRoot =
+		// Only a complete-output owner can claim a fixed template remainder.
+		// A root sibling's bounded fragment must recover inside its own range.
+		// Sole-output inherited blocks and private single-root return chains can
+		// share the root's range while executing their clone in a child scope.
+		let claimsRoot =
 			this.rootRemainder === undefined &&
 			(cursor !== null
 				? (STAGED_DOM?.view(cursor) ?? cursor).parentNode === this.rootBlock.parentNode
 				: CURRENT_BLOCK === this.rootBlock);
+		if (claimsRoot) {
+			let rootOwner = CURRENT_SCOPE?.block ?? CURRENT_BLOCK;
+			while (
+				rootOwner !== null &&
+				rootOwner !== this.rootBlock &&
+				rootOwner.parentNode === this.rootBlock.parentNode &&
+				rootOwner.startMarker === this.rootBlock.startMarker &&
+				rootOwner.endMarker === this.rootBlock.endMarker
+			) {
+				const parent = rootOwner.parentBlock;
+				const returned = parent?.slots[0] as CompSlot | undefined;
+				if (
+					!rootOwner.exclusiveMarkers &&
+					(parent?.outputHandler == null ||
+						returned?.__kind !== 'componentSlotSlot' ||
+						returned.block !== rootOwner ||
+						!returned.singleRoot)
+				)
+					break;
+				rootOwner = parent;
+			}
+			claimsRoot = rootOwner === this.rootBlock;
+			if (claimsRoot) this.rootTemplateClaimed = true;
+		}
 		const framedRemainder =
 			claimsRoot && cursor !== null ? this.framedRootRemainder(cursor) : undefined;
 		const unframedRemainder = claimsRoot && cursor !== null ? getNextSibling(cursor) : undefined;
@@ -19287,7 +19462,22 @@ class HydrationCapability {
 	/** Remove server siblings left after the root's complete client shape was adopted. */
 	finishRoot(): void {
 		if (this.abandoned) return;
-		let remainder = this.rootRemainder === undefined ? this.node : this.rootRemainder;
+		// A no-template root consumes sibling ranges one at a time. Its first
+		// child claim is only a prefix; the final top-level cursor bounds the
+		// complete output. Explicit ranges, templates, and the private returned
+		// root slot keep their fixed remainder when a descendant leaves the
+		// cursor inside them (a pure host descriptor does not run clone()).
+		const returnedRoot = this.rootBlock.slots[0] as { returnedOutput?: boolean } | undefined;
+		let remainder =
+			!this.rootTemplateClaimed &&
+			returnedRoot?.returnedOutput !== true &&
+			this.rootBlock.endMarker === null &&
+			(this.node === null ||
+				(STAGED_DOM?.view(this.node) ?? this.node).parentNode === this.rootBlock.parentNode)
+				? this.node
+				: this.rootRemainder === undefined
+					? this.node
+					: this.rootRemainder;
 		// Cursor-based adoption may stop on an owned range marker, and mismatch
 		// recovery can append fresh replacement roots after stale server siblings.
 		// Find the first genuinely stale sibling before diagnosing, then preserve
@@ -25244,6 +25434,7 @@ function adoptServerHeadEl(head: HTMLHeadElement, key: string, tag: string): Ele
 }
 
 function rootIdentifierPrefix(block: Block): string {
+	if (block.idState.externalNamespace) return block.idState.prefix;
 	while (block.parentBlock !== null) block = block.parentBlock;
 	return block.idState.prefix;
 }
@@ -29779,6 +29970,8 @@ function scopedElementDescriptor<P>(
 	children: () => unknown,
 	invocationSite?: string,
 ): ElementDescriptor<P> {
+	if (typeof type === 'function' && isRendererContext(type))
+		registerClientRendererBridge(renderClientContextProvider, flushSync);
 	const src = (props ?? null) as any;
 	const hasKey = hasElementConfigKey(src);
 	const key = hasKey ? '' + src.key : null;
@@ -30491,6 +30684,8 @@ function componentSlotImpl(
 	// Attribute expressions can schedule a self-update after the compiled
 	// setup checkpoint. Skip their discarded child before it owns any state.
 	if (CURRENT_BLOCK?.pending && !CURRENT_BLOCK.crossRenderUpdate) return;
+	// Directly compiled renderer-local Providers do not create a descriptor first.
+	if (isRendererContext(body)) registerClientRendererBridge(renderClientContextProvider, flushSync);
 	if (slotKey === 0 && parentScope !== RETURNED_OUTPUT_SCOPE) {
 		const state = parentScope.slots[0] as any;
 		if (state?.returnedOutput === true) {
@@ -37537,6 +37732,13 @@ function takeInitialSuspenseHydration(
 			prefix: state.parentBlock.idState.prefix + 'b' + boundaryId + '-',
 			next: 0,
 			renderOwner: state.parentBlock.idState.renderOwner,
+			...(state.parentBlock.idState.dataOwner === undefined
+				? {}
+				: {
+						dataOwner: state.parentBlock.idState.dataOwner,
+						externalNamespace: true as const,
+						signalState: state.parentBlock.idState.signalState,
+					}),
 			signalState: state.parentBlock.idState.signalState,
 		};
 		return {
@@ -37585,6 +37787,13 @@ function takeInitialSuspenseHydration(
 		limit: idStart + count,
 		overflow: rootIds,
 		renderOwner: rootIds.renderOwner,
+		...(rootIds.dataOwner === undefined
+			? {}
+			: {
+					dataOwner: rootIds.dataOwner,
+					externalNamespace: true as const,
+					signalState: rootIds.signalState,
+				}),
 	};
 	return {
 		metadata: [marker as ChildNode, ...sidecars],
@@ -37820,6 +38029,13 @@ function mountTry(state: TrySlot): void {
 			prefix: state.parentBlock.idState.prefix + 'b' + streamedBoundaryId + '-',
 			next: 0,
 			renderOwner: state.parentBlock.idState.renderOwner,
+			...(state.parentBlock.idState.dataOwner === undefined
+				? {}
+				: {
+						dataOwner: state.parentBlock.idState.dataOwner,
+						externalNamespace: true as const,
+						signalState: state.parentBlock.idState.signalState,
+					}),
 			signalState: state.parentBlock.idState.signalState,
 		};
 	}
@@ -44851,6 +45067,8 @@ export interface Root {
 }
 
 export interface RootOptions {
+	/** Trusted host document authority for external snapshot hydration. */
+	externalSnapshots?: { readonly documentId: string };
 	/** Adopt fixed native early bindings only when their matching hydration capture commits. */
 	bindingLeases?: readonly BindingHandle[];
 	/** Offer an existing textarea value owner for accepted presentation hydration, never early disposal. */
@@ -45382,6 +45600,8 @@ function makeRoot(
 		transaction: null,
 		disposed: false,
 	};
+	if (errorOptions?.externalSnapshots !== undefined)
+		renderOwner.externalSnapshotDocumentId = errorOptions.externalSnapshots.documentId;
 	idState.renderOwner = renderOwner;
 	const renderResolved = (
 		body: ComponentBody,
