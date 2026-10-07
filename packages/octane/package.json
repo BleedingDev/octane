@@ -1,6 +1,6 @@
 {
   "name": "octane",
-  "version": "0.7.1+ultramodern.f75bf12ac8be",
+  "version": "0.7.1+ultramodern.1331985ea3b0",
   "license": "MIT",
   "type": "module",
   "sideEffects": [
@@ -377,7 +377,7 @@
   },
   "ultramodernSource": {
     "upstreamCommit": "676a4ee6db59854d6b711921f4ac808845dcdbcd",
-    "implementationCommit": "f75bf12ac8bebe3ca4c4db1f62f45f9d4a36963d",
+    "implementationCommit": "1331985ea3b063ce49e686bd563365eb92dbc452",
     "runtimePatchSha256": "2262f080f4d2927477cb17d353761958be25206ee2c9e4fc7e3258891659a952",
     "authoredSourcePatchSha256": "699036d4f620a2d463128b13991e11393ea3a83494955839b56193841ebbc352"
   }
