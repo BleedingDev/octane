@@ -1,0 +1,104 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: false
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      '@tsrx/typescript-plugin':
+        specifier: 0.6.0
+        version: 0.6.0(typescript@6.0.3)
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
+packages:
+
+  '@tsrx/typescript-plugin@0.6.0':
+    resolution: {integrity: sha512-vVm7tczmdClm1HHXriGJFUbLrdHUfsnuuz0Wu0qQnc5ioh0m1x/c6U4JeZ51Tg7GOFdHEnZd9aGABKCvJwrHjw==}
+    hasBin: true
+    peerDependencies:
+      '@tsrx/content-mapper': 0.1.2
+      '@tsrx/preact': 0.3.3
+      '@tsrx/react': 0.4.3
+      '@tsrx/ripple': ^0.2.0
+      '@tsrx/solid': 0.3.3
+      '@tsrx/vue': 0.3.3
+      octane: '*'
+      typescript: ^5.9.3 || ^6.0.0 || ^7.1.0-dev.20260923.1
+    peerDependenciesMeta:
+      '@tsrx/content-mapper':
+        optional: true
+      '@tsrx/preact':
+        optional: true
+      '@tsrx/react':
+        optional: true
+      '@tsrx/ripple':
+        optional: true
+      '@tsrx/solid':
+        optional: true
+      '@tsrx/vue':
+        optional: true
+      octane:
+        optional: true
+
+  '@volar/language-core@2.4.28':
+    resolution: {integrity: sha512-w4qhIJ8ZSitgLAkVay6AbcnC7gP3glYM3fYwKV3srj8m494E3xtrCv6E+bWviiK/8hs6e6t1ij1s2Endql7vzQ==}
+
+  '@volar/source-map@2.4.28':
+    resolution: {integrity: sha512-yX2BDBqJkRXfKw8my8VarTyjv48QwxdJtvRgUpNE5erCsgEUdI2DsLbpa+rOQVAJYshY99szEcRDmyHbF10ggQ==}
+
+  '@volar/typescript@2.4.28':
+    resolution: {integrity: sha512-Ja6yvWrbis2QtN4ClAKreeUZPVYMARDYZl9LMEv1iQ1QdepB6wn0jTRxA9MftYmYa4DQ4k/DaSZpFPUfxl8giw==}
+
+  jsonc-parser@3.3.1:
+    resolution: {integrity: sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==}
+
+  path-browserify@1.0.1:
+    resolution: {integrity: sha512-b7uo2UCUOYZcnF/3ID0lulOJi/bafxa1xPe7ZPsammBSpjSWQkjNxlt635YGS2MiR9GjvuXCtz2emr3jbsz98g==}
+
+  resolve-pkg-maps@1.0.0:
+    resolution: {integrity: sha512-seS2Tj26TBVOC2NIc2rOe2y2ZO7efxITtLZcGSOnHHNOQ7CkiUBfw0Iw2ck6xkIhPwLhKNLS8BO+hEpngQlqzw==}
+
+  typescript@6.0.3:
+    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+  vscode-uri@3.2.0:
+    resolution: {integrity: sha512-m2gXo3bn0G1kT9InzMf07fTbqMbGtyckj3bH5ktLO+1Ssv+yiATZ4dhwaQv9UZWxJh6E9IFGnQyjgWVDWVBDrg==}
+
+snapshots:
+
+  '@tsrx/typescript-plugin@0.6.0(typescript@6.0.3)':
+    dependencies:
+      '@volar/language-core': 2.4.28
+      '@volar/typescript': 2.4.28
+      jsonc-parser: 3.3.1
+      resolve-pkg-maps: 1.0.0
+      typescript: 6.0.3
+
+  '@volar/language-core@2.4.28':
+    dependencies:
+      '@volar/source-map': 2.4.28
+
+  '@volar/source-map@2.4.28': {}
+
+  '@volar/typescript@2.4.28':
+    dependencies:
+      '@volar/language-core': 2.4.28
+      path-browserify: 1.0.1
+      vscode-uri: 3.2.0
+
+  jsonc-parser@3.3.1: {}
+
+  path-browserify@1.0.1: {}
+
+  resolve-pkg-maps@1.0.0: {}
+
+  typescript@6.0.3: {}
+
+  vscode-uri@3.2.0: {}

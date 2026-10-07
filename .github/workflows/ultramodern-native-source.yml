@@ -2,9 +2,21 @@ name: UltraModern native source
 
 on:
   pull_request:
-    branches: [ultramodern/signal-owner-0.7.1]
+    branches:
+      [
+        ultramodern/signal-owner-0.7.1,
+        fix/ultramodern-devalue-5.9.3,
+        feat/ultramodern-external-snapshot,
+      ]
+    types: [opened, reopened, synchronize, ready_for_review]
   push:
-    branches: [ultramodern/signal-owner-0.7.1, "fix/ultramodern-*"]
+    branches:
+      [
+        ultramodern/signal-owner-0.7.1,
+        "fix/ultramodern-*",
+        feat/ultramodern-external-snapshot,
+        feat/ultramodern-native-hmr-20261007,
+      ]
   workflow_dispatch:
 
 permissions:
@@ -47,11 +59,32 @@ jobs:
       - name: Prepare independent native source tools
         run: node scripts/ultramodern-build-host/prepare.mjs
 
+      # The supported TSRX checker uses TS 6; the source compiler uses TS 7.
+      # Keep both frozen installations rather than substituting plain tsc.
+      - name: Install frozen supported TSRX checker
+        working-directory: scripts/ultramodern-build-host/tsrx-check-host
+        run: >-
+          pnpm install --frozen-lockfile
+          --store-dir "$RUNNER_TEMP/pnpm-store"
+          --package-import-method clone-or-copy
+
+      - name: Prepare installed peers for repository sync
+        run: node scripts/ultramodern-build-host/prepare-sync.mjs
+
+      - name: Synchronize generated repository metadata
+        env:
+          pnpm_config_verify_deps_before_run: warn
+        run: pnpm --config.verify-deps-before-run=warn sync
+
       - name: Test native build helpers
         run: >-
           node --test
           packages/octane/scripts/bundle-volar.test.mjs
           scripts/ultramodern-build-host/check-tsrx-project.test.mjs
+          scripts/ultramodern-build-host/workflow.test.mjs
+
+      - name: Test Rspack source pack contract
+        run: node --test scripts/ultramodern-build-host/rspack-pack.test.mjs
 
       - name: Test RPC and private compiler entrypoints in development
         env:
@@ -76,11 +109,172 @@ jobs:
       - name: Check native error codes
         run: node scripts/error-codes/generate.mjs --check
 
+      - name: Test native error diagnostics
+        run: >-
+          node --test
+          scripts/error-codes/generate.test.mjs
+          scripts/error-codes/specialize-error-calls.test.mjs
+          scripts/error-codes/compile-node-env.test.mjs
+
+      - name: Test snapshot and document ownership in development
+        env:
+          OCTANE_TEST_COMPILE_MODE: dev
+        run: >-
+          node_modules/.bin/vitest run
+          --config scripts/ultramodern-build-host/vitest.config.mjs
+          packages/octane/tests/hydration/external-snapshot.test.ts
+          packages/octane/tests/hydration/all-component-root.test.ts
+          packages/octane/tests/hydration/streamed-authority.test.ts
+          packages/octane/tests/hydration/provider-ssr-hydrate.test.ts
+          packages/octane/tests/hydration/initial-document-signals.test.ts
+          packages/octane/tests/hydration/stream-delivery.test.ts
+          packages/octane/tests/hydration/automatic-signal-stream.test.ts
+          packages/octane/tests/hydration/document-lifecycle.test.ts
+          packages/octane/tests/hydration/document-signal-owner.test.ts
+          packages/octane/tests/hydration/independent-parent.test.ts
+          packages/octane/tests/hydration/nested-head.test.ts
+          packages/octane/tests/ssr-render-phase-state.test.ts
+          packages/octane/tests/hydration/prepared-external-snapshot.test.ts
+          packages/octane/tests/hydration/external-snapshot-budget.test.ts
+          packages/octane/tests/hydration/native-streamed-authority.test.ts
+          packages/octane/tests/hydration/publisher-boundary.test.ts
+          packages/octane/tests/hydration/publisher-boundary-server.test.ts
+          packages/octane/tests/hydration/publisher-boundary-protocol.test.ts
+          packages/octane/tests/hydration/publisher-component-contract.test.ts
+          packages/octane/tests/hydration/publisher-document-authority.test.ts
+          packages/octane/tests/scoped-jsx-values.test.ts
+
+      - name: Test snapshot and document ownership in production
+        env:
+          OCTANE_TEST_COMPILE_MODE: prod
+        run: >-
+          node_modules/.bin/vitest run
+          --config scripts/ultramodern-build-host/vitest.config.mjs
+          packages/octane/tests/hydration/external-snapshot.test.ts
+          packages/octane/tests/hydration/all-component-root.test.ts
+          packages/octane/tests/hydration/streamed-authority.test.ts
+          packages/octane/tests/hydration/provider-ssr-hydrate.test.ts
+          packages/octane/tests/hydration/initial-document-signals.test.ts
+          packages/octane/tests/hydration/stream-delivery.test.ts
+          packages/octane/tests/hydration/automatic-signal-stream.test.ts
+          packages/octane/tests/hydration/document-lifecycle.test.ts
+          packages/octane/tests/hydration/document-signal-owner.test.ts
+          packages/octane/tests/hydration/independent-parent.test.ts
+          packages/octane/tests/hydration/nested-head.test.ts
+          packages/octane/tests/ssr-render-phase-state.test.ts
+          packages/octane/tests/hydration/prepared-external-snapshot.test.ts
+          packages/octane/tests/hydration/external-snapshot-budget.test.ts
+          packages/octane/tests/hydration/native-streamed-authority.test.ts
+          packages/octane/tests/hydration/publisher-boundary.test.ts
+          packages/octane/tests/hydration/publisher-boundary-server.test.ts
+          packages/octane/tests/hydration/publisher-boundary-protocol.test.ts
+          packages/octane/tests/hydration/publisher-component-contract.test.ts
+          packages/octane/tests/hydration/publisher-document-authority.test.ts
+          packages/octane/tests/scoped-jsx-values.test.ts
+
       - name: Build native package
         run: node packages/octane/scripts/build.mjs
 
       - name: Check built public types
         run: node scripts/ultramodern-build-host/check-public-types.mjs
+
+      - name: Check router public types with the supported TSRX checker
+        run: |
+          node --input-type=module <<'NODE'
+          import { spawnSync } from 'node:child_process';
+          import { assertTsrxTypecheckSucceeded } from './scripts/tsrx-typecheck.mjs';
+
+          const project = 'scripts/ultramodern-build-host/router-public-types.tsconfig.json';
+          const result = spawnSync(
+            'scripts/ultramodern-build-host/tsrx-check-host/node_modules/.bin/tsrx-tsc',
+            ['--noEmit', '-p', project],
+            { encoding: 'utf8', timeout: 120_000 },
+          );
+          if (result.stdout) process.stdout.write(result.stdout);
+          if (result.stderr) process.stderr.write(result.stderr);
+          assertTsrxTypecheckSucceeded(result, project);
+          NODE
+
+      - name: Test native signal compiler and diagnostics
+        run: >-
+          node_modules/.bin/vitest run
+          --config scripts/ultramodern-build-host/vitest.config.mjs
+          --maxWorkers 1 --silent=passed-only
+          packages/octane/tests/compiler/hot-signal-modules.test.ts
+          packages/octane/tests/compiler/signal-declarations.test.ts
+          packages/octane/tests/compiler/compiler-ast-emit-audit.test.ts
+          packages/octane/tests/compiler/compiler-ast-immutability.test.ts
+          packages/octane/tests/compiler/bundler-compiler.test.ts
+          packages/octane/tests/compiler/compile-errors.test.ts
+          packages/octane/tests/compiler/hook-method-diagnostics.test.ts
+          packages/octane/tests/compiler/context-provider-errors.test.ts
+
+      - name: Test native effects and signal HMR in development
+        env:
+          OCTANE_TEST_COMPILE_MODE: dev
+        run: >-
+          node_modules/.bin/vitest run
+          --config scripts/ultramodern-build-host/vitest.config.mjs
+          --maxWorkers 1 --silent=passed-only
+          packages/octane/tests/hmr.test.ts
+          packages/octane/tests/effect-callback-contract.test.ts
+          packages/octane/tests/signals-hot-declarations.test.ts
+          packages/octane/tests/signals-hot-queries.test.ts
+          packages/octane/tests/signals-hot-mailbox.test.ts
+          packages/octane/tests/signals-hot-cancellation.test.ts
+          packages/octane/tests/signals-unified.test.ts
+          packages/octane/tests/signals-async.test.ts
+          packages/octane/tests/signals-query-attempt-observer.test.ts
+          packages/octane/tests/signals-state.test.ts
+          packages/octane/tests/signals-local.test.ts
+          packages/octane/tests/signals-native-plain-module.test.ts
+
+      - name: Test native effects and signal HMR in production
+        env:
+          OCTANE_TEST_COMPILE_MODE: prod
+        run: >-
+          node_modules/.bin/vitest run
+          --config scripts/ultramodern-build-host/vitest.config.mjs
+          --maxWorkers 1 --silent=passed-only
+          packages/octane/tests/hmr.test.ts
+          packages/octane/tests/effect-callback-contract.test.ts
+          packages/octane/tests/signals-hot-declarations.test.ts
+          packages/octane/tests/signals-hot-queries.test.ts
+          packages/octane/tests/signals-hot-mailbox.test.ts
+          packages/octane/tests/signals-hot-cancellation.test.ts
+          packages/octane/tests/signals-unified.test.ts
+          packages/octane/tests/signals-async.test.ts
+          packages/octane/tests/signals-query-attempt-observer.test.ts
+          packages/octane/tests/signals-state.test.ts
+          packages/octane/tests/signals-local.test.ts
+          packages/octane/tests/signals-native-plain-module.test.ts
+
+      - name: Test real Rspack loader and watch HMR
+        working-directory: packages/rspack-plugin-octane
+        run: >-
+          ../../node_modules/.bin/vitest run --config vitest.config.js
+          --maxWorkers 1 --silent=passed-only
+          tests/loader.test.ts
+          tests/loader.integration.test.ts
+          tests/streamed-signals-hmr.test.ts
+
+      - name: Test real router snapshot and ownership in development
+        env:
+          OCTANE_TEST_COMPILE_MODE: dev
+        run: >-
+          node_modules/.bin/vitest run
+          --config scripts/ultramodern-build-host/router.vitest.config.mjs
+          --maxWorkers 1 --silent=passed-only
+          packages/tanstack-router/tests
+
+      - name: Test real router snapshot and ownership in production
+        env:
+          OCTANE_TEST_COMPILE_MODE: prod
+        run: >-
+          node_modules/.bin/vitest run
+          --config scripts/ultramodern-build-host/router.vitest.config.mjs
+          --maxWorkers 1 --silent=passed-only
+          packages/tanstack-router/tests
 
       - name: Exercise built Node RPC with patched devalue
         run: |
@@ -120,8 +314,4 @@ jobs:
           NODE
 
       - name: Verify source and frozen lockfiles stayed unchanged
-        run: >-
-          git diff --exit-code --
-          packages/octane/src
-          pnpm-lock.yaml
-          scripts/ultramodern-build-host/pnpm-lock.yaml
+        run: git diff --exit-code

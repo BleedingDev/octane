@@ -54,6 +54,112 @@ function target(identities: StreamFrameIdentity[] = [], buffered: StreamedRender
 }
 
 describe('independent streamed signal authorities', () => {
+	it('rejects a replaced early mailbox while a publisher lease is live', async () => {
+		const first = authority('closed-before-replacement');
+		const second = authority('active-before-replacement');
+		const third = authority('attempted-replacement');
+		const realm = target(
+			[first.identity, second.identity],
+			[
+				...(await frames(first.identity, 'first native result')),
+				...(await frames(second.identity, 'retained native result')),
+			],
+		);
+		const mailbox = realm.__octaneStreamedSignalSelections;
+		const one = bootstrapStreamedSignalResults({
+			buildId: first.identity.buildId,
+			documentId: first.identity.documentId,
+			signalOwner: first.owner,
+			target: realm,
+		});
+		const two = bootstrapStreamedSignalResults({
+			buildId: second.identity.buildId,
+			documentId: second.identity.documentId,
+			signalOwner: second.owner,
+			target: realm,
+		});
+		let replacement: ReturnType<typeof bootstrapStreamedSignalResults> | undefined;
+		const value = __queryAt(
+			'g:shared-compiled-query',
+			() => 'record',
+			() => Promise.resolve('browser value'),
+		);
+		try {
+			one.dispose();
+			realm.__octaneStreamedSignalSelections = target().__octaneStreamedSignalSelections;
+			expect(() => {
+				replacement = bootstrapStreamedSignalResults({
+					buildId: third.identity.buildId,
+					documentId: third.identity.documentId,
+					signalOwner: third.owner,
+					target: realm,
+				});
+			}).toThrow(/already installed/);
+			realm.__octaneStreamedSignalSelections = mailbox;
+			expect(runWithSignalOwner(second.owner, () => value.get())).toBe('retained native result');
+		} finally {
+			realm.__octaneStreamedSignalSelections = mailbox;
+			one.dispose();
+			two.dispose();
+			replacement?.dispose();
+			retireSignalOwnerIdentity(first.owner);
+			retireSignalOwnerIdentity(second.owner);
+			retireSignalOwnerIdentity(third.owner);
+		}
+	});
+
+	it('retains unclaimed foreign selections after the final claimed publisher closes', async () => {
+		const first = authority('closed-claimed-publisher');
+		const second = authority('unclaimed-foreign-publisher');
+		const realm = target(
+			[first.identity, second.identity],
+			await frames(first.identity, 'first native result'),
+		);
+		const mailbox = realm.__octaneStreamedSignalSelections;
+		const one = bootstrapStreamedSignalResults({
+			buildId: first.identity.buildId,
+			documentId: first.identity.documentId,
+			signalOwner: first.owner,
+			target: realm,
+		});
+		let two: ReturnType<typeof bootstrapStreamedSignalResults> | undefined;
+		try {
+			one.dispose();
+			realm.__octaneStreamedSignalSelections = target().__octaneStreamedSignalSelections;
+			expect(() => {
+				two = bootstrapStreamedSignalResults({
+					buildId: second.identity.buildId,
+					documentId: second.identity.documentId,
+					signalOwner: second.owner,
+					target: realm,
+				});
+			}).toThrow(/already installed/);
+			realm.__octaneStreamedSignalSelections = mailbox;
+			realm.__octaneStreamedRenderer = target(
+				[],
+				await frames(second.identity, 'foreign native result'),
+			).__octaneStreamedRenderer;
+			two = bootstrapStreamedSignalResults({
+				buildId: second.identity.buildId,
+				documentId: second.identity.documentId,
+				signalOwner: second.owner,
+				target: realm,
+			});
+			const value = __queryAt(
+				'g:shared-compiled-query',
+				() => 'record',
+				() => Promise.resolve('browser value'),
+			);
+			expect(runWithSignalOwner(second.owner, () => value.get())).toBe('foreign native result');
+		} finally {
+			realm.__octaneStreamedSignalSelections = mailbox;
+			one.dispose();
+			two?.dispose();
+			retireSignalOwnerIdentity(first.owner);
+			retireSignalOwnerIdentity(second.owner);
+		}
+	});
+
 	it('retains an unclaimed publisher snapshot and joins both results before browser loaders start', async () => {
 		const first = authority('first-publisher');
 		const second = authority('second-publisher');

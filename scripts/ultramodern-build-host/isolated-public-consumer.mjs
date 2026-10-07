@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { publicTypecheckOptions, publicTypeConsumerSources } from './check-public-types.mjs';
 
 const buildOnlyPackages = ['@typescript-eslint/types', 'vscode-languageserver-types', 'source-map'];
 const consumerDependencies = {
@@ -14,7 +15,7 @@ const consumerDependencies = {
 	typescript: '7.0.2',
 	vite: '8.1.5',
 };
-const consumer = `
+const compilerConsumer = `
 import { compile, compileToVolarMappings, type CompileInspection } from 'octane/compiler';
 import { createTextTypeProject, type TextTypeProject } from 'octane/compiler/typescript';
 const compiled = compile('function App() @{ <div/> }', 'App.tsrx', { inspect: true });
@@ -31,7 +32,16 @@ const invalidBody: typeof mapped.sourceAst.body = ['not an AST node'];
 // @ts-expect-error Compiler filenames require strings.
 compile('function App() @{ <div/> }', 42);
 const projectFactory: (options: { tsconfig: string }) => TextTypeProject = createTextTypeProject;
-void inspection; void sourceType; void invalidBody; void projectFactory;
+const compilerManifest: Signals.HotSignalModuleManifest | undefined = compiled.hotSignalModule;
+if (compilerManifest) {
+ const compiledStamp: Signals.HotSignalModuleStamp = Signals.__hotSignalModule(compilerManifest);
+ Signals.__registerHotSignalComponent(compiledStamp, nativeComponent);
+ const reset: boolean = Signals.__remountHotSignalComponent(compiledStamp, nativeComponent, nativeComponent);
+ void reset;
+}
+// @ts-expect-error Unsafe compiler recipes intentionally omit module metadata.
+const definiteManifest: Signals.HotSignalModuleManifest = compiled.hotSignalModule;
+void inspection; void sourceType; void invalidBody; void projectFactory; void definiteManifest;
 `;
 
 function typedExports(manifest, entries) {
@@ -123,44 +133,101 @@ export function prepareIsolatedPublicConsumer(artifact, directory) {
 			'',
 		].join('\n'),
 	);
-	writeFileSync(
-		join(directory, 'tsconfig.json'),
-		`${JSON.stringify(
-			{
-				compilerOptions: {
-					target: 'esnext',
-					module: 'preserve',
-					moduleResolution: 'bundler',
-					lib: ['esnext', 'dom', 'dom.iterable'],
-					strict: true,
-					exactOptionalPropertyTypes: true,
-					noUncheckedIndexedAccess: true,
-					verbatimModuleSyntax: true,
-					types: [],
-					skipLibCheck: false,
-					noEmit: true,
-				},
-				files: ['consumer.ts', 'invalid-consumer.ts'],
-			},
-			null,
-			2,
-		)}\n`,
-	);
+	const sources = publicTypeConsumerSources();
 	const imports = publishedExports.map(
 		({ specifier }, index) => `import type * as Entry${index} from '${specifier}';`,
 	);
 	const checkedExports = `export type PublishedEntries = [${publishedExports.map((_, index) => `typeof Entry${index}`).join(', ')}];`;
-	writeFileSync(
-		join(directory, 'consumer.ts'),
-		`${imports.join('\n')}\n${checkedExports}\n${consumer}`,
-	);
-	writeFileSync(
-		join(directory, 'invalid-consumer.ts'),
-		"import { compile } from 'octane/compiler';\ncompile('function App() @{ <div/> }', 42);\n",
-	);
+	const completeConsumer = `${imports.join('\n')}\n${checkedExports}\n${sources.client}\n${sources.server}\n${compilerConsumer}`;
+	const invalidCompiler =
+		"import { compile } from 'octane/compiler';\ncompile('function App() @{ <div/> }', 42);\n";
+	const consumers = [
+		{
+			name: 'bundler',
+			config: 'tsconfig.json',
+			file: 'consumer.ts',
+			source: completeConsumer,
+			types: ['node'],
+			invalidFile: 'invalid-consumer.ts',
+			invalidSource: invalidCompiler,
+			diagnostic: 2345,
+		},
+		{
+			name: 'client',
+			config: 'tsconfig.client.json',
+			file: 'client.ts',
+			source: sources.client,
+			types: [],
+		},
+		{
+			name: 'nodenext',
+			config: 'tsconfig.nodenext.json',
+			file: 'consumer.mts',
+			source: completeConsumer,
+			module: 'nodenext',
+			moduleResolution: 'nodenext',
+			types: ['node'],
+			invalidFile: 'invalid-consumer.mts',
+			invalidSource: invalidCompiler,
+			diagnostic: 2345,
+		},
+	];
+	// The actual manifest advertises CJS only for these runtime namespaces. The
+	// compiler remains its published ESM entry; no compiler CJS format is assumed.
+	const cjsExports = ['.', './signals', './server'].map((subpath) => ({
+		subpath,
+		target: manifest.exports[subpath]?.node?.require ?? manifest.exports[subpath]?.require,
+	}));
+	if (cjsExports.every(({ target }) => typeof target === 'string' && target.endsWith('.cjs'))) {
+		for (const { subpath, target } of cjsExports)
+			assert(
+				entries.includes(`package/${target.replace(/^\.\//, '')}`),
+				`Published CJS entry: ${subpath}`,
+			);
+		const cjs = publicTypeConsumerSources({}, { commonjs: true });
+		consumers.push({
+			name: 'cjs',
+			config: 'tsconfig.cjs.json',
+			file: 'consumer.cts',
+			source: `${cjs.client}\n${cjs.server}`,
+			module: 'nodenext',
+			moduleResolution: 'nodenext',
+			types: ['node'],
+			invalidFile: 'invalid-consumer.cts',
+			diagnostic: 2322,
+			invalidSource:
+				"import Octane = require('octane');\ndeclare const component: Octane.ComponentBody<{ count: number }>;\nOctane.publisherBoundary(component, { publisherKey: 42 });\n",
+		});
+	}
+	for (const project of consumers) {
+		writeFileSync(join(directory, project.file), project.source);
+		if (project.invalidFile)
+			writeFileSync(join(directory, project.invalidFile), project.invalidSource);
+		writeFileSync(
+			join(directory, project.config),
+			`${JSON.stringify(
+				{
+					compilerOptions: {
+						...publicTypecheckOptions,
+						types: project.types,
+						...(project.module
+							? { module: project.module, moduleResolution: project.moduleResolution }
+							: {}),
+					},
+					files: [project.file, ...(project.invalidFile ? [project.invalidFile] : [])],
+				},
+				null,
+				2,
+			)}\n`,
+		);
+	}
 	const expected = {
 		manifest,
 		publishedExports,
+		consumers: consumers.map(({ source, invalidSource, ...project }) => project),
+		cjsExports: cjsExports.filter(
+			({ target }) => typeof target === 'string' && target.endsWith('.cjs'),
+		),
 		declarationCount: declarationEntries.length,
 		artifactSha256: createHash('sha256').update(bytes).digest('hex'),
 	};
@@ -200,62 +267,121 @@ export async function checkIsolatedPublicConsumer(directory) {
 		expected.manifest,
 	);
 	const { API } = await import(pathToFileURL(require.resolve('typescript/unstable/sync')).href);
-	const config = join(directory, 'tsconfig.json');
+	const evidence = {
+		typescript: compilerManifest.version,
+		compilerManifestPath,
+		compilerEntry,
+		artifactSha256: expected.artifactSha256,
+		declarationCount: expected.declarationCount,
+		publishedExports: expected.publishedExports,
+		consumers: [],
+		cjsExports: [],
+	};
+	// Resolve the real installed CommonJS conditions and inspect the ordinary native
+	// namespaces. No source aliases, virtual declarations or compiler CJS bridge.
+	const requiredCjs = {
+		'.': ['publisherBoundary'],
+		'./signals': [
+			'__signalAt',
+			'__derivedScalarAt',
+			'__derivedAt',
+			'__queryAt',
+			'__hotSignalModule',
+			'__registerHotSignalComponent',
+			'__remountHotSignalComponent',
+		],
+		'./server': [
+			'publisherBoundary',
+			'prepareExternalSnapshotRequest',
+			'renderExternalSnapshot',
+			'releasePreparedExternalSnapshotRequest',
+		],
+	};
+	for (const { subpath, target } of expected.cjsExports) {
+		const specifier = subpath === '.' ? 'octane' : `octane${subpath.slice(1)}`;
+		const resolved = realpathSync(require.resolve(specifier));
+		assert.equal(
+			resolved,
+			realpathSync(resolve(octaneDirectory, target)),
+			`Installed CJS condition: ${specifier}`,
+		);
+		const namespace = require(specifier);
+		for (const name of requiredCjs[subpath])
+			assert.equal(typeof namespace[name], 'function', `${specifier} exports ${name}`);
+		if (subpath === './signals')
+			for (const name of ['admitHotSignalPublisher', 'createNativeHotSignalOwnerProof'])
+				assert(
+					!Object.hasOwn(namespace, name),
+					`Keep ${name} private in the actual CJS namespace.`,
+				);
+		evidence.cjsExports.push({ specifier, resolved, names: Object.keys(namespace) });
+	}
 	const api = new API({ cwd: directory });
 	try {
-		const snapshot = api.updateSnapshot({ openProjects: [config] });
+		const snapshot = api.updateSnapshot({
+			openProjects: expected.consumers.map(({ config }) => join(directory, config)),
+		});
 		try {
-			const project = snapshot.getProject(config);
-			assert(project, 'Load the actual isolated native7 consumer project.');
-			assert.equal(project.compilerOptions.skipLibCheck, false);
-			const { program } = project;
-			const diagnostics = [
-				...program.getConfigFileParsingDiagnostics(),
-				...program.getProgramDiagnostics(),
-				...program.getGlobalDiagnostics(),
-				...program.getSyntacticDiagnostics(),
-				...program.getSemanticDiagnostics(),
-			];
-			const sourceFiles = program.getSourceFileNames();
-			const evidence = {
-				typescript: compilerManifest.version,
-				compilerManifestPath,
-				compilerEntry,
-				artifactSha256: expected.artifactSha256,
-				declarationCount: expected.declarationCount,
-				publishedExports: expected.publishedExports,
-				diagnostics,
-				sourceFiles,
-			};
-			console.log(JSON.stringify(evidence, null, 2));
-			assert.equal(
-				diagnostics.length,
-				1,
-				'Only the original invalid consumer must produce a diagnostic.',
-			);
-			assert.equal(diagnostics[0].code, 2345, 'Reject an invalid public compiler filename.');
-			assert.equal(diagnostics[0].fileName, join(directory, 'invalid-consumer.ts'));
-			for (const { declaration } of expected.publishedExports)
-				assert(
-					sourceFiles.includes(resolve(octaneDirectory, declaration)),
-					`Check actual published entry ${declaration}.`,
+			for (const consumer of expected.consumers) {
+				const project = snapshot.getProject(join(directory, consumer.config));
+				assert(project, `Load the actual isolated native7 ${consumer.name} consumer.`);
+				assert.equal(project.compilerOptions.skipLibCheck, false);
+				assert.equal(project.compilerOptions.strict, true);
+				assert.deepEqual(project.compilerOptions.types, consumer.types);
+				const { program } = project;
+				const diagnostics = [
+					...program.getConfigFileParsingDiagnostics(),
+					...program.getProgramDiagnostics(),
+					...program.getGlobalDiagnostics(),
+					...program.getSyntacticDiagnostics(),
+					...program.getSemanticDiagnostics(),
+				];
+				const sourceFiles = program.getSourceFileNames();
+				evidence.consumers.push({ name: consumer.name, diagnostics, sourceFiles });
+				if (diagnostics.length !== (consumer.invalidFile ? 1 : 0))
+					console.error(JSON.stringify({ name: consumer.name, diagnostics }, null, 2));
+				assert.equal(
+					diagnostics.length,
+					consumer.invalidFile ? 1 : 0,
+					`Only the intentional invalid ${consumer.name} consumer may produce a diagnostic.`,
 				);
-			for (const name of buildOnlyPackages)
+				if (consumer.invalidFile) {
+					assert.equal(
+						diagnostics[0].code,
+						consumer.diagnostic,
+						`Reject invalid public ${consumer.name} usage.`,
+					);
+					assert.equal(diagnostics[0].fileName, join(directory, consumer.invalidFile));
+				}
+				if (consumer.name === 'bundler' || consumer.name === 'nodenext')
+					for (const { declaration } of expected.publishedExports)
+						assert(
+							sourceFiles.includes(resolve(octaneDirectory, declaration)),
+							`Check actual published entry ${declaration} in ${consumer.name}.`,
+						);
+				for (const name of buildOnlyPackages)
+					assert(
+						!sourceFiles.some((file) => file.includes(`/node_modules/${name}/`)),
+						`No ${name} in the actual public declaration closure.`,
+					);
 				assert(
-					!sourceFiles.some((file) => file.includes(`/node_modules/${name}/`)),
-					`No ${name} in the actual public declaration closure.`,
+					!sourceFiles.some((file) => file.includes('/node_modules/@tsrx/core/types/index.d.ts')),
+					'Public APIs retain their original parser-opaque boundary.',
 				);
-			assert(
-				!sourceFiles.some((file) => file.includes('/node_modules/@tsrx/core/types/index.d.ts')),
-				'Public APIs retain their original parser-opaque boundary.',
-			);
-			return evidence;
+				if (consumer.name === 'client')
+					assert(
+						!sourceFiles.some((file) => file.includes('/node_modules/@types/node/')),
+						'The actual browser declaration closure has no Node ambient types.',
+					);
+			}
 		} finally {
 			snapshot.dispose();
 		}
 	} finally {
 		api.close();
 	}
+	console.log(JSON.stringify(evidence, null, 2));
+	return evidence;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

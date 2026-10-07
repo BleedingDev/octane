@@ -246,6 +246,15 @@ type ServerErrorArguments = {
 	339: [];
 	340: [];
 	342: [];
+	343: [];
+	344: [];
+	345: [];
+	346: [];
+	347: [];
+	348: [];
+	349: [];
+	350: [];
+	351: [];
 };
 
 export function formatServerError<Code extends keyof ServerErrorArguments>(
@@ -1020,6 +1029,48 @@ export function formatServerError<Code extends keyof ServerErrorArguments>(
 			case 342:
 				return formatDevErrorMessage(
 					'External snapshot load exceeded its boundary deadline.',
+					args,
+				);
+			case 343:
+				return formatDevErrorMessage(
+					'External snapshot rendering requires a genuine, open request prepared for one render.',
+					args,
+				);
+			case 344:
+				return formatDevErrorMessage(
+					'External snapshot context cleanup exceeded its deadline.',
+					args,
+				);
+			case 345:
+				return formatDevErrorMessage(
+					'A historical signal owner cannot change its module generation.',
+					args,
+				);
+			case 346:
+				return formatDevErrorMessage(
+					'The hot declaration no longer belongs to its native owner.',
+					args,
+				);
+			case 347:
+				return formatDevErrorMessage(
+					'The signal module generation is stale or already being installed.',
+					args,
+				);
+			case 348:
+				return formatDevErrorMessage('The hot declaration changed its native cell identity.', args);
+			case 349:
+				return formatDevErrorMessage(
+					'The hot signal generation has no current native publisher admission.',
+					args,
+				);
+			case 350:
+				return formatDevErrorMessage(
+					'A query definition generation must be a nonempty string.',
+					args,
+				);
+			case 351:
+				return formatDevErrorMessage(
+					'External snapshot request or cleanup produced multiple failures.',
 					args,
 				);
 			default:

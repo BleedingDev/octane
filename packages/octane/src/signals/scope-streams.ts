@@ -53,6 +53,14 @@ export class ScopeStreams {
 		this.waiting.clear();
 	}
 
+	/** A hot declaration relinquishes only its old receiver-owned channel. */
+	retireSelection(nodeKey: string): void {
+		this.selections.delete(nodeKey);
+		this.results.delete(nodeKey);
+		this.failures.delete(nodeKey);
+		this.waiting.delete(nodeKey);
+	}
+
 	bind(identity: StreamFrameIdentity, node: ScopedNode | undefined): boolean {
 		const previous = this.selections.get(identity.nodeKey);
 		if (previous && !sameStreamFrameIdentity(previous, identity)) {

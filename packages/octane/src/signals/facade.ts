@@ -14,6 +14,13 @@ import { isThenable, readSignalBinding as readBinding, untrack } from './graph.j
 import { readEarlySignalValue } from './early-values.js';
 import { NATIVE_DOM_VALUE, forwardNativeTransitionConsumer } from './read-protocol.js';
 import { isSignalHandle } from './handle-protocol.js';
+import {
+	assertHotSignalDeclarationUsable,
+	registerHotSignalDeclaration,
+	resolveHotSignalDeclaration,
+	type HotSignalDeclarationShape,
+	type HotSignalModuleStamp,
+} from './hot-declarations.js';
 
 export { isSignalHandle, isWritableSignal } from './handle-protocol.js';
 import {
@@ -299,7 +306,13 @@ export abstract class Descriptor<T, H extends SignalHandle<T>> implements OwnerB
 		readonly kind: H['kind'],
 		private readonly create: (owner: Scope) => H,
 		private readonly site: string | undefined,
-	) {}
+		private readonly hotStamp?: HotSignalModuleStamp,
+		factory?: HotSignalDeclarationShape['factory'],
+		queryKind?: 'promise' | 'stream',
+	) {
+		if (process.env.NODE_ENV !== 'production' && hotStamp)
+			registerHotSignalDeclaration(hotStamp, site, key, kind, factory!, create, queryKind);
+	}
 
 	[SIGNAL_OWNER_RESOLVE](owner: Scope): H {
 		requireSite(this.site);
@@ -307,9 +320,21 @@ export abstract class Descriptor<T, H extends SignalHandle<T>> implements OwnerB
 	}
 
 	private resolvedCell(target: Scope): H {
+		if (process.env.NODE_ENV !== 'production' && this.hotStamp)
+			assertHotSignalDeclarationUsable(this.hotStamp);
 		let cell = this.cells.get(target);
 		if (!cell) {
-			cell = this.create(target);
+			const owner = scopeOwners.get(target) ?? target;
+			cell =
+				process.env.NODE_ENV !== 'production' && this.hotStamp
+					? resolveHotSignalDeclaration(
+							this.hotStamp,
+							this.site!,
+							target as ScopeImpl,
+							isRendererOwner(owner) ? owner.documentOwner : owner,
+							() => this.create(target),
+						)
+					: this.create(target);
 			this.cells.set(target, cell);
 		}
 		return cell;
@@ -412,6 +437,7 @@ export function __signalAt<T>(
 	site: string | undefined,
 	initial: T,
 	options?: SignalOptions,
+	stamp?: HotSignalModuleStamp,
 ): WritableSignal<T> {
 	const explicit = signalOptionsKey(options);
 	site ??= explicit;
@@ -432,6 +458,8 @@ export function __signalAt<T>(
 			);
 		},
 		site,
+		stamp,
+		'__signalAt',
 	);
 }
 
@@ -444,6 +472,7 @@ export function __derivedScalarAt<T>(
 	site: string | undefined,
 	compute: DerivedCompute<T>,
 	options?: DerivedOptions & SignalOptions,
+	stamp?: HotSignalModuleStamp,
 ): DerivedSignal<T> {
 	if (typeof compute !== 'function') throw new TypeError(formatClientError(122));
 	const explicit = signalOptionsKey(options);
@@ -457,6 +486,8 @@ export function __derivedScalarAt<T>(
 				runWithSignalOwner(owner, () => (compute as () => T)()),
 			),
 		site,
+		stamp,
+		'__derivedScalarAt',
 	);
 }
 

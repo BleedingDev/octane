@@ -1,5 +1,6 @@
 import type { CodeInformation, Mapping } from '@volar/language-core';
 import type { TextTypeFacts } from './text-type-facts.js';
+import type { HotSignalModuleManifest } from '../signals/hot-declarations.js';
 
 export type { TextTypeFacts } from './text-type-facts.js';
 
@@ -231,6 +232,8 @@ export interface CompileResult {
 	universalRuntime?: CompileOptions['universalRuntime'];
 	/** This module contains compiler-proven signal declarations or native reads. */
 	streamedSignals?: true;
+	/** Exact native webpack-HMR module recipe; absent recipes retain the reload fence. */
+	hotSignalModule?: HotSignalModuleManifest;
 	/** Production client constants used by compiled binding views; build-time adapter metadata. */
 	bindingConstants?: {
 		version: 1;

@@ -7,6 +7,16 @@ export { createResource, query } from './requests.js';
 export { ActionUncertainError, action$, isActionUncertain, optimistic$ } from './actions.js';
 export { __derivedAt, derived$ } from './derived-facade.js';
 export { __queryAt, query$ } from './query-facade.js';
+export {
+	__hotSignalModule,
+	__registerHotSignalComponent,
+	__remountHotSignalComponent,
+} from './hot-declarations.js';
+export type {
+	HotSignalDeclarationShape,
+	HotSignalModuleManifest,
+	HotSignalModuleStamp,
+} from './hot-declarations.js';
 export { isSignalHandle, isWritableSignal } from './handle-protocol.js';
 export {
 	__derivedScalarAt,

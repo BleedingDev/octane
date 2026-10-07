@@ -194,11 +194,16 @@ const CLIENT_ONLY_MODULES = new Set([
 	'signals/native-read-retry.ts',
 	'signals/transition-candidate.ts',
 ]);
-const SERVER_ONLY_MODULES = new Set(['signals/native-read-server.ts', 'signals/server.ts']);
+const SERVER_ONLY_MODULES = new Set([
+	'signals/native-read-server.ts',
+	'signals/server.ts',
+	'server/external-snapshot-preparation.ts',
+]);
 
 export function frameworkErrorSurface(filename) {
 	if (filename === 'runtime.ts') return 'client';
 	if (filename === 'runtime.server.ts') return 'server';
+	if (SERVER_ONLY_MODULES.has(filename)) return 'server';
 	if (!COVERED_MODULE.test(filename)) return undefined;
 	if (CLIENT_ONLY_MODULES.has(filename)) return 'client';
 	if (SERVER_ONLY_MODULES.has(filename)) return 'server';
@@ -544,7 +549,7 @@ function validateFrameworkErrorConstruction(
 
 function runtimeSources() {
 	const sourceDir = join(root, 'packages/octane/src');
-	const filenames = ['.', 'signals', 'hydration'].flatMap((directory) =>
+	const filenames = ['.', 'signals', 'hydration', 'server'].flatMap((directory) =>
 		readdirSync(join(sourceDir, directory))
 			.filter((name) => name.endsWith('.ts') && !name.endsWith('.d.ts'))
 			.map((name) => (directory === '.' ? name : `${directory}/${name}`)),

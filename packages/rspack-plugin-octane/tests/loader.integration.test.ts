@@ -84,6 +84,28 @@ describe('loader with the neutral compiler', () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
+	it('publishes the actual compiler recipe only for eligible native webpack-HMR modules', () => {
+		const source = `import { useSignal$ } from 'octane/signals/client'; export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as string}</p> }`;
+		const resourcePath = write(root, 'src/Counter.tsrx', source);
+		const result = transform({ root, resourcePath, source, hot: true });
+		expect(getOctaneRspackBuildInfo(result.module)?.hotSignalModule).toEqual({
+			version: 1,
+			moduleId: '/src/Counter.tsrx',
+			generation: expect.any(String),
+			declarations: [],
+			hookSlots: ['octane:/src/Counter.tsrx:Counter.useSignal$#0'],
+		});
+		expect(String(result.content)).toContain('__registerHotSignalComponent');
+		for (const options of [{ hmr: false }, { environment: 'server' }]) {
+			const unsupported = transform({ root, resourcePath, source, hot: true, options });
+			expect(getOctaneRspackBuildInfo(unsupported.module)).not.toHaveProperty('hotSignalModule');
+		}
+		const unsafe = `import { signal$ } from 'octane/signals'; const state$ = signal$(0, options); export function Counter() @{ <p>{state$.get() as string}</p> }`;
+		const unsafeResult = transform({ root, resourcePath, source: unsafe, hot: true });
+		expect(getOctaneRspackBuildInfo(unsafeResult.module)).not.toHaveProperty('hotSignalModule');
+		expect(String(unsafeResult.content)).not.toContain('__hotSignalModule');
+	});
+
 	it('compiles client TSRX with source maps and webpack HMR', () => {
 		const resourcePath = write(
 			root,
@@ -103,6 +125,13 @@ describe('loader with the neutral compiler', () => {
 			resourceQuery: '',
 			transformKind: 'compile',
 			serverRpc: false,
+			hotSignalModule: {
+				version: 1,
+				moduleId: '/src/App.tsrx',
+				generation: expect.any(String),
+				declarations: [],
+				hookSlots: [],
+			},
 		});
 	});
 

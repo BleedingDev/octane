@@ -182,6 +182,31 @@ test('requires every active surface code to have a valid literal call site', () 
 	);
 });
 
+test('checks server request preparation messages on their owning runtime surface', () => {
+	const input = catalog({
+		codes: {
+			1: {
+				message: 'Prepared request failed.',
+				argumentCount: 0,
+				runtime: ['server'],
+				status: 'active',
+			},
+		},
+	});
+	assert.doesNotThrow(() =>
+		validateRuntimeUsages(input, [
+			['server/external-snapshot-preparation.ts', 'throw new Error(formatServerError(1));'],
+		]),
+	);
+	assert.throws(
+		() =>
+			validateRuntimeUsages(input, [
+				['server/external-snapshot-preparation.ts', 'throw new Error("uncatalogued");'],
+			]),
+		/without a direct formatServerError/,
+	);
+});
+
 test('enforces coded messages in covered signal, hydration, and DOM binding modules', () => {
 	const shared = catalog({
 		codes: {

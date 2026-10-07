@@ -3,10 +3,15 @@ packages:
 packageImportMethod: clone-or-copy
 autoInstallPeers: false
 strictPeerDependencies: true
+overrides:
+  '@tanstack/router-core@1.171.15>@tanstack/history': 1.162.4
 patchedDependencies:
+  '@tanstack/router-core@1.171.15': patches/@tanstack__router-core@1.171.15.patch
   '@typescript-eslint/types@8.71.0': ../../patches/@typescript-eslint__types@8.71.0.patch
   '@tsrx/prettier-plugin@0.4.10': ../../patches/@tsrx__prettier-plugin@0.4.10.patch
 minimumReleaseAgeExclude:
   - '@tsrx/typescript-plugin@0.6.0'
 allowBuilds:
   esbuild: true
+  # Match the root policy: this updater is opt-in and unnecessary for sync.
+  tldjs: false

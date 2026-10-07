@@ -13,6 +13,8 @@ import {
 	isThenable,
 	readNode,
 	readyState,
+	pendingState,
+	invalidateNode,
 	refreshNode,
 	retireGraph,
 	setHistoricalReader,
@@ -42,6 +44,7 @@ import type {
 	QueryDefinition,
 	RequestEntry,
 	ResourceBinding,
+	QueryGenerationNamespace,
 } from './requests.js';
 import type {
 	StreamFrameIdentity,
@@ -197,6 +200,7 @@ export class ScopeImpl implements Scope, GraphOwner {
 	// never pays for request, resource, stream, adoption or trace bookkeeping.
 	requests: Map<string, RequestEntry> | undefined = undefined;
 	queryDefinitions: Map<string, QueryDefinition> | undefined = undefined;
+	queryGenerations: Map<string, QueryGenerationNamespace> | undefined = undefined;
 	resources: Map<ScopedNode, ResourceBinding> | undefined = undefined;
 	streams: ScopeStreams | undefined = undefined;
 	derivedBindings: Map<ScopedNode, DerivedBindingLifecycle> | undefined = undefined;
@@ -208,12 +212,127 @@ export class ScopeImpl implements Scope, GraphOwner {
 	private lifetime = 0;
 	private disposed = false;
 	readBarrier: Promise<void> | undefined;
+	private hotDeclarations:
+		| Map<string, { generation: string; node: ScopedNode; waiting: Promise<void>; ready(): void }>
+		| undefined;
+	private hotDeclaration: { key: string; generation: string } | undefined;
+
+	/** Stage all owned barriers before any cancellation callback can run. */
+	prepareHotDeclarations(nodes: readonly ScopedNode[], generation: string): () => void {
+		assertAlive(this);
+		assertWritable();
+		if (this.readBarrier || this.frames?.size) throw new SignalFrameError(formatClientError(345));
+		const targets = new Set(nodes);
+		for (const node of targets) {
+			if (node.owner !== this || this.nodes.get(node.key) !== node)
+				throw new SignalFrameError(formatClientError(346));
+		}
+		const retired: { dispose(): void }[] = [];
+		const previousBarriers: (() => void)[] = [];
+		for (const node of targets) {
+			if (node.kind === 'signal') continue;
+			let ready!: () => void;
+			const waiting = new Promise<void>((resolve) => {
+				ready = resolve;
+			});
+			const previous = this.hotDeclarations?.get(node.key);
+			(this.hotDeclarations ??= new Map()).set(node.key, { node, generation, waiting, ready });
+			node.compute = () => pendingState(waiting);
+			node.invalidateAttempt = undefined;
+			if (node.kind === 'async')
+				node.retry = () => {
+					throw waiting;
+				};
+			const resource = this.resources?.get(node);
+			const derived = this.derivedBindings?.get(node);
+			if (resource) {
+				this.resources!.delete(node);
+				retired.push(resource);
+			}
+			if (derived) {
+				this.derivedBindings!.delete(node);
+				retired.push(derived);
+			}
+			this.streams?.retireSelection(node.key);
+			invalidateNode(node, false);
+			if (previous) previousBarriers.push(previous.ready);
+		}
+		let finished = false;
+		return () => {
+			if (finished) return;
+			finished = true;
+			const errors: unknown[] = [];
+			signalBatch(() => {
+				for (const node of targets) {
+					if (node.kind === 'signal') continue;
+					try {
+						invalidateNode(node);
+					} catch (error) {
+						errors.push(error);
+					}
+				}
+				for (const ready of previousBarriers) ready();
+				// Detached bindings are no longer reachable by Scope.dispose(). Drain
+				// every one even if a preceding cancellation retires the owner.
+				for (const binding of retired) {
+					try {
+						binding.dispose();
+					} catch (error) {
+						errors.push(error);
+					}
+				}
+			});
+			if (errors.length > 1) throw new AggregateError(errors, formatClientError(349));
+			if (errors.length) throw errors[0];
+			assertAlive(this);
+		};
+	}
+
+	/** Lazy instance descriptors install their new closure in the real render scope. */
+	rebindHotDeclaration<T extends SignalHandle<unknown>>(
+		key: string,
+		generation: string,
+		create: () => T,
+	): T {
+		assertAlive(this);
+		const barrier = this.hotDeclarations?.get(key);
+		if (!barrier) return create();
+		if (
+			barrier.generation !== generation ||
+			this.nodes.get(key) !== barrier.node ||
+			this.hotDeclaration
+		) {
+			throw new SignalFrameError(formatClientError(347));
+		}
+		return signalBatch(() => {
+			this.hotDeclaration = { key, generation };
+			try {
+				const result = create();
+				assertAlive(this);
+				if (
+					this.hotDeclarations?.get(key) !== barrier ||
+					(result as SignalHandle<unknown>) !== barrier.node
+				) {
+					throw new SignalFrameError(formatClientError(348));
+				}
+				this.hotDeclarations.delete(key);
+				barrier.ready();
+				invalidateNode(barrier.node);
+				return result;
+			} finally {
+				this.hotDeclaration = undefined;
+			}
+		});
+	}
 
 	/** Internal document lifecycle: mark every owner before cancellation runs user code. */
 	suspendReads(): void {
 		if (this.disposed || this.readBarrier === undefined) return;
 		this.streams?.suspend();
 		if (this.requests) for (const entry of this.requests.values()) entry.stopAttempt();
+		if (this.queryGenerations)
+			for (const namespace of this.queryGenerations.values())
+				for (const entry of namespace.requests.values()) entry.stopAttempt();
 		if (this.derivedBindings)
 			for (const binding of this.derivedBindings.values()) binding.suspend();
 	}
@@ -229,21 +348,27 @@ export class ScopeImpl implements Scope, GraphOwner {
 					this.streams?.resume(node, binding);
 				}
 			// Refreshing may have created the first request map.
-			if (this.requests)
-				for (const entry of this.requests.values()) {
-					if (this.readBarrier !== undefined) break;
-					if (
-						!entry.active &&
-						!entry.state.snapshot.complete &&
-						entry.state.snapshot.status !== 'error' &&
-						entry.consumers.size
-					) {
-						entry.start(entry.state.snapshot.status !== 'ready');
-					}
-				}
+			if (this.requests) this.resumeRequestEntries(this.requests);
+			if (this.queryGenerations)
+				for (const namespace of this.queryGenerations.values())
+					this.resumeRequestEntries(namespace.requests);
 			if (this.derivedBindings)
 				for (const binding of this.derivedBindings.values()) binding.resume();
 		});
+	}
+
+	private resumeRequestEntries(entries: Map<string, RequestEntry>): void {
+		for (const entry of entries.values()) {
+			if (this.readBarrier !== undefined || this.disposed) break;
+			if (
+				!entry.active &&
+				!entry.state.snapshot.complete &&
+				entry.state.snapshot.status !== 'error' &&
+				entry.consumers.size
+			) {
+				entry.start(entry.state.snapshot.status !== 'ready');
+			}
+		}
 	}
 
 	constructor(
@@ -404,7 +529,7 @@ export class ScopeImpl implements Scope, GraphOwner {
 	): DerivedSignal<T> {
 		if (typeof compute !== 'function') throw new TypeError(formatClientError(122));
 		const [node, created] = this.declaredNode<T>(key, 'derived');
-		if (!created) return node as DerivedSignal<T>;
+		if (!created && this.hotDeclaration?.key !== key) return node as DerivedSignal<T>;
 		const binding = new Binding(this, node, compute, options);
 		(this.derivedBindings ??= new Map()).set(node, binding);
 		this.initializeRetention(node);
@@ -423,14 +548,21 @@ export class ScopeImpl implements Scope, GraphOwner {
 		if (unique) node = this.createNode<T>(key, 'async');
 		else {
 			const [declared, created] = this.declaredNode<T>(key, 'async');
-			if (!created) return declared as Resource<T>;
+			if (!created && this.hotDeclaration?.key !== key) return declared as Resource<T>;
 			node = declared;
 		}
 		const seed = this.initialSeed(key);
 		const retained = this.retainedSeed(key);
 		this.initializeRetention(node);
 		signalBatch(() => {
-			const binding = initialize(this, node, describe, seed, retained);
+			const binding = initialize(
+				this,
+				node,
+				describe,
+				seed,
+				retained,
+				this.hotDeclaration?.generation,
+			);
 			(this.resources ??= new Map()).set(node, binding);
 			refreshNode(node);
 			// A selection bound before this declaration ran may already hold results.
@@ -610,9 +742,15 @@ export class ScopeImpl implements Scope, GraphOwner {
 			scopeKey: this.scopeKey,
 			epoch: this.epoch,
 			retired: this.retired,
-			activeRequests: this.requests
-				? [...this.requests.values()].filter((entry) => entry.active).length
-				: 0,
+			activeRequests:
+				(this.requests ? [...this.requests.values()].filter((entry) => entry.active).length : 0) +
+				(this.queryGenerations
+					? [...this.queryGenerations.values()].reduce(
+							(count, namespace) =>
+								count + [...namespace.requests.values()].filter((entry) => entry.active).length,
+							0,
+						)
+					: 0),
 			adoptionLeases: this.frames?.size ?? 0,
 			nodes: [...this.nodes.values()].map((node) => {
 				const dependencies: { scopeKey: string; key: string }[] = [];
@@ -653,6 +791,16 @@ export class ScopeImpl implements Scope, GraphOwner {
 			if (this.resources) {
 				for (const resource of this.resources.values()) resource.dispose();
 				this.resources.clear();
+			}
+			if (this.queryGenerations) {
+				for (const namespace of this.queryGenerations.values()) {
+					for (const consumer of namespace.consumers) consumer.dispose();
+				}
+				this.queryGenerations.clear();
+			}
+			if (this.hotDeclarations) {
+				for (const barrier of this.hotDeclarations.values()) barrier.ready();
+				this.hotDeclarations.clear();
 			}
 			this.streams?.clear();
 			if (this.derivedBindings) {

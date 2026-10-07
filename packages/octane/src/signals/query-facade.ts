@@ -3,6 +3,7 @@ import { createResourceCellWith } from './engine.js';
 import { Descriptor, descriptorKey, signalOptionsKey } from './facade.js';
 import { runWithSignalOwner } from './owner-context.js';
 import { initializeResource, query as createQueryRequest } from './requests.js';
+import type { HotSignalModuleStamp } from './hot-declarations.js';
 import {
 	skip,
 	type QueryContext,
@@ -35,6 +36,7 @@ export function __queryAt<A, T>(
 	select: () => A | typeof skip,
 	load: (selection: A, context: QueryContext<T>) => QueryLoadResult<T>,
 	options?: QueryOptions & SignalOptions,
+	stamp?: HotSignalModuleStamp,
 ): QuerySignal<T> {
 	if (typeof select !== 'function' || typeof load !== 'function') {
 		throw new TypeError(formatClientError(193));
@@ -67,6 +69,9 @@ export function __queryAt<A, T>(
 				initializeResource,
 			) as QuerySignal<T>,
 		site,
+		stamp,
+		'__queryAt',
+		stamp ? (options?.kind ?? 'promise') : undefined,
 	);
 }
 

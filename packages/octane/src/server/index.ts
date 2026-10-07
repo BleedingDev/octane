@@ -254,8 +254,12 @@ export {
 
 export {
 	externalSnapshotBoundary,
+	publisherBoundary,
 	renderExternalSnapshot,
+	prepareExternalSnapshotRequest,
+	releasePreparedExternalSnapshotRequest,
 	type ExternalSnapshotRenderOptions,
+	type PreparedExternalSnapshotRequest,
 } from '../runtime.server.js';
 export {
 	registerExternalSnapshotContext,
@@ -269,5 +273,6 @@ export type {
 	ExternalSnapshotRequest,
 	ExternalSnapshotAuthority,
 	ExternalSnapshotContextCodec,
+	ExternalSnapshotContextReader,
 	ExternalSnapshotBoundaryOptions,
 } from '../external-snapshot-protocol.js';

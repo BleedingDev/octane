@@ -320,6 +320,12 @@ type ClientErrorArguments = {
 	339: [];
 	340: [];
 	341: [];
+	345: [];
+	346: [];
+	347: [];
+	348: [];
+	349: [];
+	350: [];
 };
 
 export function formatClientError<Code extends keyof ClientErrorArguments>(
@@ -1404,6 +1410,33 @@ export function formatClientError<Code extends keyof ClientErrorArguments>(
 			case 341:
 				return formatDevErrorMessage(
 					'An external snapshot boundary cannot change publisher authority during its mounted lifetime.',
+					args,
+				);
+			case 345:
+				return formatDevErrorMessage(
+					'A historical signal owner cannot change its module generation.',
+					args,
+				);
+			case 346:
+				return formatDevErrorMessage(
+					'The hot declaration no longer belongs to its native owner.',
+					args,
+				);
+			case 347:
+				return formatDevErrorMessage(
+					'The signal module generation is stale or already being installed.',
+					args,
+				);
+			case 348:
+				return formatDevErrorMessage('The hot declaration changed its native cell identity.', args);
+			case 349:
+				return formatDevErrorMessage(
+					'The hot signal generation has no current native publisher admission.',
+					args,
+				);
+			case 350:
+				return formatDevErrorMessage(
+					'A query definition generation must be a nonempty string.',
 					args,
 				);
 			default:

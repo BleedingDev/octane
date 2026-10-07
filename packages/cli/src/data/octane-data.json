@@ -3518,6 +3518,81 @@
       "message": "`<textarea>` children must be text: strings, numbers, or arrays of them. One child was %s. A textarea's content is its default value, so it cannot contain elements; render them outside the textarea or pass a string.",
       "runtime": ["client", "server"],
       "status": "active"
+    },
+    "337": {
+      "message": "Invalid native external snapshot payload or runtime ABI.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "338": {
+      "message": "External snapshot contexts require unique registered codecs and every required ancestor provider.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "339": {
+      "message": "External snapshot authority does not match its publisher, document, boundary, or request.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "340": {
+      "message": "External snapshots require a trusted document ID configured on the host renderer.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "341": {
+      "message": "An external snapshot boundary cannot change publisher authority during its mounted lifetime.",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "342": {
+      "message": "External snapshot load exceeded its boundary deadline.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "343": {
+      "message": "External snapshot rendering requires a genuine, open request prepared for one render.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "344": {
+      "message": "External snapshot context cleanup exceeded its deadline.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "345": {
+      "message": "A historical signal owner cannot change its module generation.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "346": {
+      "message": "The hot declaration no longer belongs to its native owner.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "347": {
+      "message": "The signal module generation is stale or already being installed.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "348": {
+      "message": "The hot declaration changed its native cell identity.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "349": {
+      "message": "The hot signal generation has no current native publisher admission.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "350": {
+      "message": "A query definition generation must be a nonempty string.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "351": {
+      "message": "External snapshot request or cleanup produced multiple failures.",
+      "runtime": ["server"],
+      "status": "active"
     }
   }
 }

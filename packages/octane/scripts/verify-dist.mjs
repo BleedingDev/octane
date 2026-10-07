@@ -76,6 +76,8 @@ export const REQUIRED_PUBLIC_VALUE_EXPORTS = {
 		'createPortal',
 		'createResizeObserver',
 		'createRoot',
+		'decodeExternalSnapshot',
+		'decodeExternalSnapshotRequest',
 		'delegateCaptureEvents',
 		'delegateEvents',
 		'devEventListener',
@@ -89,6 +91,7 @@ export const REQUIRED_PUBLIC_VALUE_EXPORTS = {
 		'evt2u',
 		'evtN',
 		'evtNu',
+		'externalSnapshotBoundary',
 		'flushSync',
 		'forBlock',
 		'getTransitionFallbackTimeout',
@@ -122,6 +125,7 @@ export const REQUIRED_PUBLIC_VALUE_EXPORTS = {
 		'preinit',
 		'preload',
 		'provideContext',
+		'publisherBoundary',
 		'puMiss',
 		'puPub',
 		'puTake0',
@@ -133,7 +137,10 @@ export const REQUIRED_PUBLIC_VALUE_EXPORTS = {
 		'queueRefAttach',
 		'queueRefDetach',
 		'renderBlock',
+		'registerExternalSnapshotContext',
 		'requestFormReset',
+		'serializeExternalSnapshot',
+		'serializeExternalSnapshotRequest',
 		'setAriaAttribute',
 		'setAttribute',
 		'setAutoFocus',
@@ -229,6 +236,13 @@ export const REQUIRED_PUBLIC_VALUE_EXPORTS = {
 	'./dom-binding-styles': ['__createBindingStyles'],
 	'./dom-binding-projections': ['__createBindingProjections'],
 	'./signals': [
+		'__signalAt',
+		'__derivedScalarAt',
+		'__derivedAt',
+		'__queryAt',
+		'__hotSignalModule',
+		'__registerHotSignalComponent',
+		'__remountHotSignalComponent',
 		'createResource',
 		'createScope',
 		'query',
@@ -260,9 +274,12 @@ export const REQUIRED_PUBLIC_VALUE_EXPORTS = {
 		'createPortal',
 		'createResizeObserver',
 		'escapeAttr',
+		'decodeExternalSnapshot',
+		'decodeExternalSnapshotRequest',
 		'earlySignalBootstrapScript',
 		'escapeHtml',
 		'executeServerFunction',
+		'externalSnapshotBoundary',
 		'flushSync',
 		'getSsrSuspenseTimeout',
 		'hookSlots',
@@ -282,11 +299,18 @@ export const REQUIRED_PUBLIC_VALUE_EXPORTS = {
 		'preload',
 		'puBatch',
 		'puMemo',
+		'publisherBoundary',
+		'prepareExternalSnapshotRequest',
+		'registerExternalSnapshotContext',
+		'releasePreparedExternalSnapshotRequest',
+		'renderExternalSnapshot',
 		'renderToPipeableStream',
 		'renderToReadableStream',
 		'renderToStaticMarkup',
 		'renderToString',
 		'requestFormReset',
+		'serializeExternalSnapshot',
+		'serializeExternalSnapshotRequest',
 		'setSsrSuspenseTimeout',
 		'ssrActivity',
 		'ssrArm',
@@ -656,6 +680,14 @@ export function missingRequiredPublicValueExports(subpath, actualNames) {
 }
 
 export function assertRequiredPublicValueExports(subpath, actualNames) {
+	if (subpath === './signals') {
+		const privateNames = ['admitHotSignalPublisher', 'createNativeHotSignalOwnerProof'].filter(
+			(name) => actualNames.includes(name),
+		);
+		if (privateNames.length > 0) {
+			throw new Error(`${subpath} exposed private native authority: ${privateNames.join(', ')}`);
+		}
+	}
 	const missing = missingRequiredPublicValueExports(subpath, actualNames);
 	if (missing.length > 0) {
 		throw new Error(`${subpath} omitted required named exports: ${missing.join(', ')}`);
@@ -753,14 +785,14 @@ export async function verifyDist(pkgDir) {
 		);
 	}
 
-	// Every relative import in every emitted .js module must resolve to a file.
+	// Every relative import in every emitted JavaScript module must resolve to a file.
 	// esbuild in bundle mode is the resolver (a real parser, not a regex, and it
 	// follows dynamic import() literals too): each dist module is its own entry,
 	// bare specifiers stay external (they are declared dependencies, present at
 	// install time), and JSON modules remain external so any future package
 	// metadata imports retain their import-attribute semantics.
 	const jsFiles = readdirSync(dist, { recursive: true })
-		.filter((f) => f.endsWith('.js'))
+		.filter((f) => /\.(?:c|m)?js$/.test(f))
 		.map((f) => join(dist, f));
 	try {
 		await build({

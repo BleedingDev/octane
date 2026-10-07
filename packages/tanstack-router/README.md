@@ -134,3 +134,51 @@ package's `status.json`).
 - **Native DOM events** — link callbacks receive browser events rather than React
   synthetic events.
 - Router devtools are distributed separately and are not part of this binding.
+
+## Worker render snapshots
+
+`captureRouterRenderSnapshot` projects a settled router for a separate SSR
+publisher. It requires an explicitly associated, locally registered profile with
+an exact `{ key, version }`. The wire contains bounded plain JSON: route geometry,
+public URL and user history state, derived match IDs/params/search, settled loader
+data, and the profile's declared public context. Internal history keys and router
+objects, functions, controllers and promises do not cross the boundary.
+
+`restoreRouterRenderSnapshot` creates a fresh native route tree, memory history
+and Router, then awaits genuine `router.load()`. It checks the native matches and
+URL before restoring loader data through public `router.updateMatch`. Its local
+restoration tree must contain no loaders, lifecycle hooks, lazy routes or view
+components (including preload-capable components). A named profile supplies
+routing-only reconstruction for custom search/params behavior; it cannot replay
+the original app's effects. The built-in defaults guard rejects custom routing
+functions and per-route case sensitivity unless a named profile admits them.
+
+```ts
+const unregister = registerRouterRenderProfile({
+  id: { key: 'catalog-routing', version: '1' },
+  assertHost(router) { assertDefaultRouterRenderHost(router); },
+  createRoutingTree(snapshot) { return createRouterRenderRouteTree(snapshot.routes); },
+  routingOptions() { return {}; },
+});
+associateRouterRenderProfile(hostRouter, {
+  id: { key: 'catalog-routing', version: '1' },
+  publicContext: { catalog: 'public' },
+});
+const projection = captureRouterRenderSnapshot(hostRouter);
+const restored = await restoreRouterRenderSnapshot(projection, { signal });
+try {
+  // Provide this genuine Router through the native router Context for SSR.
+} finally {
+  disposeRouterRenderSnapshot(restored);
+  unregister();
+}
+```
+
+Profiles must be registered at ordinary startup on both host and publisher before
+request admission. A profile identity describes locally installed routing
+behavior; publisher authentication remains the transport owner's responsibility.
+A successfully restored router can be captured for a further Worker hop while its
+lease remains live. Its exact profile, routing options and native tree retain
+owning provenance; mutation, profile replacement or disposal invalidates capture.
+Abort cancels native matches and releases the owned memory history. The module is
+browser-safe and exported from the main entry as well as `/ssr/server`.

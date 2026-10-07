@@ -53,22 +53,23 @@ async function compileHmrComponent(
 	modules: Record<string, Record<string, unknown>> = {},
 	options: { hmr?: 'vite' | 'webpack'; hot?: TestHotContext } = {},
 ): Promise<ComponentBody<any>> {
-	const [{ compile }, runtime, internalRuntime] = await Promise.all([
+	const [{ compile }, runtime, internalRuntime, signalsRuntime] = await Promise.all([
 		import('octane/compiler'),
 		import('../src/index.js'),
 		import('octane/internal/client'),
+		import('octane/signals'),
 	]);
 	const code = compile(source, filename, { hmr: options.hmr ?? 'webpack' }).code;
 	const transformed =
 		code
 			.replace(
-				/^import\s*\{([^}]*)\}\s*from\s*(['"])octane(\/internal\/client)?\2;/gm,
-				(_match: string, imports: string, _quote: string, internal: string | undefined) => {
+				/^import\s*\{([^}]*)\}\s*from\s*(['"])octane(\/internal\/client|\/signals)?\2;/gm,
+				(_match: string, imports: string, _quote: string, subpath: string | undefined) => {
 					const properties = imports
 						.split(',')
 						.map((specifier) => specifier.trim().replace(/\s+as\s+/, ': '))
 						.join(', ');
-					return `const { ${properties} } = ${internal ? 'internalRuntime' : 'runtime'};`;
+					return `const { ${properties} } = ${subpath === '/signals' ? 'signalsRuntime' : subpath ? 'internalRuntime' : 'runtime'};`;
 				},
 			)
 			.replace(
@@ -96,10 +97,11 @@ async function compileHmrComponent(
 	return Function(
 		'runtime',
 		'internalRuntime',
+		'signalsRuntime',
 		'hot',
 		'modules',
 		transformed,
-	)(runtime, internalRuntime, hot, modules) as ComponentBody<any>;
+	)(runtime, internalRuntime, signalsRuntime, hot, modules) as ComponentBody<any>;
 }
 
 /**
@@ -877,6 +879,30 @@ describe('hmr — runtime wrapper', () => {
 		r.unmount();
 	});
 
+	it('accepts a compiled output-layout change only after every mount is disposed', async () => {
+		const direct = await compileHmrComponent(
+			`export function App(p) @{ <span>{p.label as string}</span> }`,
+		);
+		const returned = await compileHmrComponent(
+			`export function App(p) @{ if (p.empty) return 'empty'; <span>{p.label as string}</span> }`,
+		);
+		const first = mount(direct, { label: 'first', empty: false });
+		const second = mount(direct, { label: 'second', empty: false });
+		first.unmount();
+		expect((direct as any)[HMR].update(returned)).toBe(false);
+		expect(second.find('span').textContent).toBe('second');
+		second.unmount();
+		expect((direct as any)[HMR].update(returned)).toBe(true);
+		const fresh = mount(direct, { label: 'fresh', empty: true });
+		try {
+			expect(fresh.container.textContent).toBe('empty');
+			fresh.update(direct, { label: 'fresh', empty: false });
+			expect(fresh.find('span').textContent).toBe('fresh');
+		} finally {
+			fresh.unmount();
+		}
+	});
+
 	it('preserves hook state across update() — stable Symbol.for keys', () => {
 		// Both bodies use the SAME hook symbol (simulating the compiler's
 		// `Symbol.for('octane:file.tsrx:Foo.useState#0')`-stable emit).
@@ -956,6 +982,7 @@ describe('hmr — runtime wrapper', () => {
 
 	it('webpack HMR preserves named and default wrapper identity across repeated updates', async () => {
 		const { compile } = await import('octane/compiler');
+		const signalsRuntime = await import('octane/signals');
 		const runtime = new Proxy(
 			{ hmr, HMR },
 			{
@@ -975,13 +1002,13 @@ describe('hmr — runtime wrapper', () => {
 			const transformed =
 				code
 					.replace(
-						/^import\s*\{([\s\S]*?)\}\s*from\s*(['"])octane\2;/m,
-						(_match, imports: string) => {
+						/^import\s*\{([^}]*)\}\s*from\s*(['"])octane(\/signals|\/internal\/client)?\2;/gm,
+						(_match, imports: string, _quote: string, subpath: string | undefined) => {
 							const properties = imports
 								.split(',')
 								.map((specifier) => specifier.trim().replace(/\s+as\s+/, ': '))
 								.join(', ');
-							return `const { ${properties} } = runtime;`;
+							return `const { ${properties} } = ${subpath === '/signals' ? 'signalsRuntime' : 'runtime'};`;
 						},
 					)
 					.replace(/\bexport let /g, 'let ')
@@ -1002,7 +1029,12 @@ describe('hmr — runtime wrapper', () => {
 					invalidated = true;
 				},
 			};
-			const exports = Function('runtime', 'hot', transformed)(runtime, hot) as {
+			const exports = Function(
+				'runtime',
+				'signalsRuntime',
+				'hot',
+				transformed,
+			)(runtime, signalsRuntime, hot) as {
 				Named: any;
 				default: any;
 			};

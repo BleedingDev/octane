@@ -8576,6 +8576,166 @@ function normalizeArrowComponents(ast) {
 	return changed ? { ...ast, body } : ast;
 }
 
+// A memo/default export can expose a private component without an exported
+// declaration. Follow only immutable module aliases and actual Octane memo
+// imports; arbitrary HOCs or mutable/conditional exports retain the hot fence.
+function collectHotComponentExportFlows(input) {
+	const ast = normalizeArrowComponents(input);
+	const lexical = createLexicalAnalysis(ast);
+	const immutable = collectImmutableModuleFunctions(ast.body);
+	const opaqueDeclarations = new Map();
+	const components = new Map();
+	const bindings = new Map();
+	const memoImports = new Set();
+	const namespaces = new Set();
+	for (const statement of ast.body) {
+		const declaration =
+			statement.type === 'ExportNamedDeclaration' || statement.type === 'ExportDefaultDeclaration'
+				? statement.declaration
+				: statement;
+		if (isComponentFunction(declaration) || isReturnJsxFunction(declaration))
+			components.set(declaration.id?.name, declaration);
+		if (
+			declaration?.id?.type === 'Identifier' &&
+			[
+				'FunctionDeclaration',
+				'ClassDeclaration',
+				'TSModuleDeclaration',
+				'TSEnumDeclaration',
+			].includes(declaration.type)
+		)
+			opaqueDeclarations.set(declaration.id.name, declaration);
+		if (declaration?.type === 'VariableDeclaration') {
+			for (const item of declaration.declarations) {
+				if (item.id?.type === 'Identifier')
+					bindings.set(item.id.name, { item, immutable: declaration.kind === 'const' });
+			}
+		}
+		if (statement.type !== 'ImportDeclaration' || statement.source.value !== 'octane') continue;
+		if (statement.importKind === 'type') continue;
+		for (const specifier of statement.specifiers) {
+			if (specifier.importKind === 'type') continue;
+			if (specifier.type === 'ImportNamespaceSpecifier') namespaces.add(specifier.local.name);
+			if ((specifier.imported?.name ?? specifier.imported?.value) === 'memo')
+				memoImports.add(specifier.local.name);
+		}
+	}
+	const rootReference = (node) =>
+		node?.type === 'Identifier' &&
+		lexical.resolveBinding(lexical.nodeScopes.get(node) ?? lexical.rootScope, node.name)?.scope ===
+			lexical.rootScope;
+	const trustedMemo = (callee) => {
+		callee = unwrapTsExpr(callee);
+		return (
+			(rootReference(callee) && memoImports.has(callee.name)) ||
+			(callee?.type === 'MemberExpression' &&
+				!callee.computed &&
+				!callee.optional &&
+				callee.property?.name === 'memo' &&
+				rootReference(callee.object) &&
+				namespaces.has(callee.object.name))
+		);
+	};
+	const resolve = (expression, active = new Set()) => {
+		const node = unwrapTsExpr(expression);
+		if (rootReference(node)) {
+			const component = components.get(node.name);
+			if (component) {
+				return immutable.has(node.name) && component.end <= node.start ? node.name : null;
+			}
+			const binding = bindings.get(node.name);
+			if (!binding?.immutable || binding.item.end > node.start || active.has(node.name))
+				return null;
+			return resolve(binding.item.init, new Set([...active, node.name]));
+		}
+		if (
+			node?.type === 'CallExpression' &&
+			!node.optional &&
+			trustedMemo(node.callee) &&
+			node.arguments.length === 1 &&
+			!node.arguments.some((argument) => argument.type === 'SpreadElement')
+		)
+			return resolve(node.arguments[0], active);
+		return null;
+	};
+	const containsComponent = (node, active = new Set()) => {
+		if (node === null || typeof node !== 'object') return false;
+		if (Array.isArray(node)) return node.some((child) => containsComponent(child, active));
+		if (node.body?.type === 'JSXCodeBlock' || isReturnJsxFunction(node)) return true;
+		if (rootReference(node)) {
+			if (components.has(node.name)) return true;
+			const binding = bindings.get(node.name);
+			const value = binding?.item.init ?? opaqueDeclarations.get(node.name);
+			if (value && !active.has(node.name))
+				return containsComponent(value, new Set([...active, node.name]));
+		}
+		for (const key in node) {
+			if (!AST_WALK_SKIP_KEYS.has(key) && containsComponent(node[key], active)) return true;
+		}
+		return false;
+	};
+	const selected = new Set();
+	let eligible = true;
+	const admit = (expression) => {
+		const component = resolve(expression);
+		if (component !== null) selected.add(component);
+		else if (containsComponent(expression)) eligible = false;
+	};
+	for (const statement of ast.body) {
+		if (statement.exportKind === 'type') continue;
+		if (statement.type === 'ExportDefaultDeclaration') {
+			if (components.has(statement.declaration.id?.name)) {
+				if (!immutable.has(statement.declaration.id?.name)) eligible = false;
+			} else admit(statement.declaration);
+		} else if (statement.type === 'ExportNamedDeclaration' && statement.source == null) {
+			if (components.has(statement.declaration?.id?.name)) {
+				if (!immutable.has(statement.declaration.id.name)) eligible = false;
+			} else if (statement.declaration?.type === 'VariableDeclaration') {
+				for (const item of statement.declaration.declarations) {
+					if (statement.declaration.kind !== 'const' && containsComponent(item.init))
+						eligible = false;
+					else admit(item.init);
+				}
+			} else if (containsComponent(statement.declaration)) {
+				eligible = false;
+			}
+			for (const specifier of statement.specifiers ?? []) {
+				if (specifier.exportKind !== 'type') admit(specifier.local);
+			}
+		}
+	}
+	const unsafeIdentity = (node) => {
+		if (node === null || typeof node !== 'object') return false;
+		if (Array.isArray(node)) return node.some(unsafeIdentity);
+		if (node.type === 'AssignmentExpression' && containsComponent(node.right)) return true;
+		if (
+			node.type === 'VariableDeclarator' &&
+			(node.id?.type !== 'Identifier' || bindings.get(node.id.name)?.item !== node) &&
+			(containsComponent(node.init) || containsComponent(node.id))
+		)
+			return true;
+		if (
+			(node.type === 'ForOfStatement' || node.type === 'ForInStatement') &&
+			containsComponent(node.right)
+		)
+			return true;
+		if (node.type === 'TSImportEqualsDeclaration' && containsComponent(node.moduleReference))
+			return true;
+		if (
+			rootReference(node) &&
+			selected.has(node.name) &&
+			node.start < components.get(node.name).start
+		)
+			return true;
+		for (const key in node) {
+			if (!AST_WALK_SKIP_KEYS.has(key) && unsafeIdentity(node[key])) return true;
+		}
+		return false;
+	};
+	if (unsafeIdentity(ast)) eligible = false;
+	return { eligible, components: [...selected] };
+}
+
 // A top-level statement that carries NO runtime value — pure TypeScript type
 // surface (`interface`, `type` alias, `declare …` ambients, `import type` /
 // `export type`). The runtime compile (client/server) must DROP these: esrap
@@ -10090,6 +10250,9 @@ function compileAuthored(source, filename, options, bundlerMetadata) {
 				: isKnownTextChildExpression,
 		),
 		cleanFilename,
+		mode === 'client' && options?.hmr === 'webpack'
+			? { source, ...collectHotComponentExportFlows(attemptAst) }
+			: undefined,
 	);
 	if (bundlerMetadata !== null) bundlerMetadata.hydrateAst = signalAst;
 	const memoizedAst = strongModeEnabled
@@ -10608,6 +10771,8 @@ function compileInternal(
 		// own component marker pair instead of borrowing the Hydrate block range.
 		hydrateBoundaryModule: options?.__hydrateBoundaryModule === true,
 		hmr: hmrEnabled, // gates Symbol.for vs Symbol() hook slots (allocHookSymbol)
+		hotSignalModule: ast._octaneHotSignalModule,
+		hotSignalHookSlots: ast._octaneHotSignalModule === undefined ? null : [],
 		isVoidComponentImport:
 			typeof options?.isVoidComponentImport === 'function' ? options.isVoidComponentImport : null,
 		descriptorChildrenBindings: collectDescriptorChildrenBindings(
@@ -10925,6 +11090,7 @@ function compileInternal(
 	// and the `import.meta.hot.accept` block after walking the body, so the
 	// wrapping sits AFTER each component's `const Comp = …;` declaration.
 	const hmrComponents = [];
+	const capturedHotComponents = new Set(ctx.hotSignalModule?.components ?? []);
 
 	// === Design (c) v0 pre-pass: classify same-module components as
 	// hookless+eligible for componentSlotLite. Two sweeps:
@@ -11471,9 +11637,13 @@ function compileInternal(
 			continue;
 		}
 		if (isComponentFunction(node)) {
-			// `function Foo() @{ ... }` (new TSRX shape) — non-exported helper. HMR
-			// doesn't wrap these (they're not user-visible across module boundaries).
-			bodyNodes.push(...compileComponent(node, ctx).nodes);
+			// A private component exposed by a proven memo/alias export needs the
+			// same canonical identity as a directly exported declaration.
+			const captured = capturedHotComponents.has(node.id.name);
+			bodyNodes.push(
+				...compileComponent(node, ctx, captured ? { ...compileOpts, hmrCaptured: true } : {}).nodes,
+			);
+			if (captured) hmrComponents.push({ name: node.id.name, exportKind: 'named' });
 		} else if (node.type === 'ExportDefaultDeclaration' && isComponentFunction(node.declaration)) {
 			// `export default function Foo() @{...}` → emit as named const + `export default Foo;`.
 			const c = node.declaration;
@@ -11485,8 +11655,9 @@ function compileInternal(
 			bodyNodes.push(...compileComponent({ ...c, export: true }, ctx, compileOpts).nodes);
 			if (hmrEnabled) hmrComponents.push({ name: c.id.name, exportKind: 'named' });
 		} else if (isReturnJsxFunction(node)) {
-			// `function Foo() { …hooks…; return <jsx>; }` — a plain return-JSX function.
-			bodyNodes.push(...compileReturnJsxFunction(node, ctx, {}).nodes);
+			const captured = capturedHotComponents.has(node.id.name);
+			bodyNodes.push(...compileReturnJsxFunction(node, ctx, captured ? compileOpts : {}).nodes);
+			if (captured) hmrComponents.push({ name: node.id.name, exportKind: 'named' });
 		} else if (node.type === 'ExportNamedDeclaration' && isReturnJsxFunction(node.declaration)) {
 			bodyNodes.push(
 				...compileReturnJsxFunction(node.declaration, ctx, {
@@ -11544,6 +11715,50 @@ function compileInternal(
 			// Top-level passthrough (imports, plain consts/functions): already a
 			// rewritten statement node — embedded directly in the module AST.
 			bodyNodes.push(lowered);
+		}
+		const declaration = node.declaration ?? node;
+		if (capturedHotComponents.has(declaration.id?.name)) {
+			const component = hmrComponents.find((entry) => entry.name === declaration.id.name);
+			if (component !== undefined) {
+				component.freshName = allocCompilerName(ctx, `_$hotBody${component.name}`);
+				const hotName = allocCompilerName(ctx, `_$hotCapture${component.name}`);
+				const hot = b.id(hotName);
+				const store = (optional = false) =>
+					b.member(b.member(hot, 'data'), '__octaneComponents', false, optional);
+				const key = component.exportKind === 'default' ? 'default' : component.name;
+				bodyNodes.push(
+					inheritOriginLoc(b.const(component.freshName, b.id(component.name)), declaration),
+					inheritOriginLoc(
+						b.const(
+							hotName,
+							b.member(
+								{ type: 'MetaProperty', meta: b.id('import'), property: b.id('meta') },
+								'webpackHot',
+							),
+						),
+						declaration,
+					),
+					inheritOriginLoc(
+						b.if(
+							b.logical(
+								'&&',
+								hot,
+								b.logical(
+									'&&',
+									store(true),
+									b.call(
+										b.member(b.member(b.object([]), 'hasOwnProperty'), 'call'),
+										store(),
+										b.literal(key),
+									),
+								),
+							),
+							b.stmt(b.assignment('=', b.id(component.name), b.member(store(), b.id(key)))),
+						),
+						declaration,
+					),
+				);
+			}
 		}
 	}
 
@@ -11673,13 +11888,33 @@ function compileInternal(
 				),
 				b.block([
 					b.if(
-						b.unary(
-							'!',
-							b.call(
-								b.member(b.member(previousComponent(c), b.id('_$HMR'), true), 'update'),
-								b.id(c.name),
-							),
-						),
+						ctx.hotSignalModule === undefined
+							? b.unary(
+									'!',
+									b.call(
+										b.member(b.member(previousComponent(c), b.id('_$HMR'), true), 'update'),
+										b.id(c.freshName ?? c.name),
+									),
+								)
+							: b.logical(
+									'&&',
+									b.unary(
+										'!',
+										b.call(
+											b.member(b.member(previousComponent(c), b.id('_$HMR'), true), 'update'),
+											b.id(c.freshName ?? c.name),
+										),
+									),
+									b.unary(
+										'!',
+										b.call(
+											ctx.hotSignalModule.remountHelper,
+											b.id(ctx.hotSignalModule.stampName),
+											previousComponent(c),
+											b.id(c.freshName ?? c.name),
+										),
+									),
+								),
 						b.block([b.stmt(b.call(b.member(hot(), 'invalidate')))]),
 						b.block([b.stmt(b.assignment('=', b.id(c.name), previousComponent(c)))]),
 					),
@@ -11768,6 +12003,21 @@ function compileInternal(
 			),
 		);
 	}
+	const hotSignalRegistrationNodes =
+		ctx.hotSignalModule === undefined
+			? []
+			: hmrComponents.map((component) =>
+					inheritOriginLoc(
+						b.stmt(
+							b.call(
+								ctx.hotSignalModule.registerHelper,
+								b.id(ctx.hotSignalModule.stampName),
+								b.id(component.name),
+							),
+						),
+						moduleOrigin,
+					),
+				);
 
 	// Profiling registrations intentionally run AFTER the HMR handoff block in
 	// the final output. On a hot update the local binding is reassigned
@@ -11863,6 +12113,43 @@ function compileInternal(
 			),
 		);
 	}
+	let hotSignalManifest;
+	const hotSignalNodes = [];
+	if (ctx.hotSignalModule !== undefined) {
+		const {
+			stampName,
+			stampHelper,
+			registerHelper,
+			remountHelper,
+			moduleId,
+			generation,
+			declarations,
+		} = ctx.hotSignalModule;
+		hotSignalManifest = Object.freeze({
+			version: 1,
+			moduleId,
+			generation,
+			hookSlots: Object.freeze(ctx.hotSignalHookSlots),
+			declarations,
+		});
+		hotSignalNodes.push(
+			inheritOriginLoc(
+				b.imports(
+					[
+						['__hotSignalModule', stampHelper],
+						['__registerHotSignalComponent', registerHelper],
+						['__remountHotSignalComponent', remountHelper],
+					],
+					'octane/signals',
+				),
+				moduleOrigin,
+			),
+			inheritOriginLoc(
+				b.const(stampName, b.call(stampHelper, jsonValueToNode(hotSignalManifest))),
+				moduleOrigin,
+			),
+		);
+	}
 
 	// All remaining authored memo sites have now received their real hook slots.
 	// Lower callable helpers, returned-JSX functions, explicit-slot calls and
@@ -11872,6 +12159,7 @@ function compileInternal(
 	let moduleBody = [
 		...nativeReadActivationNodes(ctx, moduleOrigin),
 		...signalBindingNodes,
+		...hotSignalNodes,
 		...vtHintNodes,
 		...delegateNodes,
 		...styleNodes,
@@ -11880,6 +12168,7 @@ function compileInternal(
 		...bodyNodes,
 		...stampNodes,
 		...hmrNodes,
+		...hotSignalRegistrationNodes,
 		...profileNodes,
 	];
 	if (options?.__valdiAbiGuard !== undefined) {
@@ -11927,6 +12216,7 @@ function compileInternal(
 	/** @type {{ code: string, map: any, diagnostics: any, inspect?: any, streamedSignals?: true, __universalSourceMapComposed?: boolean }} */
 	const result = {
 		code: printed.code,
+		...(hotSignalManifest === undefined ? null : { hotSignalModule: hotSignalManifest }),
 		...(ast._octaneSignalDeclarations === true || ctx.nativeReads
 			? { streamedSignals: true }
 			: null),
@@ -15861,6 +16151,7 @@ function compileComponent(node, ctx, options) {
 	const isExported = !!(node.export || node.default);
 	const isDefault = !!node.default;
 	const hmrWrap = !!(options && options.hmrWrap);
+	const hmrWrapped = hmrWrap && (isExported || options?.hmrCaptured === true);
 	const returnedOutput = node.body?.type === 'JSXCodeBlock' && hasOwnValueReturn(node);
 	const owner =
 		ctx.componentEffectOwnership && isExported
@@ -16029,11 +16320,11 @@ function compileComponent(node, ctx, options) {
 			// the WRAPPER too (hmr() does not forward $$singleRoot). The tail
 			// stamp is dev-only, and route code-splitting runs build-mode only,
 			// so the unguarded tail assignment never meets an extracted binding.
-			if (!(hmrWrap && isExported)) {
+			if (!hmrWrapped) {
 				componentInfo.singleRootInitialized = true;
 			}
 		}
-		if (hmrWrap && isExported) {
+		if (hmrWrapped) {
 			// `_$hmr` returns a stable wrapper with a DIFFERENT identity; rebinding
 			// keeps later references hot-updatable while the pre-declaration capture
 			// deliberately holds the raw function (edits to such a component fall
@@ -16079,7 +16370,7 @@ function compileComponent(node, ctx, options) {
 	// HMR exports use mutable, live bindings so a re-evaluated module can hand
 	// its fresh body to the previous canonical wrapper and re-export that same
 	// identity. Production components retain their tree-shakeable const binding.
-	let valueExpr = hmrWrap && isExported ? inheritOriginLoc(b.call('_$hmr', abiFn), node) : abiFn;
+	let valueExpr = hmrWrapped ? inheritOriginLoc(b.call('_$hmr', abiFn), node) : abiFn;
 	if (node._octaneBindingView) {
 		valueExpr = markPure(
 			inheritOriginLoc(
@@ -23628,6 +23919,7 @@ function allocHookSymbol(ctx, debugName, profile = null, forceSymbol = false, pr
 		// name + call-site index — stable provided the user doesn't reorder hooks
 		// between renders (which would violate React's rules anyway).
 		const stableKey = `octane:${ctx.filename || '<anon>'}:${debugName}`;
+		ctx.hotSignalHookSlots?.push(stableKey);
 		symbolExpr = b.call(
 			b.member(b.id('Symbol'), 'for'),
 			b.literal(stableKey, JSON.stringify(stableKey)),

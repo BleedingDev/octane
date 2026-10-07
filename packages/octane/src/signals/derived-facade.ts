@@ -3,6 +3,7 @@ import { createDeclaredDerivedCell } from './computations.js';
 import { DerivedDescriptor, descriptorKey, signalOptionsKey } from './facade.js';
 import { runWithSignalOwner } from './owner-context.js';
 import type { DerivedCompute, DerivedOptions, DerivedSignal, SignalOptions } from './types.js';
+import type { HotSignalModuleStamp } from './hot-declarations.js';
 
 // General derived values may start async work. Scalar compiler output imports
 // only the shared facade, even when a separate cold entry uses this factory.
@@ -10,6 +11,7 @@ export function __derivedAt<T>(
 	site: string | undefined,
 	compute: DerivedCompute<T>,
 	options?: DerivedOptions & SignalOptions,
+	stamp?: HotSignalModuleStamp,
 ): DerivedSignal<T> {
 	if (typeof compute !== 'function') throw new TypeError(formatClientError(122));
 	const explicit = signalOptionsKey(options);
@@ -26,6 +28,8 @@ export function __derivedAt<T>(
 			return createDeclaredDerivedCell(owner, key, wrapped, options);
 		},
 		site,
+		stamp,
+		'__derivedAt',
 	);
 }
 

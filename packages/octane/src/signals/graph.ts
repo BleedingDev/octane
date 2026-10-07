@@ -813,12 +813,12 @@ export function publishNode<T>(node: ScopedNode<T>, next: NodeState<T>): void {
 }
 
 /** An explicit source retry invalidates even a cached description failure. */
-export function invalidateNode(node: ScopedNode): void {
+export function invalidateNode(node: ScopedNode, propagate = true): void {
 	node.flags |= ReactiveFlags.Dirty;
 	node.revision++;
 	node.wakeup?.resolve();
 	node.wakeup = undefined;
-	if (node.subs) graph.propagate(node.subs, executionDepth !== 0);
+	if (propagate && node.subs) graph.propagate(node.subs, executionDepth !== 0);
 }
 
 export function derivedState<T>(node: ScopedNode<T>, read: () => T): NodeState<T> {

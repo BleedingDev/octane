@@ -211,6 +211,9 @@ export default function octaneLoader(source, inputSourceMap) {
 					resourceQuery: id.slice(cleanModuleId(id).length),
 					transformKind: result.kind,
 					...(result.streamedSignals === true ? { streamedSignals: true } : null),
+					...(result.hotSignalModule === undefined
+						? null
+						: { hotSignalModule: result.hotSignalModule }),
 					serverRpc:
 						result.kind === 'compile' &&
 						(result.code.includes('_$__serverRpc(') ||

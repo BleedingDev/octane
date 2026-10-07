@@ -1,5 +1,6 @@
 import type { Compiler, RspackPluginInstance } from '@rspack/core';
 import type { KnownAttributeSpread, OctaneCssModuleConstants } from 'octane/compiler';
+import type { HotSignalModuleManifest } from 'octane/signals';
 
 export type { OctaneCssModuleConstants } from 'octane/compiler';
 
@@ -234,6 +235,8 @@ export interface OctaneRspackBuildInfo {
 	resourceQuery?: string;
 	transformKind: 'compile' | 'slots' | 'client-only-stub';
 	streamedSignals?: true;
+	/** Exact native webpack-HMR module recipe; absent recipes retain the reload fence. */
+	hotSignalModule?: HotSignalModuleManifest;
 	serverRpc: boolean;
 	/** Strict-independent Hydrate templates completed into the emitted client manifest. */
 	independentWidgets?: readonly {

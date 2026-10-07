@@ -46,6 +46,7 @@ export type {
 } from '@tanstack/history';
 
 export { createRouter, Router } from './router';
+export * from './ssr/routerRenderSnapshot';
 export {
 	createRoute,
 	createRootRoute,

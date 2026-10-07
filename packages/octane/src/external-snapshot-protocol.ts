@@ -1,7 +1,11 @@
-import { decodeSignalValue, encodeSignalValue, snapshotSignalValue } from './data-encoding.js';
+import { decodeSignalValue, encodeSignalValue } from './data-encoding.js';
 import { isContext } from './context-identity.js';
 import { formatClientError } from './error-codes.client.generated.js';
 import type { EncodedSignalValue } from './signals/types.js';
+import {
+	snapshotExternalSnapshotRequest,
+	snapshotExternalSnapshotResponse,
+} from './external-snapshot-budget.js';
 
 export const EXTERNAL_SNAPSHOT_ATTR = 'data-octane-external-snapshot';
 export const EXTERNAL_SNAPSHOT_ABI = 1;
@@ -56,7 +60,20 @@ export interface ExternalSnapshotContextCodec<T> {
 	readonly key: string;
 	readonly encode: (value: T) => unknown;
 	readonly decode: (value: unknown, signal?: AbortSignal) => T | PromiseLike<T>;
+	/** Release one successfully reconstructed server value after import/render or cancellation. */
+	readonly dispose?: (value: T) => void | PromiseLike<void>;
+	/** Validate against selected reconstructed contexts before exposed code is imported. */
+	readonly validate?: (
+		value: T,
+		readContext: ExternalSnapshotContextReader,
+		signal?: AbortSignal,
+	) => void | PromiseLike<void>;
 }
+
+/** Physical native context identities selected by this request, without default fallbacks. */
+export type ExternalSnapshotContextReader = <T>(
+	context: Function & { readonly defaultValue: T },
+) => { readonly present: false } | { readonly present: true; readonly value: T };
 
 interface ContextCodec {
 	readonly context: Function;
@@ -77,12 +94,14 @@ export function registerExternalSnapshotContext<T>(
 		!validKey(codec.key) ||
 		typeof codec.encode !== 'function' ||
 		typeof codec.decode !== 'function' ||
+		(codec.dispose !== undefined && typeof codec.dispose !== 'function') ||
+		(codec.validate !== undefined && typeof codec.validate !== 'function') ||
 		contextCodecs.has(codec.key) ||
 		contextKeys.has(context)
 	)
 		throw new TypeError(formatClientError(338));
-	const { key, encode, decode } = codec;
-	const entry = { context, codec: Object.freeze({ key, encode, decode }) };
+	const { key, encode, decode, dispose, validate } = codec;
+	const entry = { context, codec: Object.freeze({ key, encode, decode, dispose, validate }) };
 	contextCodecs.set(key, entry);
 	contextKeys.set(context, key);
 	return () => {
@@ -108,18 +127,13 @@ export function captureExternalSnapshotContexts(
 	return captured;
 }
 
-export async function decodeExternalSnapshotContexts(
-	request: ExternalSnapshotRequest,
-	signal?: AbortSignal,
-): Promise<readonly [Function, unknown][]> {
-	return Promise.all(
-		request.contexts.map(async ({ key, value }) => {
-			signal?.throwIfAborted();
-			const entry = contextCodecs.get(key);
-			if (entry === undefined) throw new TypeError(formatClientError(338));
-			return [entry.context, await entry.codec.decode(decodeSignalValue(value), signal)] as const;
-		}),
-	);
+/** Resolve every selected registration before any decoder can unregister or replace another. */
+export function snapshotExternalSnapshotContextDecoders(request: ExternalSnapshotRequest) {
+	return request.contexts.map(({ key, value }) => {
+		const entry = contextCodecs.get(key);
+		if (entry === undefined) throw new TypeError(formatClientError(338));
+		return { ...entry, value };
+	});
 }
 
 function validKey(value: unknown): value is string {
@@ -144,9 +158,7 @@ export function decodeExternalSnapshotRequest(
 	value: unknown,
 	expectedAuthority?: ExternalSnapshotAuthority,
 ): ExternalSnapshotRequest {
-	const input = snapshotSignalValue(
-		typeof value === 'string' ? JSON.parse(value) : value,
-	) as ExternalSnapshotRequest;
+	const input = snapshotExternalSnapshotRequest(value) as ExternalSnapshotRequest;
 	if (
 		input === null ||
 		typeof input !== 'object' ||
@@ -205,37 +217,7 @@ export function decodeExternalSnapshotRequest(
 }
 
 export function decodeExternalSnapshot(value: unknown): ExternalSnapshot {
-	const input = snapshotSignalValue(
-		typeof value === 'string' ? JSON.parse(value) : value,
-	) as ExternalSnapshot;
-	if (
-		input === null ||
-		typeof input !== 'object' ||
-		input.version !== 1 ||
-		typeof input.html !== 'string' ||
-		!Array.isArray(input.styles) ||
-		typeof input.head !== 'string' ||
-		Object.keys(input).some(
-			(key) => !['version', 'request', 'html', 'styles', 'head'].includes(key),
-		)
-	)
-		throw new TypeError(formatClientError(337));
-	decodeExternalSnapshotRequest(input.request);
-	const ids = new Set<string>();
-	for (const style of input.styles) {
-		if (
-			style === null ||
-			typeof style !== 'object' ||
-			!validKey(style.id) ||
-			typeof style.css !== 'string' ||
-			(style.nonce !== undefined && typeof style.nonce !== 'string') ||
-			ids.has(style.id) ||
-			Object.keys(style).some((key) => key !== 'id' && key !== 'css' && key !== 'nonce')
-		)
-			throw new TypeError(formatClientError(337));
-		ids.add(style.id);
-	}
-	return input;
+	return snapshotExternalSnapshotResponse(value, decodeExternalSnapshotRequest) as ExternalSnapshot;
 }
 
 export function externalSnapshotOwnerKey(documentId: string, boundaryId: string): string {

@@ -11,7 +11,6 @@ import { activateStreamedMarkup, deferred, resetStreamRuntimeGlobals } from '../
 import {
 	captureExternalSnapshotContexts,
 	createExternalSnapshotRequest,
-	decodeExternalSnapshotContexts,
 	registerExternalSnapshotContext,
 } from '../../src/external-snapshot-protocol.js';
 
@@ -42,19 +41,19 @@ function transport(
 		? C
 		: never,
 ) {
-	return async (request, signal?: AbortSignal) =>
-		Server.decodeExternalSnapshot(
-			Server.serializeExternalSnapshot(
-				await Server.renderExternalSnapshot(
-					component,
-					Server.decodeExternalSnapshotRequest(
-						Server.serializeExternalSnapshotRequest(request),
-						authority,
-					),
-					{ authority, signal },
-				),
-			),
+	return async (request, signal?: AbortSignal) => {
+		const prepared = await Server.prepareExternalSnapshotRequest(
+			Server.serializeExternalSnapshotRequest(request),
+			{ authority, signal },
 		);
+		try {
+			return Server.decodeExternalSnapshot(
+				Server.serializeExternalSnapshot(await Server.renderExternalSnapshot(component, prepared)),
+			);
+		} finally {
+			await Server.releasePreparedExternalSnapshotRequest(prepared);
+		}
+	};
 }
 
 describe('external snapshot admission and selected context codecs', () => {
@@ -85,9 +84,22 @@ describe('external snapshot admission and selected context codecs', () => {
 			captureExternalSnapshotContexts(values, ['theme']),
 		);
 		expect(request.contexts.map(({ key }) => key)).toEqual(['theme']);
-		expect(await decodeExternalSnapshotContexts(request)).toEqual([
-			[Theme, { title: 'theme value' }],
-		]);
+		const prepared = await Server.prepareExternalSnapshotRequest(request, { authority });
+		try {
+			expect(
+				(
+					await Server.renderExternalSnapshot(
+						() =>
+							Server.createElement('p', {
+								children: Server.useContext(Theme).title,
+							}),
+						prepared,
+					)
+				).html,
+			).toContain('theme value');
+		} finally {
+			await Server.releasePreparedExternalSnapshotRequest(prepared);
+		}
 		expect(captureExternalSnapshotContexts(values, ['other']).map(({ key }) => key)).toEqual([
 			'other',
 		]);
@@ -338,12 +350,18 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 				'octane/signals/client': ClientSignals,
 			},
 		);
-		const snapshot = (request, signal) =>
-			Server.renderExternalSnapshot(server.Remote, request, {
+		const snapshot = async (request, signal) => {
+			const prepared = await Server.prepareExternalSnapshotRequest(request, {
 				authority,
 				signal,
 				initializeContexts: (provide) => provide(Other, 'publisher local'),
 			});
+			try {
+				return await Server.renderExternalSnapshot(server.Remote, prepared);
+			} finally {
+				await Server.releasePreparedExternalSnapshotRequest(prepared);
+			}
+		};
 		const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
 		const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
 		const container = document.createElement('div');

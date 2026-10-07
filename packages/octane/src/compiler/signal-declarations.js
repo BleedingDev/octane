@@ -1,5 +1,5 @@
 import { builders as b, strongHash } from '@tsrx/core';
-import { createLexicalAnalysis } from './compile-universal.js';
+import { createLexicalAnalysis, isIdentifierReference } from './compile-universal.js';
 import { inheritHookMemoOrigin } from './inline-hook-memo.js';
 import { normalizeTextTypeFilename } from './text-type-facts.js';
 
@@ -14,6 +14,30 @@ const SIGNAL_FACTORIES = new Map([
 	['derived$', '__derivedAt'],
 	['query$', '__queryAt'],
 ]);
+
+// Authored internal helpers and explicit Scope/resource recipes do not pass
+// through the tracked facade lowering, so even aliases must retain the fence.
+const UNTRACKED_SIGNAL_FACTORIES = new Set([
+	'createScope',
+	'createResource',
+	...SIGNAL_FACTORIES.values(),
+	'__derivedScalarAt',
+]);
+
+const LOOP_NODES = new Set([
+	'ForStatement',
+	'ForInStatement',
+	'ForOfStatement',
+	'WhileStatement',
+	'DoWhileStatement',
+]);
+
+function isDeclarationCall(node, callee) {
+	return (
+		(node?.type === 'CallExpression' || node?.type === 'OptionalCallExpression') &&
+		node.callee === callee
+	);
+}
 
 const SCALAR_UNARY_OPERATORS = new Set(['!', '+', '-', '~', 'typeof', 'void']);
 const SCALAR_BINARY_OPERATORS = new Set([
@@ -289,6 +313,62 @@ function signalSite(filename, owner, node) {
 	)}`;
 }
 
+// A hot declaration must identify its actual node without reading authored
+// options during compilation. An omitted own key/kind may observe a prototype
+// accessor at runtime, so only absent options, null, or exact own fields qualify.
+function hotDeclarationShape(factory, call, site) {
+	const args = call.arguments ?? [];
+	const required = factory === 'query$' ? 2 : 1;
+	if (
+		args.length < required ||
+		args.length > required + 1 ||
+		args.some((argument) => argument.type === 'SpreadElement') ||
+		call.optional === true
+	)
+		return null;
+	for (let index = 0; factory !== 'signal$' && index < required; index++) {
+		const callback = unwrapExpression(args[index]);
+		if (callback?.type !== 'ArrowFunctionExpression' && callback?.type !== 'FunctionExpression')
+			return null;
+	}
+	const options = unwrapExpression(args[required]);
+	let explicit;
+	let queryKind = 'promise';
+	if (options !== undefined && !(options.type === 'Literal' && options.value === null)) {
+		if (options.type !== 'ObjectExpression') return null;
+		const fields = new Map();
+		for (const property of options.properties) {
+			const key = property.key?.name ?? property.key?.value;
+			if (
+				property.type !== 'Property' ||
+				property.kind !== 'init' ||
+				property.computed ||
+				fields.has(key)
+			)
+				return null;
+			fields.set(key, unwrapExpression(property.value));
+		}
+		if (!validLiteralKey(fields.get('key'))) return null;
+		explicit = fields.get('key').value;
+		if (factory === 'query$') {
+			const kind = fields.get('kind');
+			if (kind?.type !== 'Literal' || !['promise', 'stream'].includes(kind.value)) return null;
+			queryKind = kind.value;
+		}
+	}
+	return Object.freeze({
+		site,
+		key:
+			factory === 'query$' && explicit !== undefined
+				? site.slice(0, 2) + explicit
+				: (explicit ?? site),
+		scope: site.startsWith('g:') ? 'document' : 'instance',
+		kind: factory === 'signal$' ? 'signal' : factory === 'derived$' ? 'derived' : 'async',
+		factory: declarationHelper(factory, call),
+		...(factory === 'query$' ? { queryKind } : null),
+	});
+}
+
 // Arguments may start inside parentheses or at a nested callee's replacement
 // offset. Replace the call delimiter itself so source edits never overlap.
 function callOpenParen(node, source) {
@@ -314,7 +394,7 @@ function callOpenParen(node, source) {
  * Give owner-facade signal declarations a client/server-stable authored site.
  * Existing explicit Scope methods are deliberately outside this transform.
  */
-export function lowerSignalDeclarations(ast, filename) {
+export function lowerSignalDeclarations(ast, filename, hot = undefined) {
 	const cleanFilename = normalizeTextTypeFilename(filename) ?? filename;
 	const lexical = createLexicalAnalysis(ast);
 	const owners = lexicalOwners(ast);
@@ -322,6 +402,7 @@ export function lowerSignalDeclarations(ast, filename) {
 	const namedImports = new Map();
 	const namespaceImports = new Map();
 	const importRecords = new Map();
+	const untrackedImports = hot === undefined ? null : new Set();
 
 	for (const statement of ast.body ?? []) {
 		if (
@@ -339,6 +420,9 @@ export function lowerSignalDeclarations(ast, filename) {
 			}
 			if (specifier.type !== 'ImportSpecifier') continue;
 			const imported = specifier.imported?.name ?? specifier.imported?.value;
+			if (untrackedImports !== null && UNTRACKED_SIGNAL_FACTORIES.has(imported)) {
+				untrackedImports.add(specifier.local.name);
+			}
 			if (SIGNAL_FACTORIES.has(imported)) {
 				namedImports.set(specifier.local.name, {
 					declaration: statement,
@@ -397,14 +481,141 @@ export function lowerSignalDeclarations(ast, filename) {
 	}
 
 	let changed = false;
+	let hotEligible = hot !== undefined && hot.eligible !== false;
+	const repeatedDeclarations = hot === undefined ? null : new WeakSet();
+	if (hotEligible) {
+		const seen = new WeakSet();
+		const visit = (
+			node,
+			parent = null,
+			key = null,
+			grandparent = null,
+			loop = false,
+			instanceField = false,
+		) => {
+			if (node === null || typeof node !== 'object' || seen.has(node)) return;
+			seen.add(node);
+			if (Array.isArray(node)) {
+				for (const child of node) visit(child, parent, key, grandparent, loop, instanceField);
+				return;
+			}
+			loop ||= LOOP_NODES.has(node.type);
+			instanceField ||=
+				(node.type === 'PropertyDefinition' || node.type === 'AccessorProperty') &&
+				node.static !== true;
+			if (isDeclarationCall(node, node.callee)) {
+				if (instanceField || (loop && (owners.get(node) ?? ['module']).length === 1))
+					repeatedDeclarations.add(node);
+				// Authored code created by eval cannot contribute a static recipe.
+				const callee = unwrapExpression(node.callee);
+				if (
+					(callee?.type === 'Identifier' && callee.name === 'eval') ||
+					((callee?.type === 'MemberExpression' || callee?.type === 'OptionalMemberExpression') &&
+						propertyName(callee) === null)
+				)
+					hotEligible = false;
+			}
+			if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+				const property = propertyName(node);
+				if (
+					UNTRACKED_SIGNAL_FACTORIES.has(property) ||
+					(property === null && isDeclarationCall(parent, node))
+				)
+					hotEligible = false;
+				if (SIGNAL_FACTORIES.has(property)) {
+					const scope = lexical.nodeScopes.get(node.object) ?? lexical.rootScope;
+					const binding =
+						node.object?.type === 'Identifier'
+							? lexical.resolveBinding(scope, node.object.name)
+							: null;
+					if (
+						!isDeclarationCall(parent, node) ||
+						binding?.scope !== lexical.rootScope ||
+						!namespaceImports.has(node.object.name)
+					)
+						hotEligible = false;
+				}
+			}
+			if (node.type === 'Property' && parent?.type === 'ObjectPattern') {
+				const property = node.computed ? null : (node.key?.name ?? node.key?.value);
+				if (
+					property === null ||
+					SIGNAL_FACTORIES.has(property) ||
+					UNTRACKED_SIGNAL_FACTORIES.has(property)
+				)
+					hotEligible = false;
+			}
+			if (node.type === 'Identifier' && isIdentifierReference(node, parent, key, lexical)) {
+				const binding = lexical.resolveBinding(
+					lexical.nodeScopes.get(node) ?? lexical.rootScope,
+					node.name,
+				);
+				if (binding?.scope === lexical.rootScope) {
+					if (namedImports.has(node.name) || untrackedImports.has(node.name)) {
+						if (!isDeclarationCall(parent, node) || untrackedImports.has(node.name))
+							hotEligible = false;
+					} else if (namespaceImports.has(node.name)) {
+						const member = parent?.object === node ? parent : null;
+						const property = member === null ? null : propertyName(member);
+						if (
+							property === null ||
+							UNTRACKED_SIGNAL_FACTORIES.has(property) ||
+							(SIGNAL_FACTORIES.has(property) && !isDeclarationCall(grandparent, member))
+						)
+							hotEligible = false;
+					}
+				}
+			}
+			for (const childKey in node) {
+				if (!AST_METADATA.has(childKey) && !childKey.startsWith('_octane')) {
+					visit(node[childKey], node, childKey, parent, loop, instanceField);
+				}
+			}
+		};
+		visit(ast);
+	}
+	const declarations = hot === undefined ? null : [];
+	const keys = hot === undefined ? null : new Set();
 	let lowered = mapAst(ast, (node) => {
+		// Rspack's synchronous executable frame ends before an async module
+		// resumes. It cannot authenticate helpers evaluated after top-level await.
+		if (
+			hotEligible &&
+			(node.type === 'AwaitExpression' ||
+				(node.type === 'ForOfStatement' && node.await === true)) &&
+			(owners.get(node) ?? ['module']).length === 1
+		)
+			hotEligible = false;
 		if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return null;
 		const trusted = trustedFactory(node);
-		if (trusted === null) return null;
+		if (trusted === null) {
+			if (hotEligible) {
+				const callee = node.callee;
+				const name = callee?.type === 'Identifier' ? callee.name : propertyName(callee ?? {});
+				if (
+					SIGNAL_FACTORIES.has(name) ||
+					UNTRACKED_SIGNAL_FACTORIES.has(name) ||
+					untrackedImports.has(name)
+				)
+					hotEligible = false;
+			}
+			return null;
+		}
 		changed = true;
 		const site = signalSite(cleanFilename, owners.get(node) ?? ['module'], node);
+		let shape;
+		if (hot !== undefined) {
+			shape = hotDeclarationShape(trusted.factory, node, site);
+			const key = shape === null ? null : `${shape.scope}\0${shape.key}`;
+			if (shape === null || keys.has(key) || repeatedDeclarations.has(node)) hotEligible = false;
+			else {
+				keys.add(key);
+				declarations.push(shape);
+			}
+		}
 		return {
 			...node,
+			...(shape ? { _octaneHotSignalDeclaration: shape } : null),
 			...(pureSignalDeclaration(trusted.factory, node) ? { __octanePure: true } : null),
 			callee: inheritHookMemoOrigin(trusted.callee, node.callee),
 			arguments: [
@@ -414,7 +625,34 @@ export function lowerSignalDeclarations(ast, filename) {
 		};
 	});
 
-	if (!changed) return ast;
+	// Establish eligibility for the whole authored module before adding any
+	// stamp argument. A later unsafe recipe cannot leave a partial admitted table.
+	if (hotEligible) {
+		const stampName = allocateName(usedNames, '_$hotSignalModule');
+		lowered = mapAst(lowered, (node) => {
+			const shape = node._octaneHotSignalDeclaration;
+			if (shape === undefined) return null;
+			const args = [...node.arguments];
+			const count = shape.factory === '__queryAt' ? 4 : 3;
+			while (args.length < count) args.push(b.unary('void', b.literal(0)));
+			args.push(b.id(stampName));
+			return { ...node, arguments: args };
+		});
+		lowered = {
+			...lowered,
+			_octaneHotSignalModule: Object.freeze({
+				stampName,
+				stampHelper: allocateName(usedNames, '_$__hotSignalModule'),
+				registerHelper: allocateName(usedNames, '_$__registerHotSignalComponent'),
+				remountHelper: allocateName(usedNames, '_$__remountHotSignalComponent'),
+				moduleId: cleanFilename,
+				generation: strongHash(`octane:hot-signal-module:1\0${cleanFilename}\0${hot.source}`),
+				declarations: Object.freeze(declarations),
+				components: Object.freeze(hot.components ?? []),
+			}),
+		};
+	}
+	if (!changed) return lowered;
 	lowered = {
 		...lowered,
 		_octaneSignalDeclarations: true,

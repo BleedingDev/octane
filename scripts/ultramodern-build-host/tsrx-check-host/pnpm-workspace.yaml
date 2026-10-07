@@ -1,0 +1,7 @@
+packages:
+  - .
+packageImportMethod: clone-or-copy
+autoInstallPeers: false
+strictPeerDependencies: true
+minimumReleaseAgeExclude:
+  - '@tsrx/typescript-plugin@0.6.0'

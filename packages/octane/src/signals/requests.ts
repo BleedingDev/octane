@@ -51,6 +51,13 @@ export interface QueryDefinition {
 	readonly load: (argument: any, context: QueryContext) => unknown;
 }
 
+/** Hot definitions keep their request work separate without changing wire identities. */
+export interface QueryGenerationNamespace {
+	readonly requests: Map<string, RequestEntry>;
+	readonly queryDefinitions: Map<string, QueryDefinition>;
+	readonly consumers: Set<ResourceBinding>;
+}
+
 interface RetainedRequestIdentity {
 	readonly queryKey: string;
 	readonly kind: 'promise' | 'stream';
@@ -61,6 +68,7 @@ interface RetainedRequestIdentity {
 interface RequestOwner extends GraphOwner {
 	requests: Map<string, RequestEntry> | undefined;
 	queryDefinitions: Map<string, QueryDefinition> | undefined;
+	queryGenerations?: Map<string, QueryGenerationNamespace>;
 	readonly streams?: {
 		readonly selections: Map<string, StreamFrameIdentity>;
 		selectionReady(binding: ResourceBinding): void;
@@ -173,6 +181,7 @@ export class RequestEntry {
 		readonly owner: RequestOwner,
 		readonly request: Request<unknown>,
 		seed?: { entry: SignalSeedEntry; value: unknown },
+		private readonly cache = owner.requests,
 	) {
 		this.state = seed
 			? readyState(seed.value, {
@@ -218,7 +227,7 @@ export class RequestEntry {
 			generation !== this.generation ||
 			this.owner.readBarrier !== undefined ||
 			this.owner.retired ||
-			this.owner.requests?.get(this.request.identity) !== this ||
+			this.cache?.get(this.request.identity) !== this ||
 			!this.consumers.size
 		)
 			return;
@@ -282,7 +291,7 @@ export class RequestEntry {
 			this.generation !== identity.attempt ||
 			this.owner.readBarrier !== undefined ||
 			this.owner.retired ||
-			this.owner.requests?.get(this.request.identity) !== this ||
+			this.cache?.get(this.request.identity) !== this ||
 			!this.consumers.size
 		) {
 			return false;
@@ -370,8 +379,8 @@ export class RequestEntry {
 	remove(consumer: ResourceBinding): void {
 		this.consumers.delete(consumer);
 		if (this.consumers.size) return;
-		if (this.owner.requests?.get(this.request.identity) === this) {
-			this.owner.requests?.delete(this.request.identity);
+		if (this.cache?.get(this.request.identity) === this) {
+			this.cache.delete(this.request.identity);
 		}
 		this.stopAttempt();
 	}
@@ -548,6 +557,8 @@ function receiveStreamStep(attempt: Attempt, result: IteratorResult<unknown>): v
 
 export class ResourceBinding<T = any> {
 	declare private candidate?: true;
+	declare private generation?: string;
+	declare private namespace?: QueryGenerationNamespace;
 	private selected: RequestEntry | undefined;
 	private selectedIdentity: RetainedRequestIdentity | undefined;
 	private retainedRequest: RetainedRequestIdentity | undefined;
@@ -566,7 +577,14 @@ export class ResourceBinding<T = any> {
 		private describe: (() => QueryRequest<T> | typeof skip) | undefined,
 		seed?: { entry: SignalSeedEntry; value: unknown },
 		retained = seed,
+		generation?: string,
 	) {
+		if (generation !== undefined) {
+			if (typeof generation !== 'string' || !generation.trim()) {
+				throw new TypeError(formatClientError(350));
+			}
+			assertAlive(owner);
+		}
 		this.seeded = seed;
 		const identity = retained?.entry.request;
 		this.retainedRequest = identity
@@ -576,6 +594,16 @@ export class ResourceBinding<T = any> {
 					argument: decodeSignalValue(identity.argument),
 				}
 			: undefined;
+		if (generation !== undefined) {
+			this.generation = generation;
+			let namespace = owner.queryGenerations?.get(generation);
+			if (namespace === undefined) {
+				namespace = { requests: new Map(), queryDefinitions: new Map(), consumers: new Set() };
+				(owner.queryGenerations ??= new Map()).set(generation, namespace);
+			}
+			this.namespace = namespace;
+			namespace.consumers.add(this);
+		}
 		node.compute = () => {
 			const pending = this.pendingObserver;
 			this.pendingObserver = undefined;
@@ -600,7 +628,14 @@ export class ResourceBinding<T = any> {
 		if (this.streamedSelection || this.owner.streams?.selections.has(this.node.key)) {
 			throw new CandidateUnsupportedError(formatClientError(201));
 		}
-		const fork = new ResourceBinding(this.owner, target, this.describe);
+		const fork = new ResourceBinding(
+			this.owner,
+			target,
+			this.describe,
+			undefined,
+			undefined,
+			this.generation,
+		);
 		fork.candidate = true;
 		// Retained data belongs to its last successful request, not necessarily
 		// the current selection. A different query family must still clear it.
@@ -693,7 +728,8 @@ export class ResourceBinding<T = any> {
 				return idleState();
 			}
 			request = described;
-			const previousDefinition = this.owner.queryDefinitions?.get(request.queryKey);
+			const definitions = this.namespace?.queryDefinitions ?? this.owner.queryDefinitions;
+			const previousDefinition = definitions?.get(request.queryKey);
 			if (
 				previousDefinition &&
 				(previousDefinition.load !== request.definition.load ||
@@ -701,7 +737,10 @@ export class ResourceBinding<T = any> {
 			) {
 				throw new TypeError(formatClientError(202, request.queryKey));
 			}
-			(this.owner.queryDefinitions ??= new Map()).set(request.queryKey, request.definition);
+			(this.namespace?.queryDefinitions ?? (this.owner.queryDefinitions ??= new Map())).set(
+				request.queryKey,
+				request.definition,
+			);
 		} catch (error) {
 			if (isThenable(error)) {
 				this.pendingObserver = captureCurrentServerSignalQueryAttemptObserver(this.owner.scopeKey);
@@ -730,13 +769,14 @@ export class ResourceBinding<T = any> {
 				this.retainedRequest = undefined;
 				releaseRetention(this.node);
 			}
-			let entry = this.owner.requests?.get(request.identity);
+			const cache = this.namespace?.requests ?? (this.owner.requests ??= new Map());
+			let entry = cache.get(request.identity);
 			let start = false;
 			if (!entry) {
 				const seed =
 					this.seeded && matchesSeed(request, this.seeded.entry) ? this.seeded : undefined;
-				entry = new RequestEntry(this.owner, request, seed);
-				(this.owner.requests ??= new Map()).set(request.identity, entry);
+				entry = new RequestEntry(this.owner, request, seed, cache);
+				cache.set(request.identity, entry);
 				start = !seed || !seed.entry.complete;
 			}
 			this.seeded = undefined;
@@ -949,12 +989,27 @@ export class ResourceBinding<T = any> {
 	}
 
 	dispose(): void {
-		this.detach();
-		this.pendingObserver = undefined;
-		this.describe = undefined;
-		this.seeded = undefined;
-		this.retainedRequest = undefined;
-		this.streamedSelection = undefined;
+		const namespace = this.namespace;
+		if (namespace !== undefined) this.namespace = undefined;
+		try {
+			this.detach();
+		} finally {
+			this.pendingObserver = undefined;
+			this.describe = undefined;
+			this.seeded = undefined;
+			this.retainedRequest = undefined;
+			this.streamedSelection = undefined;
+			if (namespace !== undefined) {
+				namespace.consumers.delete(this);
+				if (
+					namespace.consumers.size === 0 &&
+					this.owner.queryGenerations?.get(this.generation!) === namespace
+				) {
+					namespace.queryDefinitions.clear();
+					this.owner.queryGenerations.delete(this.generation!);
+				}
+			}
+		}
 	}
 }
 
@@ -973,6 +1028,7 @@ export function initializeResource<T>(
 	describe: () => QueryRequest<T> | typeof skip,
 	seed?: { entry: SignalSeedEntry; value: unknown },
 	retained = seed,
+	generation?: string,
 ): ResourceBinding<T> {
-	return new ResourceBinding(owner, node, describe, seed, retained);
+	return new ResourceBinding(owner, node, describe, seed, retained, generation);
 }

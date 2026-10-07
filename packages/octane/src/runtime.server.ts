@@ -166,7 +166,6 @@ import {
 	captureExternalSnapshotContexts,
 	createExternalSnapshotRequest,
 	decodeExternalSnapshot,
-	decodeExternalSnapshotContexts,
 	decodeExternalSnapshotRequest,
 	serializeExternalSnapshotRequest,
 	validateExternalSnapshotAuthority,
@@ -175,7 +174,25 @@ import {
 	type ExternalSnapshotBoundaryOptions,
 	type ExternalSnapshotAuthority,
 } from './external-snapshot-protocol.js';
+import {
+	prepareExternalSnapshotRequest as prepareSnapshotRequest,
+	claimPreparedExternalSnapshotRequest,
+	preserveExternalSnapshotCleanup,
+	type ExternalSnapshotRenderOptions,
+	type PreparedExternalSnapshotRequest,
+} from './server/external-snapshot-preparation.js';
+export { releasePreparedExternalSnapshotRequest } from './server/external-snapshot-preparation.js';
+export type {
+	ExternalSnapshotRenderOptions,
+	PreparedExternalSnapshotRequest,
+} from './server/external-snapshot-preparation.js';
 import { decodeSignalValue } from './data-encoding.js';
+import {
+	PUBLISHER_BOUNDARY_ATTR,
+	createPublisherBoundaryDescriptor,
+	serializePublisherBoundaryDescriptor,
+	type PublisherBoundaryDescriptor,
+} from './publisher-boundary-protocol.js';
 import { formAuthoringDiagnostics } from './form-diagnostics.js';
 import { isRendererContext, registerServerRendererContextProvider } from './renderer-bridge.js';
 import { defineRemovedContextMembers, registerContext } from './context-identity.js';
@@ -5414,6 +5431,7 @@ function streamTokenForPendingHtml(html: string): string | null {
 
 type InternalHydrateProps = HydrateProps & {
 	readonly __external?: ExternalSnapshotRequest;
+	readonly __publisher?: PublisherBoundaryDescriptor;
 	readonly __independent?: {
 		readonly manifestTemplate: IndependentHydrateManifestTemplate;
 		readonly captures: readonly unknown[];
@@ -5613,7 +5631,7 @@ const PermanentStaticHydrate = /* @__PURE__ */ markComponentFlags(
 const hydrate = /* @__PURE__ */ markComponentFlags(
 	function Hydrate(rawProps: HydrateProps, scope: SSRScope): string {
 		const props = rawProps as InternalHydrateProps;
-		const id = props.__external?.boundaryId ?? useId();
+		const id = props.__external?.boundaryId ?? props.__publisher?.boundaryId ?? useId();
 		// The client always creates an HTMLDivElement. Force the same namespace for
 		// SSR children and attribute semantics instead of inheriting SVG/MathML from
 		// the call site. Direct placement in foreign content remains unsupported: an
@@ -5662,7 +5680,10 @@ const hydrate = /* @__PURE__ */ markComponentFlags(
 						} finally {
 							nativeReads = finishNativeSeedCapture(nativeCapture, previousNativeReads, false);
 						}
-						const idCount = props.__external === undefined ? ID_COUNTER - childIdStart : 0;
+						const idCount =
+							props.__external === undefined && props.__publisher === undefined
+								? ID_COUNTER - childIdStart
+								: 0;
 						const childSeeds = SERIAL === null ? [] : SERIAL.splice(serialStart);
 						const permanentStaticAncestor = PERMANENT_STATIC_HYDRATE_DEPTH !== 0;
 						const attrs = ssrHydrateAttrs(
@@ -5703,6 +5724,15 @@ const hydrate = /* @__PURE__ */ markComponentFlags(
 						const independentSidecar = permanentStaticAncestor
 							? ''
 							: ssrIndependentHydrateSidecar(props, id);
+						const publisherSidecar =
+							props.__publisher === undefined
+								? ''
+								: '<script type="application/json" ' +
+									PUBLISHER_BOUNDARY_ATTR +
+									NONCE_ATTR +
+									'>' +
+									serializePublisherBoundaryDescriptor(props.__publisher) +
+									'</script>';
 
 						return (
 							'<div' +
@@ -5714,6 +5744,7 @@ const hydrate = /* @__PURE__ */ markComponentFlags(
 							nativeSidecar +
 							independentSidecar +
 							externalSidecar +
+							publisherSidecar +
 							'</div>'
 						);
 					}),
@@ -9788,48 +9819,22 @@ async function prerenderInternal(
 	}
 }
 
-/** Native publisher authority is supplied by the endpoint after transport admission. */
-export interface ExternalSnapshotRenderOptions {
-	readonly authority: ExternalSnapshotAuthority;
-	readonly signal?: AbortSignal;
-	readonly timeoutMs?: number;
-	readonly onError?: (error: unknown) => void;
-	/** Trusted endpoint-local providers, installed without adding native component frames. */
-	readonly initializeContexts?: (
-		provide: <T>(context: Function & { readonly defaultValue: T }, value: T) => void,
-	) => void;
-}
-
-/** Render one externally transported native boundary without executing a host renderer. */
-export async function renderExternalSnapshot(
-	component: ServerRenderNode,
-	wireRequest: ExternalSnapshotRequest,
+/** Restore selected request contexts before an endpoint imports exposed code. */
+export function prepareExternalSnapshotRequest(
+	wireRequest: unknown,
 	options: ExternalSnapshotRenderOptions,
-): Promise<ExternalSnapshot> {
-	validateExternalSnapshotAuthority(options.authority);
-	const request = decodeExternalSnapshotRequest(wireRequest, options.authority);
-	const props = decodeSignalValue(request.props);
-	const owner = Object.freeze({ scopeKey: request.ownerKey });
-	const controller = new AbortController();
-	const signal =
-		options.signal === undefined
-			? controller.signal
-			: AbortSignal.any([controller.signal, options.signal]);
-	const timeoutMs = options.timeoutMs ?? SUSPENSE_TIMEOUT_MS;
-	const timer =
-		timeoutMs > 0
-			? setTimeout(() => controller.abort(new Error(formatServerError(342))), timeoutMs)
-			: undefined;
-	try {
-		signal.throwIfAborted();
-		// Finish real asynchronous provider reconstruction before executing an expose.
-		const decoding = decodeExternalSnapshotContexts(request, signal);
-		await raceSettleGuards(decoding, 0, signal);
-		const contexts = new Map(await decoding);
-		if (options.initializeContexts !== undefined) {
+): Promise<PreparedExternalSnapshotRequest> {
+	return prepareSnapshotRequest(
+		wireRequest,
+		options,
+		(contexts, initialize) => {
+			const previous = CURRENT_SCOPE;
+			const scope = ssrScope(null);
+			scope.$$ctxValues = contexts;
+			CURRENT_SCOPE = scope;
 			let active = true;
 			try {
-				const initialized: unknown = options.initializeContexts((context, value) => {
+				const initialized: unknown = initialize((context, value) => {
 					if (!active || !isRendererContext(context) || contexts.has(context))
 						throw new TypeError(formatServerError(338));
 					contexts.set(context, value);
@@ -9845,54 +9850,300 @@ export async function renderExternalSnapshot(
 				}
 			} finally {
 				active = false;
+				CURRENT_SCOPE = previous;
+			}
+		},
+		SUSPENSE_TIMEOUT_MS,
+	);
+}
+
+/** Render one externally transported native boundary without executing a host renderer. */
+export function renderExternalSnapshot(
+	component: ServerRenderNode,
+	prepared: PreparedExternalSnapshotRequest,
+): Promise<ExternalSnapshot>;
+export function renderExternalSnapshot(
+	component: ServerRenderNode,
+	wireRequest: ExternalSnapshotRequest,
+	options: ExternalSnapshotRenderOptions,
+): Promise<ExternalSnapshot>;
+export async function renderExternalSnapshot(
+	component: ServerRenderNode,
+	input: ExternalSnapshotRequest | PreparedExternalSnapshotRequest,
+	options?: ExternalSnapshotRenderOptions,
+): Promise<ExternalSnapshot> {
+	if (options !== undefined) {
+		const prepared = await prepareExternalSnapshotRequest(input, options);
+		return preserveExternalSnapshotCleanup(prepared, () =>
+			renderExternalSnapshot(component, prepared),
+		);
+	}
+	const {
+		request,
+		props,
+		owner,
+		signal,
+		contexts,
+		options: admitted,
+	} = claimPreparedExternalSnapshotRequest(input as PreparedExternalSnapshotRequest);
+	signal.throwIfAborted();
+	const entry: ServerComponent = (_props, scope) => {
+		scope.$$ctxValues = contexts.size === 0 ? null : contexts;
+		return hydrate(
+			{
+				when: { _t: 'load' },
+				children: createElement(component as any, props as any),
+				__external: request,
+			} as InternalHydrateProps,
+			scope,
+		);
+	};
+	let styles: ExternalSnapshot['styles'] = [];
+	const result = await prerenderInternal(
+		entry,
+		undefined,
+		{
+			identifierPrefix: request.identifierPrefix,
+			signalOwner: owner,
+			nonce: request.nonce,
+			signal,
+			// The preparation deadline remains active throughout import and render.
+			timeoutMs: 0,
+			onError: admitted.onError,
+			headChannel: 'separate',
+			earlySignalBootstrap: 'external',
+			streamedSignals: {
+				buildId: request.authority.publisherBuildId,
+				documentId: request.documentId,
+			},
+		},
+		(entries) => {
+			styles = [...entries].map(([id, sheet]) => ({ id, ...sheet }));
+		},
+	);
+	signal.throwIfAborted();
+	return decodeExternalSnapshot({
+		version: 1,
+		request,
+		html: result.html,
+		styles,
+		head: result.head ?? '',
+	});
+}
+
+interface ServerPublisherBoundary {
+	readonly descriptor: PublisherBoundaryDescriptor;
+	readonly owner: SignalOwner;
+	readonly instances: Map<string, SignalRendererOwnerIdentity>;
+	readonly identityKeys: Map<string, ServerOpaqueSignalKeys>;
+	readonly replays: Map<ServerComponent, ServerComponent>;
+	closed: boolean;
+}
+
+const PUBLISHER_BOUNDARIES = /* @__PURE__ */ new WeakMap<
+	ResolvedMap,
+	Map<string, ServerPublisherBoundary>
+>();
+const PUBLISHER_REPLAY_BODIES = /* @__PURE__ */ new WeakMap<
+	ServerComponent,
+	ServerPublisherBoundary
+>();
+
+function releaseServerPublisher(state: ServerPublisherBoundary): void {
+	if (state.closed) return;
+	state.closed = true;
+	const collector = NATIVE_READ_COLLECTOR;
+	const token = collector?.pauseLifecycle() ?? -1;
+	let failure: { error: unknown } | undefined;
+	try {
+		for (const instance of state.instances.values()) {
+			try {
+				retireSignalOwnerIdentity(instance);
+			} catch (error) {
+				failure ??= { error };
 			}
 		}
-		signal.throwIfAborted();
-		const entry: ServerComponent = (_props, scope) => {
-			scope.$$ctxValues = contexts.size === 0 ? null : contexts;
-			return hydrate(
-				{
-					when: { _t: 'load' },
-					children: createElement(component as any, props as any),
-					__external: request,
-				} as InternalHydrateProps,
-				scope,
-			);
-		};
-		let styles: ExternalSnapshot['styles'] = [];
-		const result = await prerenderInternal(
-			entry,
-			undefined,
-			{
-				identifierPrefix: request.identifierPrefix,
-				signalOwner: owner,
-				nonce: request.nonce,
-				signal,
-				timeoutMs: options.timeoutMs,
-				onError: options.onError,
-				headChannel: 'separate',
-				earlySignalBootstrap: 'external',
-				streamedSignals: {
-					buildId: request.authority.publisherBuildId,
-					documentId: request.documentId,
-				},
-			},
-			(entries) => {
-				styles = [...entries].map(([id, sheet]) => ({ id, ...sheet }));
-			},
-		);
-		return decodeExternalSnapshot({
-			version: 1,
-			request,
-			html: result.html,
-			styles,
-			head: result.head ?? '',
-		});
+		try {
+			retireSignalOwnerIdentity(state.owner);
+		} catch (error) {
+			failure ??= { error };
+		}
 	} finally {
-		clearTimeout(timer);
-		controller.abort();
-		retireSignalOwnerIdentity(owner);
+		state.instances.clear();
+		state.identityKeys.clear();
+		state.replays.clear();
+		if (token >= 0) collector!.resumeLifecycle(token);
 	}
+	if (failure !== undefined) throw failure.error;
+}
+
+function withServerPublisherIdentity<T>(
+	state: ServerPublisherBoundary,
+	render: () => T,
+	instance: ServerSignalInstanceKey = JSON.stringify([state.descriptor.identifierPrefix, 'root']),
+): T {
+	if (state.closed) throw new TypeError(formatServerError(343));
+	const resolved = RESOLVED!;
+	const previous = {
+		owner: resolved.signalOwner,
+		instances: resolved.signalInstances,
+		identityKeys: resolved.signalIdentityKeys,
+		initial: resolved.initialDocumentSignals,
+		prefix: SIGNAL_INSTANCE_PREFIX,
+		instance: SIGNAL_COMPONENT_INSTANCE_KEY,
+		active: SERVER_SIGNAL_OWNER_ACTIVE,
+		control: SIGNAL_CONTROL_SITE,
+		list: SIGNAL_LIST_KEYS,
+		idPrefix: ID_PREFIX,
+		id: ID_COUNTER,
+	};
+	const head = HEAD;
+	const headSuffix = head?.rootSuffix;
+	const deferred = DEFERRED;
+	const deferredStart = deferred?.length ?? 0;
+	resolved.signalOwner = state.owner;
+	resolved.signalInstances = state.instances;
+	resolved.signalIdentityKeys = state.identityKeys;
+	resolved.initialDocumentSignals = undefined;
+	SIGNAL_INSTANCE_PREFIX = state.descriptor.identifierPrefix;
+	SIGNAL_COMPONENT_INSTANCE_KEY = instance;
+	SERVER_SIGNAL_OWNER_ACTIVE = false;
+	SIGNAL_CONTROL_SITE = '';
+	SIGNAL_LIST_KEYS = null;
+	ID_PREFIX = state.descriptor.identifierPrefix;
+	ID_COUNTER = 0;
+	if (head !== null) head.rootSuffix = headOwnershipSuffix(state.descriptor.identifierPrefix);
+	try {
+		// Deferred JSX records and children still read after their component body returns.
+		return withServerSignalBinding(render);
+	} finally {
+		// Discovery invokes the real suspended component in its original frame.
+		// Its body must re-enter this same request lease after the ambient restore.
+		if (deferred !== null) {
+			for (let i = deferredStart; i < deferred.length; i++) {
+				const job = deferred[i]!;
+				if (PUBLISHER_REPLAY_BODIES.has(job.comp)) continue;
+				let replay = state.replays.get(job.comp);
+				if (replay === undefined) {
+					const component = job.comp;
+					replay = (props, scope) =>
+						withServerPublisherIdentity(
+							state,
+							() =>
+								serverComponentOutput(
+									invokeServerSignalComponent(component, props, scope, serverSignalOwner(FRAME)),
+									scope,
+								),
+							SIGNAL_COMPONENT_INSTANCE_KEY,
+						);
+					state.replays.set(component, replay);
+					PUBLISHER_REPLAY_BODIES.set(replay, state);
+				}
+				job.comp = replay;
+			}
+		}
+		resolved.signalOwner = previous.owner;
+		resolved.signalInstances = previous.instances;
+		resolved.signalIdentityKeys = previous.identityKeys;
+		resolved.initialDocumentSignals = previous.initial;
+		SIGNAL_INSTANCE_PREFIX = previous.prefix;
+		SIGNAL_COMPONENT_INSTANCE_KEY = previous.instance;
+		SERVER_SIGNAL_OWNER_ACTIVE = previous.active;
+		SIGNAL_CONTROL_SITE = previous.control;
+		SIGNAL_LIST_KEYS = previous.list;
+		ID_PREFIX = previous.idPrefix;
+		ID_COUNTER = previous.id;
+		if (head !== null) head.rootSuffix = headSuffix!;
+	}
+}
+
+/** Execute a local publisher under private data and ID ownership, with live ancestor contexts. */
+export function publisherBoundary<C extends ServerEntryComponent>(
+	component: C,
+	options: { readonly publisherKey: string },
+): C {
+	const publisherKey = options.publisherKey;
+	createPublisherBoundaryDescriptor(publisherKey, null, 'validate', null);
+	const boundary = markComponentFlags(
+		function PublisherBoundary(props: any, scope: SSRScope): string {
+			const resolved = RESOLVED;
+			const resources = getServerRenderResourceContext();
+			if (resolved === null || resources === null) throw new TypeError(formatServerError(340));
+			const streamed = resolved.resourceOptions?.streamedSignals;
+			const configuredDocument = resolved.resourceOptions?.externalSnapshots?.documentId;
+			if (
+				streamed !== undefined &&
+				configuredDocument !== undefined &&
+				streamed.documentId !== configuredDocument
+			)
+				throw new TypeError(formatServerError(339));
+			const documentId = streamed?.documentId ?? null;
+			const streamBuildId = streamed?.buildId ?? null;
+			const boundaryId = useId();
+			const base = '@publisher:' + asyncIdentityKey(boundary, false);
+			const occurrence = FRAME === null ? 0 : nextFrameOccurrence(FRAME, base);
+			const key = asyncFramePath(FRAME) + '|' + base + '#' + occurrence;
+			let states = PUBLISHER_BOUNDARIES.get(resolved);
+			let state = states?.get(key);
+			if (!CANONICAL_PASS && state === undefined) throw SSR_SUSPENSE;
+			if (states === undefined) {
+				states = new Map();
+				PUBLISHER_BOUNDARIES.set(resolved, states);
+				const owned = states;
+				resources.registerCleanup(() => {
+					let failure: { error: unknown } | undefined;
+					for (const state of owned.values()) {
+						try {
+							releaseServerPublisher(state);
+						} catch (error) {
+							failure ??= { error };
+						}
+					}
+					owned.clear();
+					PUBLISHER_BOUNDARIES.delete(resolved);
+					if (failure !== undefined) throw failure.error;
+				});
+			}
+			if (
+				state !== undefined &&
+				(state.descriptor.documentId !== documentId ||
+					state.descriptor.streamBuildId !== streamBuildId)
+			)
+				throw new TypeError(formatServerError(339));
+			if (CANONICAL_PASS && state !== undefined && state.descriptor.boundaryId !== boundaryId) {
+				releaseServerPublisher(state);
+				state = undefined;
+			}
+			if (state === undefined) {
+				const descriptor = createPublisherBoundaryDescriptor(
+					publisherKey,
+					documentId,
+					boundaryId,
+					streamBuildId,
+				);
+				state = {
+					descriptor,
+					owner: Object.freeze({ scopeKey: descriptor.ownerKey }),
+					instances: new Map(),
+					identityKeys: new Map(),
+					replays: new Map(),
+					closed: false,
+				};
+				states.set(key, state);
+			}
+			// Ordinary retries keep the native lease. A new parent ID namespace
+			// retires provisional work before claiming the canonical boundary.
+			const hydrateProps: InternalHydrateProps = {
+				when: { _t: 'load' },
+				children: createElement(component, props),
+				__publisher: state.descriptor,
+			};
+			return withServerPublisherIdentity(state, () => hydrate(hydrateProps, scope));
+		},
+		COMPONENT_FLAG_BOUNDARY,
+		'PublisherBoundary',
+	);
+	return boundary as unknown as C;
 }
 
 const EXTERNAL_SNAPSHOT_LOADS = /* @__PURE__ */ new WeakMap<

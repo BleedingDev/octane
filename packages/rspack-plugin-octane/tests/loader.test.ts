@@ -149,6 +149,31 @@ function runParallelLoader({
 }
 
 describe('octane Rspack loader', () => {
+	it('carries an exact hot module recipe through serial and parallel metadata without retaining stale recipes', () => {
+		const recipe = {
+			version: 1,
+			moduleId: '/src/App.tsrx',
+			generation: 'source-revision',
+			declarations: [],
+			hookSlots: ['octane:/src/App.tsrx:App.useSignal$#0'],
+		};
+		mocks.transform.mockReturnValue({
+			kind: 'compile',
+			code: 'compiled',
+			streamedSignals: true,
+			hotSignalModule: recipe,
+		});
+		const serial = runLoader({ hot: true });
+		const parallel = runParallelLoader();
+		expect(serial.module.buildInfo.octane).toMatchObject({ hotSignalModule: recipe });
+		expect(parallel.module.buildInfo.octane).toMatchObject({ hotSignalModule: recipe });
+		mocks.transform.mockReturnValue({ kind: 'compile', code: 'ordinary' });
+		runLoader({ module: serial.module, hot: true });
+		runParallelLoader({ module: parallel.module });
+		expect(serial.module.buildInfo.octane).not.toHaveProperty('hotSignalModule');
+		expect(parallel.module.buildInfo.octane).not.toHaveProperty('hotSignalModule');
+	});
+
 	beforeEach(() => {
 		mocks.transform.mockReset();
 		mocks.canonicalModuleId.mockReset().mockReturnValue('/src/App.tsrx');

@@ -688,10 +688,11 @@ export class OctaneRspackPlugin {
 						const modules = collectIndependentHydrationModules(compilation);
 						const featureModules = modules.filter(
 							({ info }) =>
-								info.streamedSignals === true || (info.independentWidgets?.length ?? 0) > 0,
+								info.hotSignalModule !== undefined ||
+								info.streamedSignals === true ||
+								(info.independentWidgets?.length ?? 0) > 0,
 						);
 						if (
-							featureModules.length > 0 &&
 							compiler.options.plugins.some(
 								(plugin) => plugin instanceof compiler.webpack.HotModuleReplacementPlugin,
 							)
@@ -699,6 +700,7 @@ export class OctaneRspackPlugin {
 							runtimeRequirements.add(compiler.webpack.RuntimeGlobals.interceptModuleExecution);
 							runtimeRequirements.add(compiler.webpack.RuntimeGlobals.moduleCache);
 							runtimeRequirements.add(compiler.webpack.RuntimeGlobals.global);
+							runtimeRequirements.add(compiler.webpack.RuntimeGlobals.getFullHash);
 							compilation.addRuntimeModule(
 								chunk,
 								createStreamedSignalHmrRuntimeModule(compiler, compilation, featureModules),

@@ -87,6 +87,7 @@ export {
 	ErrorBoundary,
 	Hydrate,
 	externalSnapshotBoundary,
+	publisherBoundary,
 	__HydrateCompiled,
 	Activity,
 	// React shipped Activity as unstable_Activity before 19.2 — alias it so
@@ -332,5 +333,6 @@ export type {
 	ExternalSnapshotRequest,
 	ExternalSnapshotAuthority,
 	ExternalSnapshotContextCodec,
+	ExternalSnapshotContextReader,
 	ExternalSnapshotBoundaryOptions,
 } from './external-snapshot-protocol.js';

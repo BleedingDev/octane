@@ -30,6 +30,7 @@ import {
 	type StreamedRendererDeliveryOptions,
 } from './stream-delivery.js';
 import { createStreamedRegionReceiver, type StreamedRegionReceiver } from './stream-receiver.js';
+import { registerNativeStreamedAuthority } from './native-streamed-authority.js';
 import {
 	createStreamedResultReceiver,
 	type StreamedResultReceiver,
@@ -129,6 +130,15 @@ function installSelectionLease(
 			removed = true;
 			installed.leases.delete(key);
 			installed.retired.add(key);
+			// The retired mailbox still fences late calls through its own closure.
+			// Keep realm ownership only while live leases or unclaimed selections
+			// remain; a later native document can install its fresh empty mailbox.
+			if (
+				installed.leases.size === 0 &&
+				early.identities.length === 0 &&
+				streamedSelectionRouters.get(target) === installed
+			)
+				streamedSelectionRouters.delete(target);
 		},
 	};
 }
@@ -337,8 +347,15 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 		earlyRenderer.frames.length = retained;
 	}
 	let uninstallDelivery: () => void;
+	let releaseAuthority: (() => void) | undefined;
 	try {
 		uninstallDelivery = installStreamedRendererGlobal(receiver, target, { ...options, authority });
+		try {
+			releaseAuthority = registerNativeStreamedAuthority(signalOwner, authority, document);
+		} catch (error) {
+			uninstallDelivery();
+			throw error;
+		}
 	} catch (error) {
 		uninstallOwnerActivator();
 		selectionLease.dispose();
@@ -350,6 +367,7 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 	const close = (restore: boolean): void => {
 		if (disposed) return;
 		disposed = true;
+		releaseAuthority?.();
 		selectionLease.dispose();
 		uninstallOwnerActivator();
 		for (const selection of selections.values()) selection.detach?.();
