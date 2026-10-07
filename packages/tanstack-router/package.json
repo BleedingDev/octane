@@ -1,6 +1,6 @@
 {
   "name": "@octanejs/tanstack-router",
-  "version": "0.1.60+ultramodern.161c3f681f3c",
+  "version": "0.1.60+ultramodern.64579de25332",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -74,13 +74,7 @@
   },
   "ultramodernSource": {
     "upstreamCommit": "676a4ee6db59854d6b711921f4ac808845dcdbcd",
-    "implementationCommit": "161c3f681f3c8cfbb356d78421bb181c5b75a06d",
-    "authoredSourcePatchSha256": "88c4877657da4985bfbf65e17b80461b50f5c704f9ec59e436a0be9b02083a58",
-    "nativeRuntime": {
-      "name": "octane",
-      "version": "0.7.1+ultramodern.161c3f681f3c",
-      "artifactSha256": "3b70e0a5718829f97f1030577f48c54519491f56b6854ccdf492223dc4d078f2",
-      "provenanceSha256": "6ba577bb7b61c26577c293a6c54e2315bbd11cf971ac41c09d16e81a47ace158"
-    }
+    "implementationCommit": "64579de25332888ee70d4b10ce6bdb2c67c941fd",
+    "authoredSourcePatchSha256": "fc64891bd16559848c0a655e8153c60e8bcb7abaf82523f2dde5e42589c97db5"
   }
 }

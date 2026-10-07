@@ -1,6 +1,6 @@
 {
   "name": "@octanejs/rspack-plugin",
-  "version": "0.1.55",
+  "version": "0.1.55+ultramodern.64579de25332",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -58,5 +58,10 @@
     "jsdom": "catalog:default",
     "octane": "workspace:*",
     "vitest": "catalog:default"
+  },
+  "ultramodernSource": {
+    "upstreamCommit": "676a4ee6db59854d6b711921f4ac808845dcdbcd",
+    "implementationCommit": "64579de25332888ee70d4b10ce6bdb2c67c941fd",
+    "authoredSourcePatchSha256": "cd4e9646fd84b5496ea086c294ce763e820130eec16920207035b5ce610741fd"
   }
 }
