@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { describe, it, expect, vi } from 'vitest';
 import { __serverRpc } from 'octane';
 import * as devalue from 'devalue';
@@ -138,6 +139,18 @@ describe('executeServerFunction', () => {
 		expect(out.tags.get('a')).toBe(1);
 		expect(out.set).toBeInstanceOf(Set);
 		expect('missing' in out && out.missing === undefined).toBe(true);
+	});
+
+	it('returns only the requested Node Buffer bytes to the client', async () => {
+		const privateBytes = new Uint8Array(64).fill(99);
+		privateBytes.set([12, 34], 10);
+		const response = await executeServerFunction(
+			() => Buffer.from(privateBytes.buffer, 10, 2),
+			clientCall([]),
+		);
+		const out = clientRead(response) as Uint8Array;
+		expect([...out]).toEqual([12, 34]);
+		expect([...new Uint8Array(out.buffer)]).toEqual([12, 34]);
 	});
 
 	it('propagates a thrown server error as a rejection', async () => {

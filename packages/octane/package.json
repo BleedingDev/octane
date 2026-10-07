@@ -331,7 +331,7 @@
     "@volar/language-core": "2.4.28",
     "alien-signals": "3.2.0",
     "csstype": "3.2.3",
-    "devalue": "5.8.2",
+    "devalue": "5.9.3",
     "entities": "7.0.1",
     "es-module-lexer": "1.7.0",
     "esrap": "2.3.2",

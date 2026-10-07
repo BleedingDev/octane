@@ -64,8 +64,8 @@ importers:
         specifier: 3.2.3
         version: 3.2.3
       devalue:
-        specifier: 5.8.2
-        version: 5.8.2
+        specifier: 5.9.3
+        version: 5.9.3
       entities:
         specifier: 7.0.1
         version: 7.0.1
@@ -1219,8 +1219,8 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
-  devalue@5.8.2:
-    resolution: {integrity: sha512-DObPPAfdtFbXjxLqK8s2Xk9ZuWz5+ZoFEhC7J76es4GU/rEiXwHTmbImoCdyoCOcBH1UF3+Cz6Z2sYD4hyl5TA==}
+  devalue@5.9.3:
+    resolution: {integrity: sha512-xRumYOCUZN/EesqHEU3WOXanOZNvfZFZ/o1AHVFDX1yI0UAkZkOgDXt341CzKoBVIkgQba55/+DjGBKrIoKcHw==}
 
   electron-to-chromium@1.5.444:
     resolution: {integrity: sha512-5ss/uJfoDYDHT0lfJzT6FbcskIzROIOPf0BbbFkGcvDzoJU7i//9GDrwwIHQVmIsrAGiF3ihpADBRIsrEFt1rQ==}
@@ -2588,7 +2588,7 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  devalue@5.8.2: {}
+  devalue@5.9.3: {}
 
   electron-to-chromium@1.5.444: {}
 
@@ -2949,7 +2949,7 @@ snapshots:
       aria-query: 5.3.1
       axobject-query: 4.1.0
       clsx: 2.1.1
-      devalue: 5.8.2
+      devalue: 5.9.3
       esm-env: 1.2.2
       esrap: 2.3.2(@typescript-eslint/types@8.71.0(patch_hash=27aad21d14f53183954e33dc741b4189fc4861d1afdab63235c544cfe4fac2b2))
       is-reference: 3.0.3
