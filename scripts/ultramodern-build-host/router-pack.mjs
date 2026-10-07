@@ -14,6 +14,7 @@ import {
 	utimesSync,
 	writeFileSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { checkTsrxProject } from './check-tsrx-project.mjs';
@@ -237,9 +238,18 @@ try {
 		[runtimeManifest.dependencies, nativePackageRoot],
 		[sourceManifest.dependencies, packageRoot],
 	]) {
+		const require = createRequire(resolve(context, 'package.json'));
 		for (const [name, pin] of Object.entries(dependencies)) {
 			assert.match(pin, /^\d+\.\d+\.\d+$/, `Exact checker dependency ${name}`);
-			const installed = realpathSync(resolve(context, 'node_modules', name));
+			// The bounded host provides independent root dependencies. Follow the
+			// package's normal Node search paths instead of requiring a full pnpm
+			// workspace installation with package-local dependency links.
+			const dependency = require.resolve
+				.paths(name)
+				?.map((path) => resolve(path, name))
+				.find((path) => existsSync(resolve(path, 'package.json')));
+			assert(dependency, `Installed checker dependency ${name}`);
+			const installed = realpathSync(dependency);
 			const installedManifest = JSON.parse(readFileSync(resolve(installed, 'package.json')));
 			assert.equal(installedManifest.name, name);
 			assert.equal(installedManifest.version, pin, `Checker dependency ${name}`);
