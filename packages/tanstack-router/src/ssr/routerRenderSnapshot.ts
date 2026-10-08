@@ -164,8 +164,8 @@ function string(value: unknown, allowEmpty = false): string {
 }
 function profileId(value: unknown): RouterRenderProfileId {
 	const input = object(value, ['key', 'version']);
-	const key = string(input.key),
-		version = string(input.version);
+	const key = string(input['key']),
+		version = string(input['version']);
 	if (key.length > 256 || version.length > 128) throw invalid('invalid profile identity');
 	return Object.freeze({ key, version });
 }
@@ -262,14 +262,14 @@ function readSnapshot(value: unknown): RouterRenderSnapshot {
 		'publicContext',
 		'i18n',
 	]);
-	if (input.version !== 1) throw invalid('unsupported version');
+	if (input['version'] !== 1) throw invalid('unsupported version');
 	if (
-		!Array.isArray(input.routes) ||
-		input.routes.length === 0 ||
-		input.routes.length > LIMITS.routes
+		!Array.isArray(input['routes']) ||
+		input['routes'].length === 0 ||
+		input['routes'].length > LIMITS.routes
 	)
 		throw invalid('invalid route count');
-	const routes = input.routes.map((value) => {
+	const routes = input['routes'].map((value) => {
 		const route = object(value, [
 			'routeId',
 			'parentRouteId',
@@ -277,22 +277,22 @@ function readSnapshot(value: unknown): RouterRenderSnapshot {
 			'pathlessId',
 			'ultramodernRouteId',
 		]);
-		const parentRouteId = route.parentRouteId === null ? null : string(route.parentRouteId);
-		const path = route.path === undefined ? undefined : string(route.path);
-		const pathlessId = route.pathlessId === undefined ? undefined : string(route.pathlessId);
+		const parentRouteId = route['parentRouteId'] === null ? null : string(route['parentRouteId']);
+		const path = route['path'] === undefined ? undefined : string(route['path']);
+		const pathlessId = route['pathlessId'] === undefined ? undefined : string(route['pathlessId']);
 		if (
 			(parentRouteId === null && (path !== undefined || pathlessId !== undefined)) ||
 			(parentRouteId !== null && (path === undefined) === (pathlessId === undefined))
 		)
 			throw invalid('invalid root or child route geometry');
 		return Object.freeze({
-			routeId: string(route.routeId),
+			routeId: string(route['routeId']),
 			parentRouteId,
 			...(path === undefined ? {} : { path }),
 			...(pathlessId === undefined ? {} : { pathlessId }),
-			...(route.ultramodernRouteId === undefined
+			...(route['ultramodernRouteId'] === undefined
 				? {}
-				: { ultramodernRouteId: string(route.ultramodernRouteId) }),
+				: { ultramodernRouteId: string(route['ultramodernRouteId']) }),
 		});
 	});
 	const ids = new Map(routes.map((route) => [route.routeId, route]));
@@ -313,7 +313,7 @@ function readSnapshot(value: unknown): RouterRenderSnapshot {
 			if (!current) throw invalid('missing parent route');
 		}
 	}
-	const routing = object(input.routing, [
+	const routing = object(input['routing'], [
 		'origin',
 		'basepath',
 		'publicHref',
@@ -322,9 +322,9 @@ function readSnapshot(value: unknown): RouterRenderSnapshot {
 		'trailingSlash',
 		'pathParamsAllowedCharacters',
 	]);
-	const origin = string(routing.origin),
-		basepath = string(routing.basepath),
-		publicHref = string(routing.publicHref);
+	const origin = string(routing['origin']),
+		basepath = string(routing['basepath']),
+		publicHref = string(routing['publicHref']);
 	const url = new URL(origin);
 	if (
 		!['http:', 'https:'].includes(url.protocol) ||
@@ -335,14 +335,14 @@ function readSnapshot(value: unknown): RouterRenderSnapshot {
 	)
 		throw invalid('invalid routing URL');
 	if (
-		typeof routing.caseSensitive !== 'boolean' ||
-		!['always', 'never', 'preserve'].includes(String(routing.trailingSlash))
+		typeof routing['caseSensitive'] !== 'boolean' ||
+		!['always', 'never', 'preserve'].includes(String(routing['trailingSlash']))
 	)
 		throw invalid('invalid routing options');
-	const trailingSlash = routing.trailingSlash;
+	const trailingSlash = routing['trailingSlash'];
 	if (trailingSlash !== 'always' && trailingSlash !== 'never' && trailingSlash !== 'preserve')
 		throw invalid('invalid trailing slash');
-	const userState = jsonRecord(routing.userState, { nodes: 0, bytes: 0, ancestors: new Set() });
+	const userState = jsonRecord(routing['userState'], { nodes: 0, bytes: 0, ancestors: new Set() });
 	if (
 		Object.keys(userState).some(
 			(key) =>
@@ -354,22 +354,22 @@ function readSnapshot(value: unknown): RouterRenderSnapshot {
 	)
 		throw invalid('reserved native history fields');
 	if (
-		!Array.isArray(input.matches) ||
-		input.matches.length === 0 ||
-		input.matches.length > LIMITS.matches
+		!Array.isArray(input['matches']) ||
+		input['matches'].length === 0 ||
+		input['matches'].length > LIMITS.matches
 	)
 		throw invalid('invalid match count');
-	const matches = input.matches.map((value) => {
+	const matches = input['matches'].map((value) => {
 		const match = object(value, ['id', 'routeId', 'params', 'search', 'loaderData']);
-		const routeId = string(match.routeId);
+		const routeId = string(match['routeId']);
 		if (!ids.has(routeId)) throw invalid('unknown matched route');
 		return Object.freeze({
-			id: string(match.id),
+			id: string(match['id']),
 			routeId,
-			params: jsonRecord(match.params, { nodes: 0, bytes: 0, ancestors: new Set() }),
-			search: jsonRecord(match.search, { nodes: 0, bytes: 0, ancestors: new Set() }),
+			params: jsonRecord(match['params'], { nodes: 0, bytes: 0, ancestors: new Set() }),
+			search: jsonRecord(match['search'], { nodes: 0, bytes: 0, ancestors: new Set() }),
 			...(Object.hasOwn(match, 'loaderData')
-				? { loaderData: json(match.loaderData, { nodes: 0, bytes: 0, ancestors: new Set() }) }
+				? { loaderData: json(match['loaderData'], { nodes: 0, bytes: 0, ancestors: new Set() }) }
 				: {}),
 		});
 	});
@@ -380,22 +380,22 @@ function readSnapshot(value: unknown): RouterRenderSnapshot {
 		throw invalid('duplicate match');
 	return Object.freeze({
 		version: 1,
-		profile: profileId(input.profile),
+		profile: profileId(input['profile']),
 		routes: Object.freeze(routes),
 		routing: Object.freeze({
 			origin,
 			basepath,
 			publicHref,
 			userState,
-			caseSensitive: routing.caseSensitive,
+			caseSensitive: routing['caseSensitive'],
 			trailingSlash,
-			pathParamsAllowedCharacters: pathCharacters(routing.pathParamsAllowedCharacters),
+			pathParamsAllowedCharacters: pathCharacters(routing['pathParamsAllowedCharacters']),
 		}),
 		matches: Object.freeze(matches),
-		publicContext: jsonRecord(input.publicContext, { nodes: 0, bytes: 0, ancestors: new Set() }),
-		...(input.i18n === undefined
+		publicContext: jsonRecord(input['publicContext'], { nodes: 0, bytes: 0, ancestors: new Set() }),
+		...(input['i18n'] === undefined
 			? {}
-			: { i18n: jsonRecord(input.i18n, { nodes: 0, bytes: 0, ancestors: new Set() }) }),
+			: { i18n: jsonRecord(input['i18n'], { nodes: 0, bytes: 0, ancestors: new Set() }) }),
 	});
 }
 
@@ -800,6 +800,8 @@ export async function restoreRouterRenderSnapshot(
 		for (let i = 0; i < snapshot.matches.length; i++) {
 			const expected = snapshot.matches[i],
 				actual = router.state.matches[i];
+			if (expected === undefined || actual === undefined)
+				throw invalid('restored route geometry or matches differ');
 			if (
 				actual.id !== expected.id ||
 				actual.routeId !== expected.routeId ||
