@@ -31,7 +31,7 @@ jobs:
     # every expensive job behind this guard. The two tiny required-check
     # reporters below still run so branch protection does not remain pending.
     if: ${{ github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -397,7 +397,7 @@ jobs:
     # (publishing waits for it), but do not repeat the full suite once the merge
     # has been authenticated above.
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release != 'true' && needs.release_change.outputs.full_ci != 'false' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     strategy:
       matrix:
@@ -474,7 +474,7 @@ jobs:
     # general shards, an authenticated release or lightweight change inherits
     # the last successful full run through CI provenance.
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release != 'true' && needs.release_change.outputs.full_ci != 'false' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -553,7 +553,7 @@ jobs:
     name: React parity checks
     needs: [release_change, react_parity_shard]
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release != 'true' && needs.release_change.outputs.full_ci != 'false' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Verify all React parity shards passed
@@ -601,7 +601,7 @@ jobs:
     # The release PR does not need this test context. The post-merge release run
     # does: publish.yml verifies this stable aggregate name before publishing.
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release_pr != 'true' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Verify all test suites passed
@@ -634,7 +634,7 @@ jobs:
     # Same authenticated-release skip as the shards above: a metadata-only
     # Changesets merge has already passed this on its parent commit.
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release != 'true' && needs.release_change.outputs.full_ci != 'false' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
@@ -681,7 +681,7 @@ jobs:
     # These suites use one dependency graph on the Node 24 CI execution target.
     # Node 22.22.2 remains the published package engine baseline.
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release != 'true' && needs.release_change.outputs.full_ci != 'false' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
@@ -768,7 +768,7 @@ jobs:
     # Run browser coverage once on the Node 24 CI execution target.
     # Node 22.22.2 remains the published package engine baseline.
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release != 'true' && needs.release_change.outputs.full_ci != 'false' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     strategy:
       matrix:
@@ -839,7 +839,7 @@ jobs:
     name: lint checks
     needs: release_change
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release_pr != 'true' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
@@ -1002,7 +1002,7 @@ jobs:
     name: typecheck checks
     needs: release_change
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release_pr != 'true' && needs.release_change.outputs.full_ci != 'false' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
@@ -1033,7 +1033,7 @@ jobs:
     name: lint
     needs: [release_change, lint_checks]
     if: ${{ always() && !cancelled() && github.event.action != 'closed' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Report lint status
@@ -1054,7 +1054,7 @@ jobs:
     name: typecheck
     needs: [release_change, typecheck_checks]
     if: ${{ always() && !cancelled() && github.event.action != 'closed' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Report typecheck status
@@ -1076,7 +1076,7 @@ jobs:
     name: example apps (${{ matrix.shard }})
     needs: release_change
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release_pr != 'true' && needs.release_change.outputs.full_ci != 'false' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     strategy:
       fail-fast: false
@@ -1117,7 +1117,7 @@ jobs:
     name: examples
     needs: [release_change, example_shard]
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release_pr != 'true' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Verify all example shards passed
@@ -1135,7 +1135,7 @@ jobs:
     name: Three compatibility
     needs: release_change
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release_pr != 'true' && needs.release_change.outputs.full_ci != 'false' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     # Each lane rewrites one importer without changing the repository lockfile
     # after its frozen base install. Distinct worktrees keep manifests,
     # node_modules, and test artifacts isolated while sharing one runner and
@@ -1224,7 +1224,7 @@ jobs:
     name: Lynx compatibility
     needs: release_change
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release_pr != 'true' && needs.release_change.outputs.full_ci != 'false' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
@@ -1266,7 +1266,7 @@ jobs:
     name: validate publishable packages
     needs: release_change
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release_pr != 'true' && needs.release_change.outputs.full_ci != 'false' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
@@ -1304,7 +1304,7 @@ jobs:
     name: CI provenance
     needs: [release_change, test, lint, typecheck, examples, three_compat, lynx_compat, package]
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release_pr != 'true' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Verify reusable CI coverage
