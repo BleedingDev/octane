@@ -75,6 +75,12 @@
   "ultramodernSource": {
     "upstreamCommit": "676a4ee6db59854d6b711921f4ac808845dcdbcd",
     "implementationCommit": "64579de25332888ee70d4b10ce6bdb2c67c941fd",
-    "authoredSourcePatchSha256": "fc64891bd16559848c0a655e8153c60e8bcb7abaf82523f2dde5e42589c97db5"
+    "authoredSourcePatchSha256": "fc64891bd16559848c0a655e8153c60e8bcb7abaf82523f2dde5e42589c97db5",
+    "nativeRuntime": {
+      "name": "octane",
+      "version": "0.7.1+ultramodern.64579de25332",
+      "artifactSha256": "9a01a2811e7e7722c016a5c09cab34d249dc01bfc203641e6b6ddddce3bb5e44",
+      "provenanceSha256": "29b2a05234b464045e4af24ce37dfb60b5570d7dd1aec81c9411044a75a87e95"
+    }
   }
 }
