@@ -80,10 +80,16 @@ jobs:
         run: >-
           node --test
           packages/octane/scripts/bundle-volar.test.mjs
+          packages/octane/scripts/build-runtime.test.mjs
+          packages/octane/scripts/verify-dist.test.mjs
+          scripts/build-package-commonjs.test.mjs
           scripts/ultramodern-build-host/check-tsrx-project.test.mjs
           scripts/ultramodern-build-host/workflow.test.mjs
 
       - name: Test Rspack source pack contract
+        env:
+          OWNED_TEMP_DIR: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: node --test scripts/ultramodern-build-host/rspack-pack.test.mjs
 
       - name: Test RPC and private compiler entrypoints in development

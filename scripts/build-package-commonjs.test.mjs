@@ -82,6 +82,66 @@ describe('buildPackageCommonjs', () => {
 		);
 	});
 
+	test('preserves lazy imports, cache identity, JSON and bare imports without rewriting text', async () => {
+		const packageDir = await fixture({
+			'package.json': JSON.stringify({ name: 'fixture', type: 'module' }),
+			'src/index.ts': `export { state } from './state.js';
+export const spelling = (value: string) => \`import("./nested/value.js"):\${value}\`;
+export async function load() {
+ const [{ answer }, { default: config }, { basename }] = await Promise.all([
+  import('./nested/value.js'),
+  import('./data.json', { with: { type: 'json' } }),
+  import('node:path'),
+ ]);
+ return { answer, label: basename(config.path) };
+}`,
+			'src/state.ts': 'export const state = { loads: 0 };',
+			'src/nested/value.ts':
+				"import { state } from '../state.js'; state.loads++; export const answer = 42;",
+			'src/data.json': JSON.stringify({ path: '/tmp/octane' }),
+		});
+
+		await buildPackageCommonjs({ packageDir, entries: ['src/index.ts'], outdir: 'dist/cjs' });
+		const emitted = createRequire(import.meta.url)(join(packageDir, 'dist/cjs/index.cjs'));
+		assert.equal(emitted.state.loads, 0, 'The dynamic module must remain lazy.');
+		assert.equal(emitted.spelling('literal'), 'import("./nested/value.js"):literal');
+		assert.deepEqual(await emitted.load(), { answer: 42, label: 'octane' });
+		assert.deepEqual(await emitted.load(), { answer: 42, label: 'octane' });
+		assert.equal(emitted.state.loads, 1, 'Repeated import() uses the same native module cache.');
+	});
+
+	test('rewrites a discovered dynamic import whose specifier contains a quote', async () => {
+		const specifier = "./nested/quoted'value.js";
+		const packageDir = await fixture({
+			'package.json': JSON.stringify({ name: 'fixture', type: 'module' }),
+			'src/index.ts': `export const load = () => import(${JSON.stringify(specifier)});`,
+			"src/nested/quoted'value.ts": 'export const answer = 42;',
+		});
+		await buildPackageCommonjs({ packageDir, entries: ['src/index.ts'], outdir: 'dist/cjs' });
+		const emitted = createRequire(import.meta.url)(join(packageDir, 'dist/cjs/index.cjs'));
+		assert.equal((await emitted.load()).answer, 42);
+	});
+
+	test('preserves require-shaped data, method calls and locally bound functions', async () => {
+		const packageDir = await fixture({
+			'package.json': JSON.stringify({ name: 'fixture', type: 'module' }),
+			'src/index.ts': `export { answer } from './value.js';
+export const carrier = "require('./value.js')";
+export const echo = () => ({ require: (value: string) => value }).require('./value.js');
+export const local = (require: (value: string) => string) => require('./value.js');`,
+			'src/value.ts': 'export const answer = 42;',
+		});
+		await buildPackageCommonjs({ packageDir, entries: ['src/index.ts'], outdir: 'dist/cjs' });
+		const emitted = createRequire(import.meta.url)(join(packageDir, 'dist/cjs/index.cjs'));
+		assert.equal(emitted.answer, 42);
+		assert.equal(emitted.carrier, "require('./value.js')");
+		assert.equal(emitted.echo(), './value.js');
+		assert.equal(
+			emitted.local((value) => value),
+			'./value.js',
+		);
+	});
+
 	test('fails closed when the authored graph includes .tsrx modules', async () => {
 		const packageDir = await fixture({
 			'package.json': JSON.stringify({ name: 'fixture', type: 'module' }),

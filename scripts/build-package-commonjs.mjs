@@ -2,6 +2,8 @@ import { build } from 'esbuild';
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import * as ts from 'typescript/unstable/ast';
+import { withNativeSyntaxProject } from './lib/native-syntax-project.mjs';
 
 const SOURCE_EXTENSIONS = ['.ts', '.js', '.mts', '.mjs'];
 
@@ -98,6 +100,51 @@ function dependencyTarget({ dependency, sourceRoot, outdir }) {
 	return dependency;
 }
 
+// Keep native import() lazy and edit only graph-backed module references.
+// Text, property calls and locally bound require functions are ordinary data.
+function rewriteRelativeImports(source, filename, specifiers) {
+	if (specifiers.size === 0) return source;
+	return withNativeSyntaxProject([[filename, source]], ({ sourceFiles, project }) => {
+		const sourceFile = sourceFiles[0][1];
+		const edits = [];
+		function visit(node) {
+			if (ts.isCallExpression(node) && !node.questionDotToken) {
+				const dynamic = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+				const require = ts.isIdentifier(node.expression) && node.expression.text === 'require';
+				const argument = node.arguments[0];
+				if (
+					(dynamic || require) &&
+					argument &&
+					(ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))
+				) {
+					const target = specifiers.get(argument.text);
+					// Ambient Node declarations may resolve the real global require;
+					// only a declaration in this emitted module shadows that loader.
+					const shadowed =
+						target !== undefined &&
+						require &&
+						project.checker
+							.getSymbolAtLocation(node.expression)
+							?.declarations.some((declaration) => declaration.path === sourceFile.path);
+					if (target !== undefined && !shadowed) {
+						edits.push({
+							start: argument.getStart(sourceFile),
+							end: argument.end,
+							text: JSON.stringify(target),
+						});
+					}
+				}
+			}
+			node.forEachChild(visit);
+		}
+		visit(sourceFile);
+		for (const edit of edits.sort((left, right) => right.start - left.start)) {
+			source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
+		}
+		return source;
+	});
+}
+
 /**
  * Emit an authored JS/TS graph as per-module CommonJS without bundling package dependencies.
  */
@@ -185,6 +232,7 @@ export async function buildPackageCommonjs({
 			}
 			const outputPath = join(absoluteOutdir, outputRelative(absoluteSourceRoot, sourcePath));
 			let output = await readFile(outputPath, 'utf8');
+			const rewrittenSpecifiers = new Map();
 			for (const [specifier, dependency] of module.relativeImports) {
 				const target = dependencyTarget({
 					dependency,
@@ -193,9 +241,9 @@ export async function buildPackageCommonjs({
 				});
 				let rewritten = relative(dirname(outputPath), target).split(sep).join('/');
 				if (!rewritten.startsWith('.')) rewritten = `./${rewritten}`;
-				output = output.replaceAll(`require("${specifier}")`, `require("${rewritten}")`);
-				output = output.replaceAll(`require('${specifier}')`, `require('${rewritten}')`);
+				if (rewritten !== specifier) rewrittenSpecifiers.set(specifier, rewritten);
 			}
+			output = rewriteRelativeImports(output, outputPath, rewrittenSpecifiers);
 			await writeFile(outputPath, output);
 		}),
 	);
