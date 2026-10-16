@@ -1,7 +1,7 @@
 // One documentation page: render compiled MDX in a readable article and add
 // the previous/next navigation supplied by the registry. The owning DocsLayout
 // renders this document's section navigation inside the shared left sidebar.
-import { Link, useParams } from '@octanejs/tanstack-router';
+import { Link, useParams } from '@octanejs/tanstack-router/compiled';
 import { docs, findDoc } from '../../content/docs.ts';
 import { CodeBlock } from '../../components/CodeBlock.tsrx';
 import { useTitle } from '../../hooks/use-title.ts';
@@ -23,8 +23,7 @@ function DocTable(props: { children?: unknown; [key: string]: unknown }) @{
 function DocPre(props: { children?: unknown; [key: string]: unknown }) @{
 	const { children, ...preProps } = props;
 	const stamped = preProps['data-language'] ?? preProps.dataLanguage;
-	const language =
-		typeof stamped === 'string' ? stamped : '';
+	const language = typeof stamped === 'string' ? stamped : '';
 
 	<CodeBlock variant="plain" language={language}>
 		<pre {...preProps}>{children}</pre>
@@ -38,12 +37,9 @@ export function DocPage() @{
 	const doc = findDoc(params.slug);
 	useTitle(doc ? 'Octane — ' + doc.title : 'Octane — Docs');
 	const Doc = doc ? doc.component : null;
-	const currentIndex =
-		doc ? docs.indexOf(doc) : -1;
-	const previous =
-		currentIndex > 0 ? docs[currentIndex - 1] : null;
-	const next =
-		currentIndex >= 0 && currentIndex < docs.length - 1 ? docs[currentIndex + 1] : null;
+	const currentIndex = doc ? docs.indexOf(doc) : -1;
+	const previous = currentIndex > 0 ? docs[currentIndex - 1] : null;
+	const next = currentIndex >= 0 && currentIndex < docs.length - 1 ? docs[currentIndex + 1] : null;
 	<>
 		<div class="doc-frame">
 			<article class="prose">
@@ -74,7 +70,7 @@ export function DocPage() @{
 				} @else {
 					<div class="doc-missing">
 						<h1>Document not found</h1>
-						<p>{'No document named “' + params.slug + '”.' as string}</p>
+						<p>{('No document named “' + params.slug + '”.') as string}</p>
 					</div>
 				}
 			</article>
@@ -136,10 +132,19 @@ export function DocPage() @{
 				margin: 2.25rem 0 0.65rem;
 				scroll-margin-top: 5.5rem;
 			}
+			/* Authored reference entries, such as one Strong diagnostic per heading.
+			   Only anchored ones: demo cards style their own unanchored h4s. */
+			.prose :global(h4[id]) {
+				font-size: 1rem;
+				margin: 1.75rem 0 0.5rem;
+				overflow-wrap: anywhere;
+				scroll-margin-top: 5.5rem;
+			}
 			@media (max-width: 800px) {
 				/* Clear both the site header and the collapsed sticky docs menu. */
 				.prose :global(h2[id]),
-				.prose :global(h3[id]) {
+				.prose :global(h3[id]),
+				.prose :global(h4[id]) {
 					scroll-margin-top: 9rem;
 				}
 			}

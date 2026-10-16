@@ -42,6 +42,9 @@ import {
 	isSignalHandle,
 	query,
 	bindSignalControl,
+	optimistic$,
+	retireSignalOwnerIdentity,
+	ScopeDisposedError,
 } from '../src/signals/index.js';
 import type {
 	ActionPresentationProps,
@@ -378,6 +381,41 @@ describe('behavior-only roots', () => {
 		return root;
 	}
 
+	/**
+	 * Hydrates and unmounts a root in `container` that falls back: it finds a
+	 * text mismatch, so with no boundary it discards the server DOM and renders
+	 * on the client.
+	 */
+	async function fallBackOnce(dev: boolean, strong: boolean): Promise<void> {
+		const source = 'export function Prime(props) @{ <section>{props.text as string}</section> }';
+		const options = { id: '/src/prime.tsrx', compileOptions: { dev, hmr: false, strong } };
+		const server = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
+		const client = loadCompiledFixtureSource(source, { ...options, mode: 'client' });
+		container.innerHTML = renderToString(server.Prime, { text: 'server' }).html;
+		const section = container.querySelector('section')!;
+		const recoverable = vi.fn();
+		const root = hydrateRoot(
+			container,
+			client.Prime,
+			{ text: 'client' },
+			{ onRecoverableError: recoverable },
+		);
+		await act(() => {});
+		expect(recoverable).toHaveBeenCalledOnce();
+		expect(section.isConnected).toBe(false);
+		expect(container.querySelector('section')!.textContent).toBe('client');
+		root.unmount();
+	}
+
+	// Each early host handoff across a suspension also runs with Strong
+	// compilation, and in a container whose previous root fell back: that root
+	// is gone, so it must not change how a later root treats its sites (#1777).
+	const suspendedHandoffModes = [false, true].flatMap((dev) =>
+		[false, true].flatMap((strong) => [false, true].map((reused) => ({ dev, strong, reused }))),
+	);
+	const suspendedHandoffMode = ({ dev, strong, reused }: (typeof suspendedHandoffModes)[number]) =>
+		(dev ? 'dev' : 'prod') + (strong ? ', Strong' : '') + (reused ? ', reused container' : '');
+
 	beforeEach(() => {
 		container = document.createElement('main');
 		document.body.appendChild(container);
@@ -390,6 +428,677 @@ describe('behavior-only roots', () => {
 		hydratedRoot?.unmount();
 		container.remove();
 	});
+
+	for (const attribute of ['className', 'htmlFor']) {
+		it(`hands off an aliased unbound host attribute (${attribute}, prod Strong)`, async () => {
+			const source = [
+				"import { unbound } from 'octane/behavior';",
+				"export function Host(props) @{ 'use dom bindings';",
+				`  <label data-mode={props.mode} ${attribute}={unbound((props.value$?.get() ?? props.value).text)}>{unbound(props.children)}</label>`,
+				'}',
+				'export function App(props) @{',
+				'  <Host mode={props.mode} value$={props.value$} value={props.value}><span>{props.label as string}</span></Host>',
+				'}',
+			].join('\n');
+			const initial = {
+				mode: 'server',
+				value$: undefined,
+				value: { text: 'initial' },
+				label: 'server child',
+			};
+			const fixture = authoredPresentation('Host', initial, false, source, {}, { strong: true });
+			container.innerHTML = renderToString(fixture.server.App, initial).html;
+			const label = container.querySelector('label')!;
+			const child = label.firstElementChild;
+			const name = attribute === 'className' ? 'class' : 'for';
+			const errors: unknown[] = [];
+			const binding = fixture.attach(label, fixture.state);
+			try {
+				fixture.publish({ mode: 'early' });
+				expect(label.getAttribute('data-mode')).toBe('early');
+				const client = fixture.loadClient();
+				hydratedRoot = hydrateRoot(
+					container,
+					client.App,
+					{ ...initial, mode: 'hydrated' },
+					{
+						bindingLeases: [binding],
+						onUncaughtError: (error: unknown) => errors.push(error),
+					},
+				);
+				await act(() => {});
+				expect(errors).toEqual([]);
+				expect(container.querySelector('label')).toBe(label);
+				expect(label.firstElementChild).toBe(child);
+				expect(label.getAttribute(name)).toBe('initial');
+				expect(label.getAttribute('data-mode')).toBe('hydrated');
+				expect(fixture.cleanup).toHaveBeenCalledOnce();
+				await act(() =>
+					hydratedRoot!.render(client.App, {
+						...initial,
+						mode: 'updated',
+						value: { text: 'updated' },
+					}),
+				);
+				expect(label.getAttribute(name)).toBe('updated');
+				expect(label.getAttribute('data-mode')).toBe('updated');
+			} finally {
+				hydratedRoot?.unmount();
+				hydratedRoot = undefined;
+				binding.dispose();
+			}
+		});
+	}
+
+	// A forwarded style prop is usually unset or a string, which no native read
+	// owns. Taking over an early host must still publish it over the early style.
+	for (const dev of [false, true]) {
+		it(`hands off a forwarded unset or string style and keeps it live (${dev ? 'dev' : 'prod'})`, async () => {
+			const source = [
+				"import 'octane/signals';",
+				"import { unbound } from 'octane/behavior';",
+				"export function Host(props) @{ 'use dom bindings';",
+				'  <section class={props.className} style={props.style}>{unbound(props.children)}</section>',
+				'}',
+				'export function App(props) @{',
+				'  <Host className={props.className} style={props.style}><span>{props.label as string}</span></Host>',
+				'}',
+			].join('\n');
+			const scope = createScope({ scopeKey: `host-forwarded-style-${dev}` });
+			const color$ = scope.signal$('color', 'red');
+			try {
+				for (const style of [undefined, 'width: 2px;']) {
+					const initial = {
+						className: 'server',
+						style: undefined as unknown,
+						label: 'server child',
+					};
+					const fixture = authoredPresentation('Host', initial, dev, source);
+					container.innerHTML = renderToString(fixture.server.App, initial).html;
+					const section = container.querySelector('section')!;
+					const child = section.firstElementChild;
+					const errors: unknown[] = [];
+					const binding = fixture.attach(section, fixture.state);
+					try {
+						fixture.publish({ className: 'early', style: 'color: red;' });
+						expect(section.style.cssText).toBe('color: red;');
+						const client = fixture.loadClient();
+						hydratedRoot = hydrateRoot(
+							container,
+							client.App,
+							{ ...initial, className: 'hydrated', style },
+							{
+								bindingLeases: [binding],
+								onUncaughtError: (error: unknown) => errors.push(error),
+								onRecoverableError: (error: unknown) => errors.push(error),
+							},
+						);
+						await act(() => {});
+						expect(errors).toEqual([]);
+						expect(container.querySelector('section')).toBe(section);
+						expect(section.firstElementChild).toBe(child);
+						expect(section.className).toBe('hydrated');
+						expect(section.style.cssText).toBe(style ?? '');
+						expect(fixture.cleanup).toHaveBeenCalledOnce();
+						fixture.publish({ style: 'color: blue;' });
+						expect(section.style.cssText).toBe(style ?? '');
+						await act(() =>
+							hydratedRoot!.render(client.App, { ...initial, style: { color: color$ } }),
+						);
+						expect(section.style.cssText).toBe(`color: ${color$.get()};`);
+						await act(() => color$.set(color$.get() === 'red' ? 'blue' : 'red'));
+						expect(section.style.cssText).toBe(`color: ${color$.get()};`);
+						await act(() => hydratedRoot!.render(client.App, { ...initial, style: undefined }));
+						expect(section.style.cssText).toBe('');
+						await act(() => color$.set('green'));
+						expect(section.style.cssText).toBe('');
+						expect(container.querySelector('section')).toBe(section);
+					} finally {
+						hydratedRoot?.unmount();
+						hydratedRoot = undefined;
+						binding.dispose();
+					}
+				}
+			} finally {
+				scope.dispose();
+			}
+		});
+	}
+
+	for (const dev of [false, true]) {
+		for (const strong of [false, true]) {
+			for (const useSignal of [false, true]) {
+				it(`hands off an unbound host and keeps updates live (${dev ? 'dev' : 'prod'}, ${strong ? 'Strong' : 'ordinary'}, ${useSignal ? 'signal' : 'snapshot'})`, async () => {
+					const source = [
+						"import { unbound } from 'octane/behavior';",
+						"export function Host(props) @{ 'use dom bindings';",
+						'  <section class={props.className} hidden={unbound(!!(props.value$?.get() ?? props.value).hidden)}>{unbound(props.children)}</section>',
+						'}',
+						'export function App(props) @{',
+						'  <Host className={props.className} value$={props.value$} value={props.value}><span>{props.label as string}</span></Host>',
+						'}',
+					].join('\n');
+					const scope = createScope({ scopeKey: 'host-unbound-value' });
+					const signal = scope.signal$('value', { hidden: false });
+					const initial = {
+						className: 'server',
+						value$: useSignal ? signal : undefined,
+						value: { hidden: false },
+						label: 'server child',
+					};
+					const fixture = authoredPresentation('Host', initial, dev, source, {}, { strong });
+					container.innerHTML = renderToString(fixture.server.App, initial).html;
+					const section = container.querySelector('section')!;
+					const child = section.firstElementChild;
+					const errors: unknown[] = [];
+					const binding = fixture.attach(section, fixture.state);
+					try {
+						fixture.publish({ className: 'early' });
+						expect(section.className).toBe('early');
+						const client = fixture.loadClient();
+						hydratedRoot = hydrateRoot(
+							container,
+							client.App,
+							{ ...initial, className: 'hydrated' },
+							{
+								bindingLeases: [binding],
+								signalOwner: scope,
+								onUncaughtError: (error: unknown) => errors.push(error),
+							},
+						);
+						await act(() => {});
+						expect(errors).toEqual([]);
+						expect(container.querySelector('section')).toBe(section);
+						expect(section.firstElementChild).toBe(child);
+						expect(section.className).toBe('hydrated');
+						expect(section.hidden).toBe(false);
+						expect(fixture.cleanup).toHaveBeenCalledOnce();
+						fixture.publish({ className: 'retired' });
+						binding.refresh();
+						expect(section.className).toBe('hydrated');
+						if (useSignal) {
+							await act(() => signal.set({ hidden: true }));
+							expect(section.hidden).toBe(true);
+						}
+						await act(() =>
+							hydratedRoot!.render(client.App, {
+								...initial,
+								className: 'updated',
+								value: { hidden: true },
+								label: 'updated child',
+							}),
+						);
+						expect(errors).toEqual([]);
+						expect(container.querySelector('section')).toBe(section);
+						expect(section.firstElementChild).toBe(child);
+						expect(section.className).toBe('updated');
+						expect(section.hidden).toBe(true);
+						expect(section.textContent).toBe('updated child');
+					} finally {
+						hydratedRoot?.unmount();
+						hydratedRoot = undefined;
+						binding.dispose();
+						scope.dispose();
+					}
+				});
+			}
+		}
+	}
+
+	for (const dev of [false, true]) {
+		for (const placement of ['nested', 'root'] as const) {
+			for (const server of ['matching', 'stale', 'externally removed'] as const) {
+				// Server content the client does not render follows the host. As in
+				// React, a node directly in the root container is a third-party sibling
+				// that hydration skips and leaves in place, while one inside an element
+				// is a mismatch: with no boundary the root renders on the client, and
+				// the early host's server DOM, and with it the host's lease, is
+				// discarded.
+				const discarded = server === 'stale' && placement === 'nested';
+				const name = {
+					matching: 'hands off an early host beside matching server content',
+					stale: discarded
+						? 'discards an early host with the root when its parent holds stale server content'
+						: 'hands off an early host beside a third-party root sibling and leaves the sibling',
+					'externally removed': 'refuses an early host whose server neighbor was removed',
+				}[server];
+				it(`${name} (${placement}, ${dev ? 'dev' : 'prod'})`, async () => {
+					const host = '<Host label={props.label}><span>Hello</span></Host>';
+					const source = [
+						"import { useLayoutEffect } from 'octane';",
+						"import { unbound } from 'octane/behavior';",
+						"export function Host(props) @{ 'use dom bindings';",
+						'  <button data-state={props.label}>{unbound(props.children)}</button>',
+						'}',
+						'export function App(props) @{',
+						'  props.onRender();',
+						'  useLayoutEffect(() => { props.onCommit(); }, []);',
+						placement === 'nested' ? `  <section>${host}</section>` : `  ${host}`,
+						'}',
+					].join('\n');
+					let renders = 0;
+					const onCommit = vi.fn();
+					const initial = {
+						label: 'server',
+						onCommit,
+						// Retries run as microtasks, so a hydration that never converges
+						// would starve the event loop and the test timeout. Fail instead.
+						onRender: () => {
+							if (++renders > 20) throw new Error('Hydration did not converge.');
+						},
+					};
+					const fixture = authoredPresentation('Host', { label: 'server' }, dev, source);
+					container.innerHTML = renderToString(fixture.server.App, initial).html;
+					const button = container.querySelector('button')!;
+					const child = button.firstElementChild;
+					// Server content the client does not render, adopted as the host's neighbor.
+					const extra = document.createElement('script');
+					extra.type = 'application/json';
+					extra.textContent = '{}';
+					if (server !== 'matching') button.after(extra);
+					const binding = fixture.attach(button, fixture.state);
+					const recoverable = vi.fn();
+					const uncaught = vi.fn();
+					try {
+						fixture.publish({ label: 'early' });
+						expect(button.getAttribute('data-state')).toBe('early');
+						const client = fixture.loadClient();
+						const hydrate = () =>
+							hydrateRoot(
+								container,
+								client.App,
+								{ ...initial, label: 'hydrated' },
+								{
+									bindingLeases: [binding],
+									onRecoverableError: recoverable,
+									onUncaughtError: uncaught,
+								},
+							);
+						if (server === 'externally removed') {
+							// Only hydration's own recovery may change the adopted site; any
+							// other change refuses the lease and leaves the early owner live.
+							extra.remove();
+							expect(hydrate).toThrow(/active fixed native views|Minified Octane error #77;/);
+							expect(fixture.cleanup).not.toHaveBeenCalled();
+							fixture.publish({ label: 'still early' });
+							expect(button.getAttribute('data-state')).toBe('still early');
+							return;
+						}
+						hydratedRoot = hydrate();
+						await act(() => {});
+						expect(uncaught).not.toHaveBeenCalled();
+						expect(recoverable).toHaveBeenCalledTimes(discarded ? 1 : 0);
+						expect(extra.isConnected).toBe(server === 'stale' && !discarded);
+						const live = container.querySelector('button')!;
+						if (discarded) {
+							expect(button.isConnected).toBe(false);
+							expect(live.textContent).toBe('Hello');
+						} else {
+							expect(live).toBe(button);
+							expect(button.firstElementChild).toBe(child);
+						}
+						expect(live.getAttribute('data-state')).toBe('hydrated');
+						expect(onCommit).toHaveBeenCalledOnce();
+						// The early owner's lease ends once: it hands off, or its DOM is gone.
+						expect(fixture.cleanup).toHaveBeenCalledOnce();
+						fixture.publish({ label: 'retired' });
+						expect(live.getAttribute('data-state')).toBe('hydrated');
+						await act(() => hydratedRoot!.render(client.App, { ...initial, label: 'updated' }));
+						expect(uncaught).not.toHaveBeenCalled();
+						expect(container.querySelector('button')).toBe(live);
+						expect(live.getAttribute('data-state')).toBe('updated');
+						expect(onCommit).toHaveBeenCalledOnce();
+						expect(fixture.cleanup).toHaveBeenCalledOnce();
+					} finally {
+						hydratedRoot?.unmount();
+						hydratedRoot = undefined;
+						binding.dispose();
+					}
+				});
+			}
+		}
+	}
+
+	for (const dev of [false, true]) {
+		it(`refuses an early host whose root neighbor was removed after an earlier hydration left it in place (${dev ? 'dev' : 'prod'})`, async () => {
+			const source = [
+				"import { unbound } from 'octane/behavior';",
+				"export function Host(props) @{ 'use dom bindings';",
+				'  <button data-state={props.label}>{unbound(props.children)}</button>',
+				'}',
+				'export function App(props) @{ <Host label={props.label}><span>Hello</span></Host> }',
+			].join('\n');
+			const fixture = authoredPresentation('Host', { label: 'server' }, dev, source);
+			const client = fixture.loadClient();
+			const html = renderToString(fixture.server.App, { label: 'server' }).html;
+			const render = () => {
+				container.innerHTML = html;
+				const button = container.querySelector('button')!;
+				const extra = document.createElement('script');
+				extra.type = 'application/json';
+				extra.textContent = '{}';
+				button.after(extra);
+				return { button, extra };
+			};
+			// As in React, the first hydration skips the third-party node after the
+			// host in the root container and leaves it in place. That must not excuse
+			// a later, external change to the adopted site.
+			const first = render();
+			const recoverable = vi.fn();
+			hydratedRoot = hydrateRoot(
+				container,
+				client.App,
+				{ label: 'server' },
+				{
+					onRecoverableError: recoverable,
+				},
+			);
+			await act(() => {});
+			expect(recoverable).not.toHaveBeenCalled();
+			expect(container.querySelector('button')).toBe(first.button);
+			expect(first.extra.isConnected).toBe(true);
+			hydratedRoot.unmount();
+			hydratedRoot = undefined;
+			const { button, extra } = render();
+			const binding = fixture.attach(button, fixture.state);
+			try {
+				extra.remove();
+				expect(() =>
+					hydrateRoot(container, client.App, { label: 'hydrated' }, { bindingLeases: [binding] }),
+				).toThrow(/active fixed native views|Minified Octane error #77;/);
+				expect(fixture.cleanup).not.toHaveBeenCalled();
+				fixture.publish({ label: 'still early' });
+				expect(button.getAttribute('data-state')).toBe('still early');
+			} finally {
+				binding.dispose();
+			}
+		});
+	}
+
+	for (const mode of suspendedHandoffModes) {
+		const { dev, strong, reused } = mode;
+		for (const server of ['unchanged', 'externally removed'] as const) {
+			// As in React, hydration skips a third-party node beside a root-level
+			// host and leaves it in place, so it is no mismatch. Removing it while
+			// hydration is suspended still changes the early host's site, which
+			// refuses the lease when hydration resumes. No hydrateRoot caller remains
+			// to receive that refusal, so the root reports it once instead, and the
+			// early owner stays live.
+			const name =
+				server === 'unchanged'
+					? 'hands off an early host after suspended hydration when its root neighbor is unchanged'
+					: 'reports a changed early host after suspended hydration when its root neighbor is removed';
+			it(`${name} (${suspendedHandoffMode(mode)})`, async () => {
+				const source = [
+					"import { useLayoutEffect } from 'octane';",
+					"import { unbound } from 'octane/behavior';",
+					"export function Host(props) @{ 'use dom bindings';",
+					'  <button data-state={props.label}>{unbound(props.children)}</button>',
+					'}',
+					'export const gate = { pending: undefined };',
+					'function read() { if (gate.pending !== undefined) throw gate.pending; return "done"; }',
+					'export function App(props) @{',
+					'  props.onRender();',
+					'  useLayoutEffect(() => { props.onCommit(); });',
+					'  <Host label={read() && props.label}><span>Hello</span></Host>',
+					'}',
+				].join('\n');
+				let renders = 0;
+				const onCommit = vi.fn();
+				const initial = {
+					label: 'server',
+					onCommit,
+					onRender: () => {
+						if (++renders > 20) throw new Error('Hydration did not converge.');
+					},
+				};
+				const fixture = authoredPresentation(
+					'Host',
+					{ label: 'server' },
+					dev,
+					source,
+					{},
+					{ strong },
+				);
+				if (reused) await fallBackOnce(dev, strong);
+				container.innerHTML = renderToString(fixture.server.App, initial).html;
+				const button = container.querySelector('button')!;
+				const extra = document.createElement('script');
+				extra.type = 'application/json';
+				extra.textContent = '{}';
+				button.after(extra);
+				const binding = fixture.attach(button, fixture.state);
+				const recoverable = vi.fn();
+				const uncaught = vi.fn();
+				try {
+					fixture.publish({ label: 'early' });
+					const client = fixture.loadClient();
+					let release!: () => void;
+					const pending = new Promise<void>((resolve) => (release = resolve));
+					client.gate.pending = pending;
+					hydratedRoot = hydrateRoot(
+						container,
+						client.App,
+						{ ...initial, label: 'hydrated' },
+						{
+							bindingLeases: [binding],
+							onRecoverableError: recoverable,
+							onUncaughtError: uncaught,
+						},
+					);
+					await act(() => {});
+					// The root-level sibling remains in place while hydration is pending.
+					expect(extra.isConnected).toBe(true);
+					expect(onCommit).not.toHaveBeenCalled();
+					expect(fixture.cleanup).not.toHaveBeenCalled();
+					if (server === 'externally removed') extra.remove();
+					client.gate.pending = undefined;
+					await act(async () => {
+						release();
+						await pending;
+					});
+					expect(container.querySelector('button')).toBe(button);
+					if (server === 'externally removed') {
+						expect(uncaught).toHaveBeenCalledOnce();
+						expect(String(uncaught.mock.calls[0]![0])).toMatch(
+							/supported fixed native view|Minified Octane error #75;/,
+						);
+						// A refused lease is not a mismatch: nothing falls back.
+						expect(recoverable).not.toHaveBeenCalled();
+						expect(onCommit).not.toHaveBeenCalled();
+						expect(fixture.cleanup).not.toHaveBeenCalled();
+						fixture.publish({ label: 'still early' });
+						expect(button.getAttribute('data-state')).toBe('still early');
+						return;
+					}
+					expect(uncaught).not.toHaveBeenCalled();
+					expect(recoverable).not.toHaveBeenCalled();
+					expect(extra.isConnected).toBe(true);
+					expect(button.getAttribute('data-state')).toBe('hydrated');
+					expect(onCommit).toHaveBeenCalledOnce();
+					expect(fixture.cleanup).toHaveBeenCalledOnce();
+					fixture.publish({ label: 'retired' });
+					expect(button.getAttribute('data-state')).toBe('hydrated');
+				} finally {
+					hydratedRoot?.unmount();
+					hydratedRoot = undefined;
+					binding.dispose();
+				}
+			});
+		}
+	}
+
+	for (const dev of [false, true]) {
+		// A branch that the early owner switched since the server rendered is not
+		// a mismatch: only the early owner can change that DOM back. Hydration
+		// keeps the early DOM, falls back nowhere and reports nothing, then adopts
+		// that DOM once a later publication renders the client's branch.
+		it(`waits for the early owner to publish the client's branch before handing off (${dev ? 'dev' : 'prod'})`, async () => {
+			const source = [
+				"export function Toggle(props) @{ 'use dom bindings';",
+				'  <div data-label={props.label}>',
+				'    @if (props.on) { <b>On</b> } @else { <i>Off</i> }',
+				'  </div>',
+				'}',
+				'export function App(props) @{ <Toggle on={props.on} label={props.label} /> }',
+			].join('\n');
+			const fixture = authoredPresentation('Toggle', { on: false, label: 'server' }, dev, source);
+			container.innerHTML = renderToString(fixture.server.App, { on: false, label: 'server' }).html;
+			const div = container.querySelector('div')!;
+			const binding = fixture.attach(div, fixture.state);
+			const recoverable = vi.fn();
+			const uncaught = vi.fn();
+			try {
+				fixture.publish({ on: true, label: 'early' });
+				const early = div.firstElementChild!;
+				expect(early.localName).toBe('b');
+				const client = fixture.loadClient();
+				hydratedRoot = hydrateRoot(
+					container,
+					client.App,
+					{ on: false, label: 'hydrated' },
+					{
+						bindingLeases: [binding],
+						onRecoverableError: recoverable,
+						onUncaughtError: uncaught,
+					},
+				);
+				await act(() => {});
+				expect(container.querySelector('div')).toBe(div);
+				expect(div.firstElementChild).toBe(early);
+				expect(div.getAttribute('data-label')).toBe('early');
+				expect(recoverable).not.toHaveBeenCalled();
+				expect(fixture.cleanup).not.toHaveBeenCalled();
+				fixture.publish({ on: false, label: 'early again' });
+				const off = div.firstElementChild!;
+				expect(off.localName).toBe('i');
+				await act(() => {});
+				expect(uncaught).not.toHaveBeenCalled();
+				expect(recoverable).not.toHaveBeenCalled();
+				expect(container.querySelector('div')).toBe(div);
+				expect(div.firstElementChild).toBe(off);
+				expect(div.getAttribute('data-label')).toBe('hydrated');
+				expect(fixture.cleanup).toHaveBeenCalledOnce();
+				fixture.publish({ on: true, label: 'retired' });
+				expect(div.firstElementChild).toBe(off);
+				expect(div.getAttribute('data-label')).toBe('hydrated');
+				await act(() => hydratedRoot!.render(client.App, { on: true, label: 'updated' }));
+				expect(container.querySelector('div')).toBe(div);
+				expect(div.innerHTML).toContain('<b>On</b>');
+				expect(div.getAttribute('data-label')).toBe('updated');
+				expect(uncaught).not.toHaveBeenCalled();
+			} finally {
+				hydratedRoot?.unmount();
+				hydratedRoot = undefined;
+				binding.dispose();
+			}
+		});
+	}
+
+	for (const mode of suspendedHandoffModes) {
+		const { dev, strong, reused } = mode;
+		for (const server of ['stale', 'externally removed'] as const) {
+			// Stale server content beside the host is a mismatch, found before the
+			// next sibling suspends: with no boundary, the root renders on the
+			// client. As in React, it keeps showing the server DOM until that render
+			// commits, and the early host's lease ends with the server DOM the
+			// commit discards, even if other code removed the stale node meanwhile.
+			const name =
+				server === 'stale'
+					? 'discards an early host with the root when stale server content beside it falls back across a suspension'
+					: 'discards an early host with the root when the stale content is removed while the fallback is pending';
+			it(`${name} (${suspendedHandoffMode(mode)})`, async () => {
+				const source = [
+					"import { useLayoutEffect } from 'octane';",
+					"import { unbound } from 'octane/behavior';",
+					"export function Host(props) @{ 'use dom bindings';",
+					'  <button data-state={props.label}>{unbound(props.children)}</button>',
+					'}',
+					'export const gate = { pending: undefined };',
+					'function read() { if (gate.pending !== undefined) throw gate.pending; return "done"; }',
+					'function Gate() @{ <i>{read()}</i> }',
+					'export function App(props) @{',
+					'  props.onRender();',
+					'  useLayoutEffect(() => { props.onCommit(); });',
+					'  <section><Host label={props.label}><span>Hello</span></Host><Gate /></section>',
+					'}',
+				].join('\n');
+				let renders = 0;
+				const onCommit = vi.fn();
+				const initial = {
+					label: 'server',
+					onCommit,
+					onRender: () => {
+						if (++renders > 20) throw new Error('Hydration did not converge.');
+					},
+				};
+				const fixture = authoredPresentation(
+					'Host',
+					{ label: 'server' },
+					dev,
+					source,
+					{},
+					{ strong },
+				);
+				if (reused) await fallBackOnce(dev, strong);
+				container.innerHTML = renderToString(fixture.server.App, initial).html;
+				const button = container.querySelector('button')!;
+				const extra = document.createElement('script');
+				extra.type = 'application/json';
+				extra.textContent = '{}';
+				button.after(extra);
+				const binding = fixture.attach(button, fixture.state);
+				const recoverable = vi.fn();
+				const uncaught = vi.fn();
+				try {
+					fixture.publish({ label: 'early' });
+					const client = fixture.loadClient();
+					let release!: () => void;
+					const pending = new Promise<void>((resolve) => (release = resolve));
+					client.gate.pending = pending;
+					hydratedRoot = hydrateRoot(
+						container,
+						client.App,
+						{ ...initial, label: 'hydrated' },
+						{
+							bindingLeases: [binding],
+							onRecoverableError: recoverable,
+							onUncaughtError: uncaught,
+						},
+					);
+					await act(() => {});
+					// The fallback is pending: the server DOM, early host included, stays.
+					expect(container.querySelector('button')).toBe(button);
+					expect(extra.isConnected).toBe(true);
+					expect(recoverable).not.toHaveBeenCalled();
+					expect(onCommit).not.toHaveBeenCalled();
+					expect(fixture.cleanup).not.toHaveBeenCalled();
+					if (server === 'externally removed') extra.remove();
+					client.gate.pending = undefined;
+					await act(async () => {
+						release();
+						await pending;
+					});
+					expect(uncaught).not.toHaveBeenCalled();
+					expect(recoverable).toHaveBeenCalledOnce();
+					expect(button.isConnected).toBe(false);
+					expect(extra.isConnected).toBe(false);
+					const live = container.querySelector('button')!;
+					expect(live.textContent).toBe('Hello');
+					expect(live.getAttribute('data-state')).toBe('hydrated');
+					expect(onCommit).toHaveBeenCalledOnce();
+					// The early owner's lease ends once, with its server DOM.
+					expect(fixture.cleanup).toHaveBeenCalledOnce();
+					fixture.publish({ label: 'retired' });
+					expect(live.getAttribute('data-state')).toBe('hydrated');
+				} finally {
+					hydratedRoot?.unmount();
+					hydratedRoot = undefined;
+					binding.dispose();
+				}
+			});
+		}
+	}
 
 	for (const dev of [false, true]) {
 		for (const styles of ['provider', 'single property', 'multiple properties', 'native reads']) {
@@ -851,7 +1560,10 @@ export function NativeStylexControlLayout(props: NativeControlPresentationProps 
 							form!.tabIndex,
 						]).toEqual(['accepted-mode', null, 0]);
 						expect(layout.cleanup).toHaveBeenCalledOnce();
-						expect(form!.getAttribute('action')).toBe('/accepted-submit');
+						// The early binding left the action unbound, so it is an ordinary
+						// attribute: as in React, hydration keeps the server's value until the
+						// client next changes it.
+						expect(form!.getAttribute('action')).toBe('/server-submit');
 						expect(form!.hasAttribute('inert')).toBe(false);
 						expect(onReady).toHaveBeenCalledExactlyOnceWith(form);
 						form!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
@@ -3814,7 +4526,8 @@ export function ImportedTree(props) @{ 'use dom bindings';
 				imported.publish({ active: true, label: 'Early' });
 				const labels = [...importedButton.children];
 				const client = loadCompiledFixtureSource(importedParent, {
-					...importedOptions,
+					// A production Vite build reports the imported view's memo proof.
+					compileOptions: { dev, hmr: false, isCompilerMemoImport: () => true },
 					id: '/src/dom-presentation.tsrx',
 					mode: 'client',
 					runtimeModules: {
@@ -4102,6 +4815,70 @@ export function TreeHydration(props) @{
 		}
 		// This dev/prod matrix compiles and exercises hundreds of fresh fixtures.
 	}, 15_000);
+
+	describe('structural text ownership', () => {
+		const source = `export function Notice(props) @{ 'use dom bindings';
+  <section>
+    <p>Statut : {props.status as string} maintenant</p>
+    @if (props.open) {
+      <>Ouvert par {props.owner as string}</>
+    }
+  </section>
+}`;
+
+		function notice(dev: boolean) {
+			const fixture = authoredPresentation(
+				'Notice',
+				{ status: 'prête', open: true, owner: 'Ana' },
+				dev,
+				source,
+			);
+			container.innerHTML = fixture.html;
+			const section = container.querySelector('section')!;
+			return { fixture, section, paragraph: section.querySelector('p')! };
+		}
+
+		for (const dev of [false, true]) {
+			const mode = dev ? 'dev' : 'prod';
+			it(`preserves adopted text identity across updates and conditional remounts (${mode})`, () => {
+				const { fixture, section, paragraph } = notice(dev);
+				const text = paragraph.childNodes[2];
+				const binding = fixture.attach(section, fixture.state);
+				try {
+					fixture.publish({ status: 'envoyée' });
+					expect(section.textContent).toBe('Statut : envoyée maintenantOuvert par Ana');
+					expect(paragraph.childNodes[2]).toBe(text);
+					fixture.publish({ status: '', owner: 'Bea' });
+					expect(section.textContent).toBe('Statut :  maintenantOuvert par Bea');
+					fixture.publish({ status: 'prête', open: false });
+					expect(section.textContent).toBe('Statut : prête maintenant');
+					fixture.publish({ open: true, owner: 'Cy' });
+					expect(section.textContent).toBe('Statut : prête maintenantOuvert par Cy');
+					expect(section.querySelector('p')).toBe(paragraph);
+					expect(paragraph.childNodes[2]).toBe(text);
+				} finally {
+					binding.dispose();
+				}
+			});
+
+			for (const tag of ['font', 'span']) {
+				// Both static and bound text must retain their server shape.
+				it.each([0, 2])(
+					`rejects a ${tag} wrapper in place of server text (${mode}, child %i)`,
+					(child) => {
+						const { fixture, section, paragraph } = notice(dev);
+						const original = paragraph.childNodes[child]!;
+						const wrapper = document.createElement(tag);
+						wrapper.textContent = original.textContent;
+						original.replaceWith(wrapper);
+						const retained = section.innerHTML;
+						expect(() => fixture.attach(section, fixture.state)).toThrow(/mismatch/i);
+						expect(section.innerHTML).toBe(retained);
+					},
+				);
+			}
+		}
+	});
 
 	it('preserves externally owned DOM when disposed by default', async () => {
 		container.innerHTML = '<section data-owner="stream"><button>Action</button></section>';
@@ -7933,6 +8710,123 @@ export function Rows() @{
 			}
 		});
 
+		// List numbering is presentation, not form state. Adopted and constructed
+		// lists write `start` and each item's `value` as the server renders them,
+		// and keyed items keep their nodes as the list grows and renumbers.
+		it(`numbers ordered lists and keyed items through start and value (${dev ? 'dev' : 'prod'})`, () => {
+			const source = `import { unbound } from 'octane/behavior';
+export function Ranked(props) @{
+  'use dom bindings';
+  <ol start={props.start}>
+    <li value={unbound(props.lead)}>Lead</li>
+    @for (const item of props.items; key item.id) {
+      <li value={item.rank}>{item.label as string}</li>
+    }
+  </ol>
+}`;
+			type Item = { id: string; rank: unknown; label: string };
+			type Props = { start: unknown; lead: unknown; items: readonly Item[] };
+			const alpha = { id: 'a', rank: 7, label: 'Alpha' };
+			const beta = { id: 'b', rank: null, label: 'Beta' };
+			const gamma = { id: 'c', rank: 0, label: 'Gamma' };
+			const initial: Props = { start: 3, lead: '2.5', items: [alpha, beta] };
+			const fixture = authoredPresentation<Props>(
+				'Ranked',
+				initial,
+				dev,
+				source,
+				{},
+				{
+					strong: true,
+				},
+			);
+			const numbering = (list: Element) => [
+				list.getAttribute('start'),
+				...[...list.children].map((item) => item.getAttribute('value')),
+			];
+			const serverNumbering = (props: Props) => {
+				const template = document.createElement('template');
+				template.innerHTML = renderToString(fixture.server.Ranked, props).html;
+				return numbering(template.content.querySelector('ol')!);
+			};
+			for (const adopt of [true, false]) {
+				fixture.publish(initial, false);
+				fixture.cleanup.mockClear();
+				container.innerHTML = adopt ? fixture.html : '';
+				const handle = adopt
+					? fixture.attach(container.querySelector('ol')!, fixture.state)
+					: fixture.mount({ parent: container }, fixture.state);
+				const list = container.querySelector('ol')!;
+				const items = () => [...list.children] as HTMLLIElement[];
+				// The unbound lead value is the server's attribute in both paths.
+				expect(numbering(list)).toEqual(['3', '2.5', '7', null]);
+				expect(numbering(list)).toEqual(serverNumbering(initial));
+				const [lead, first, second] = items();
+
+				fixture.publish({ items: [alpha, beta, gamma] });
+				expect(numbering(list)).toEqual(['3', '2.5', '7', null, '0']);
+				expect(items().slice(0, 3)).toEqual([lead, first, second]);
+
+				fixture.publish({
+					start: 0,
+					items: [
+						{ ...alpha, rank: -2 },
+						{ ...beta, rank: 4 },
+						{ ...gamma, rank: null },
+					],
+				});
+				expect(numbering(list)).toEqual(['0', '2.5', '-2', '4', null]);
+				expect([list.start, ...items().map((item) => item.value)]).toEqual([0, 2, -2, 4, 0]);
+				const third = items()[3];
+				expect(items()).toEqual([lead, first, second, third]);
+
+				for (const start of [-1, 12, '5', Number.NaN, 'abc', true, null, undefined]) {
+					fixture.publish({ start, items: [{ ...alpha, rank: start }, beta, gamma] });
+					const props = fixture.state.getSnapshot();
+					expect(numbering(list), String(start)).toEqual(serverNumbering(props));
+				}
+				expect(items()).toEqual([lead, first, second, third]);
+
+				handle.dispose();
+				expect(fixture.cleanup).toHaveBeenCalledOnce();
+				const retired = numbering(list);
+				fixture.publish({ start: 9, items: [{ ...alpha, rank: 9 }, beta, gamma] });
+				expect(numbering(list)).toEqual(retired);
+			}
+		});
+
+		// Construction initializes an unbound numeric attribute as the server
+		// renders it, under React's camelCase spelling too.
+		it(`constructs unbound numeric attributes as the server renders them (${dev ? 'dev' : 'prod'})`, () => {
+			const source = `import { unbound } from 'octane/behavior';
+export function Spanned(props) @{
+  'use dom bindings';
+  <table><tbody><tr><td rowSpan={unbound(props.span)}>{props.label as string}</td></tr></tbody></table>
+}`;
+			const fixture = authoredPresentation<{ span: unknown; label: string }>(
+				'Spanned',
+				{ span: 2, label: 'Cell' },
+				dev,
+				source,
+			);
+			for (const span of [2, 0, '3', Number.NaN, 'abc', undefined]) {
+				const props = { span, label: 'Cell' };
+				fixture.publish(props, false);
+				const template = document.createElement('template');
+				template.innerHTML = renderToString(fixture.server.Spanned, props).html;
+				container.innerHTML = '';
+				const handle = fixture.mount({ parent: container }, fixture.state);
+				const cell = container.querySelector('td')!;
+				expect(cell.getAttribute('rowspan'), String(span)).toBe(
+					template.content.querySelector('td')!.getAttribute('rowspan'),
+				);
+				fixture.publish({ label: 'Next' });
+				expect(container.querySelector('td')).toBe(cell);
+				expect(cell.textContent).toBe('Next');
+				handle.dispose();
+			}
+		});
+
 		// Leaving a page retires its document signals before its islands are
 		// disposed. That retirement ends a live presentation; it is not an error.
 		it(`keeps the last DOM without throwing when its signal owner retires (${dev ? 'dev' : 'prod'})`, () => {
@@ -7957,6 +8851,274 @@ export function Retiring() @{
 			expect([section.title, section.textContent]).toEqual(['updated', 'updated']);
 			expect(() => handle.dispose()).not.toThrow();
 		});
+
+		// Every capability that subscribes answers for its own sources. A scope
+		// observed only through one of them retiring ends the presentation quietly,
+		// including a later read of that scope once a control's lease has ended.
+		for (const [capability, markup, observe] of [
+			['tracked read', '<p title={text$.get()}>text</p>', (node: HTMLElement) => node.title],
+			['signal text', '<p>{text$ as string}</p>', (node: HTMLElement) => node.textContent],
+			['signal attribute', '<p title={text$}>text</p>', (node: HTMLElement) => node.title],
+			['style', '<p style={look}>text</p>', (node: HTMLElement) => node.style.color],
+			[
+				'projection',
+				'<p sx={styles.size(size$)}>text</p>',
+				(node: HTMLElement) => node.style.height,
+			],
+			[
+				'projected style',
+				'<p sx={styles.paint(live$)}>text</p>',
+				(node: HTMLElement) => node.style.color,
+			],
+			[
+				'control',
+				'<input value={text$} />',
+				(node: HTMLElement) => (node as HTMLInputElement).value,
+			],
+		] as const)
+			it(`ends quietly when a scope observed only through a ${capability} retires (${dev ? 'dev' : 'prod'})`, () => {
+				const source = `import { live$, open$, text$, color$, size$ } from './island-state';
+import * as stylex from 'binding-styles';
+const look = { color: color$ };
+const styles = stylex.create({
+  size: (size) => ({ className: 'sized', style: { height: size } }),
+  paint: () => ({ className: 'painted', style: look }),
+});
+export function Observed() @{
+  'use dom bindings';
+  <section data-live={live$.get()}>${markup}@if (open$.get()) { <i>{text$.get() as string}</i> }</section>
+}`;
+				const scope = createScope({ scopeKey: `island-capability-live-${dev}` });
+				const retiring = createScope({ scopeKey: `island-capability-retiring-${dev}` });
+				const live$ = scope.signal$('live', 'first');
+				const open$ = scope.signal$('open', false);
+				const text$ = retiring.signal$('text', 'kept');
+				const color$ = retiring.signal$('color', 'red');
+				const size$ = retiring.signal$('size', 2);
+				const fixture = authoredPresentation(
+					'Observed',
+					{},
+					dev,
+					source,
+					{
+						'./island-state': { live$, open$, text$, color$, size$ },
+						'binding-styles': {
+							create: (configuration: unknown) => configuration,
+							props: (value: unknown) => value,
+						},
+					},
+					{
+						knownAttributeSpreads: [
+							{
+								source: 'binding-styles',
+								imported: '*',
+								members: ['props'],
+								fields: ['className', 'style'],
+								style: 'object',
+								jsxAttribute: 'sx',
+							},
+						],
+					},
+				);
+				const reportError = vi.fn();
+				const original = globalThis.reportError;
+				globalThis.reportError = reportError;
+				try {
+					container.innerHTML = fixture.html;
+					const section = container.querySelector('section')!;
+					const node = section.firstElementChild as HTMLElement;
+					const handle = fixture.attach(section, fixture.state);
+					const initial = observe(node);
+					text$.set('updated');
+					color$.set('blue');
+					size$.set(3);
+					const updated = observe(node);
+					expect(updated).not.toBe(initial);
+					const html = section.innerHTML;
+					expect(() => retiring.dispose()).not.toThrow();
+					expect(() => open$.set(true)).not.toThrow();
+					expect(reportError).not.toHaveBeenCalled();
+					expect(container.querySelector('section')).toBe(section);
+					expect([section.innerHTML, observe(node)]).toEqual([html, updated]);
+					live$.set('ended');
+					expect(section.getAttribute('data-live')).toBe('first');
+					expect(() => handle.dispose()).not.toThrow();
+				} finally {
+					globalThis.reportError = original;
+					scope.dispose();
+				}
+			});
+
+		// Declared and optimistic handles resolve a cell through the program's
+		// owner: a scope, an owner identity, or a renderer instance of a document.
+		// That owner retiring is the handle's own retirement, even though resolving
+		// through a retired identity now refuses rather than returning its cell.
+		for (const kind of ['declared', 'optimistic'] as const)
+			for (const ownerKind of ['scope', 'identity', 'document'] as const)
+				it(`ends quietly when the ${ownerKind} owner of its ${kind} handle retires (${dev ? 'dev' : 'prod'})`, () => {
+					const source = `import { live$, text$ } from './island-state';
+export function Resolved() @{
+  'use dom bindings';
+  <section data-live={live$.get()}><p>{text$ as string}</p></section>
+}`;
+					const scope = createScope({ scopeKey: `island-resolved-live-${dev}` });
+					const live$ = scope.signal$('live', 'first');
+					const key = `island-resolved-${kind}-${ownerKind}-${dev}`;
+					const document = { scopeKey: `${key}-document` };
+					const owned = createScope({ scopeKey: key });
+					const owner =
+						ownerKind === 'scope'
+							? owned
+							: ownerKind === 'identity'
+								? document
+								: {
+										scopeKey: `${key}-instance`,
+										documentOwner: document,
+										instanceOwner: {},
+										instanceKey: 'island',
+									};
+					const declared$ = __signalAt(key, 'kept');
+					const text$ = kind === 'declared' ? declared$ : optimistic$(declared$);
+					const fixture = authoredPresentation('Resolved', {}, dev, source, {
+						'./island-state': { live$, text$ },
+					});
+					const reportError = vi.fn();
+					const original = globalThis.reportError;
+					globalThis.reportError = reportError;
+					try {
+						container.innerHTML = fixture.html;
+						const section = container.querySelector('section')!;
+						const handle = runWithSignalOwner(owner, () => fixture.attach(section, fixture.state));
+						runWithSignalOwner(owner, () => declared$.set('updated'));
+						expect(section.textContent).toBe('updated');
+						expect(() =>
+							ownerKind === 'scope' ? owned.dispose() : retireSignalOwnerIdentity(document),
+						).not.toThrow();
+						expect(reportError).not.toHaveBeenCalled();
+						expect(container.querySelector('section')).toBe(section);
+						expect(section.textContent).toBe('updated');
+						live$.set('ended');
+						expect(section.getAttribute('data-live')).toBe('first');
+						expect(() => handle.dispose()).not.toThrow();
+					} finally {
+						globalThis.reportError = original;
+						scope.dispose();
+						owned.dispose();
+					}
+				});
+
+		// A handle a transition accepted is observed like one bound directly.
+		for (const [binding, markup, observe] of [
+			[
+				'text handle',
+				'<p>{(pick$.get() ? second$ : first$) as string}</p>',
+				(node: HTMLElement) => node.textContent,
+			],
+			[
+				'control',
+				'<input value={pick$.get() ? second$ : first$} />',
+				(node: HTMLElement) => (node as HTMLInputElement).value,
+			],
+		] as const)
+			it(`ends quietly when a ${binding} accepted by a transition retires (${dev ? 'dev' : 'prod'})`, async () => {
+				const source = `import { pick$, open$, first$, second$ } from './island-state';
+export function Picked() @{
+  'use dom bindings';
+  <section>${markup}@if (open$.get()) { <i>{second$.get() as string}</i> }</section>
+}`;
+				const scope = createScope({ scopeKey: `island-transition-live-${dev}` });
+				const retiring = createScope({ scopeKey: `island-transition-retiring-${dev}` });
+				const pick$ = scope.signal$('pick', false);
+				const open$ = scope.signal$('open', false);
+				const first$ = scope.signal$('first', 'first');
+				const second$ = retiring.signal$('second', 'second');
+				const fixture = authoredPresentation('Picked', {}, dev, source, {
+					'./island-state': { pick$, open$, first$, second$ },
+				});
+				const reportError = vi.fn();
+				const original = globalThis.reportError;
+				globalThis.reportError = reportError;
+				try {
+					container.innerHTML = fixture.html;
+					const section = container.querySelector('section')!;
+					const node = section.firstElementChild as HTMLElement;
+					const handle = fixture.attach(section, fixture.state);
+					let settled!: Promise<void>;
+					startTransition(() => {
+						settled = (async () => pick$.set(true))();
+						return settled;
+					});
+					await settled;
+					await vi.waitFor(() => expect(observe(node)).toBe('second'));
+					second$.set('accepted');
+					expect(observe(node)).toBe('accepted');
+					const html = section.innerHTML;
+					expect(() => retiring.dispose()).not.toThrow();
+					expect(() => open$.set(true)).not.toThrow();
+					expect(reportError).not.toHaveBeenCalled();
+					expect([section.innerHTML, observe(node)]).toEqual([html, 'accepted']);
+					pick$.set(false);
+					expect(observe(node)).toBe('accepted');
+					expect(() => handle.dispose()).not.toThrow();
+				} finally {
+					globalThis.reportError = original;
+					scope.dispose();
+				}
+			});
+
+		// Only a source the program already observes retiring ends it quietly. A
+		// first read of an unrelated, already retired scope (or an error that only
+		// shares the name) is an ordinary failure of a committed program: it is
+		// reported, and the presentation keeps its last DOM and stays live.
+		for (const [form, read] of [
+			['tracked read', 'gone$.get() as string'],
+			['handle', 'gone$ as string'],
+			['look-alike error', 'lookAlike() as string'],
+		] as const)
+			it(`reports a committed ${form} of an unrelated retired scope and stays live (${dev ? 'dev' : 'prod'})`, () => {
+				const source = `import { label$, open$, gone$, lookAlike } from './island-state';
+export function Unrelated() @{
+  'use dom bindings';
+  <section title={label$.get()}>@if (open$.get()) { <p>{${read}}</p> }</section>
+}`;
+				const scope = createScope({ scopeKey: `island-unrelated-${dev}` });
+				const retired = createScope({ scopeKey: `island-unrelated-retired-${dev}` });
+				const label$ = scope.signal$('label', 'live');
+				const open$ = scope.signal$('open', false);
+				const gone$ = retired.signal$('gone', 'gone');
+				const lookAlike = (): string => {
+					throw Object.assign(new Error('not a retirement'), { name: 'ScopeDisposedError' });
+				};
+				const fixture = authoredPresentation('Unrelated', {}, dev, source, {
+					'./island-state': { label$, open$, gone$, lookAlike },
+				});
+				const reportError = vi.fn();
+				const original = globalThis.reportError;
+				globalThis.reportError = reportError;
+				try {
+					container.innerHTML = fixture.html;
+					const section = container.querySelector('section')!;
+					const handle = fixture.attach(section, fixture.state);
+					retired.dispose();
+					expect(() => open$.set(true)).not.toThrow();
+					expect(reportError).toHaveBeenCalledOnce();
+					const [error] = reportError.mock.calls[0]!;
+					if (form === 'look-alike error') expect(error).not.toBeInstanceOf(ScopeDisposedError);
+					else expect(error).toBeInstanceOf(ScopeDisposedError);
+					expect(container.querySelector('section')).toBe(section);
+					expect(section.querySelector('p')).toBeNull();
+					open$.set(false);
+					label$.set('updated');
+					expect([section.title, section.textContent]).toEqual(['updated', '']);
+					expect(reportError).toHaveBeenCalledOnce();
+					handle.dispose();
+					label$.set('disposed');
+					expect(section.title).toBe('updated');
+				} finally {
+					globalThis.reportError = original;
+					scope.dispose();
+				}
+			});
 
 		// The `ready`/activation pattern: effects declared with an explicit empty
 		// array run once after their view is live and clean up when it leaves.
@@ -8031,6 +9193,492 @@ export function Effectful() @{ 'use dom bindings'; ${effect}; <p /> }`,
 			}
 		});
 
+		// A view may render itself beneath a keyed list. The data's depth, not the
+		// template, decides how many instances exist, and each owns its own state.
+		it(`adopts, updates and retires recursive keyed descendants (${dev ? 'dev' : 'prod'})`, () => {
+			type Branch = { key: string; label: string; children: Branch[] };
+			const source = `import { useLayoutEffect } from 'octane';
+import { log } from './tree-state';
+type Branch = { key: string; label: string; children: readonly Branch[] };
+export function Tree({ node, onPick }: { node: Branch; onPick: (key: string) => void }) @{
+  'use dom bindings';
+  useLayoutEffect(() => {
+    log('mount ' + node.key);
+    return () => log('cleanup ' + node.key);
+  }, []);
+  <section data-key={node.key}>
+    <button type="button" onClick={() => onPick(node.key)}>{node.label as string}</button>
+    <input aria-label={node.key} />
+    @for (const child of node.children; key child.key) {
+      <Tree node={child} onPick={onPick} />
+    }
+  </section>
+}`;
+			const branch = (key: string, label: string, children: Branch[] = []): Branch => ({
+				key,
+				label,
+				children,
+			});
+			const events: string[] = [];
+			const picks: string[] = [];
+			const onPick = (key: string) => picks.push(key);
+			for (const adopt of [true, false]) {
+				events.length = 0;
+				picks.length = 0;
+				const fixture = authoredPresentation(
+					'Tree',
+					{
+						node: branch('root', 'Root', [
+							branch('a', 'A', [branch('a1', 'A1')]),
+							branch('b', 'B'),
+						]),
+						onPick,
+					},
+					dev,
+					source,
+					{ './tree-state': { log: (event: string) => events.push(event) } },
+				);
+				const host = document.createElement('div');
+				container.append(host);
+				host.innerHTML = adopt ? fixture.html : '';
+				const serverSections = [...host.querySelectorAll('section')];
+				const error = vi.spyOn(console, 'error');
+				const handle = adopt
+					? fixture.attach(host.querySelector('section')!, fixture.state)
+					: fixture.mount({ parent: host }, fixture.state);
+				const section = (key: string) => host.querySelector(`section[data-key="${key}"]`)!;
+				const order = () =>
+					[...host.querySelectorAll('section')].map((node) => node.getAttribute('data-key'));
+				const labels = () => [...host.querySelectorAll('button')].map((node) => node.textContent);
+				try {
+					expect(labels()).toEqual(['Root', 'A', 'A1', 'B']);
+					if (adopt) expect([...host.querySelectorAll('section')]).toEqual(serverSections);
+					// Mount-only effects run children before parents in every instance.
+					expect(events.splice(0)).toEqual(['mount a1', 'mount a', 'mount b', 'mount root']);
+					const a = section('a');
+					const a1 = section('a1');
+					const input = a1.querySelector('input')!;
+					input.value = 'typed deep';
+					input.focus();
+
+					// A deep text edit and a deep insertion keep every surviving node.
+					fixture.publish({
+						node: branch('root', 'Root', [
+							branch('a', 'A', [branch('a1', 'A1 edited', [branch('a1x', 'A1X')])]),
+							branch('b', 'B'),
+						]),
+					});
+					expect(labels()).toEqual(['Root', 'A', 'A1 edited', 'A1X', 'B']);
+					expect(section('a1')).toBe(a1);
+					expect(a1.querySelector('input')).toBe(input);
+					expect(events.splice(0)).toEqual(['mount a1x']);
+
+					// Reordering and inserting siblings moves whole subtrees intact.
+					const b = section('b');
+					fixture.publish({
+						node: branch('root', 'Root', [
+							branch('b', 'B'),
+							branch('c', 'C'),
+							branch('a', 'A', [branch('a1', 'A1 edited', [branch('a1x', 'A1X')])]),
+						]),
+					});
+					expect(order()).toEqual(['root', 'b', 'c', 'a', 'a1', 'a1x']);
+					expect(section('a')).toBe(a);
+					expect(section('a1')).toBe(a1);
+					expect(section('b')).toBe(b);
+					expect(input.value).toBe('typed deep');
+					expect(document.activeElement).toBe(input);
+					expect(events.splice(0)).toEqual(['mount c']);
+					a1.querySelector('button')!.click();
+					expect(picks.splice(0)).toEqual(['a1']);
+
+					// A removed subtree retires its effects and native handlers.
+					const removed = section('a1x').querySelector('button')!;
+					fixture.publish({ node: branch('root', 'Root', [branch('b', 'B'), branch('c', 'C')]) });
+					expect(order()).toEqual(['root', 'b', 'c']);
+					expect(a.isConnected).toBe(false);
+					expect(events.splice(0).sort()).toEqual(['cleanup a', 'cleanup a1', 'cleanup a1x']);
+					removed.click();
+					a1.querySelector('button')!.click();
+					expect(picks).toEqual([]);
+					section('c').querySelector('button')!.click();
+					expect(picks.splice(0)).toEqual(['c']);
+					expect(error).not.toHaveBeenCalled();
+				} finally {
+					handle.dispose();
+					error.mockRestore();
+				}
+				expect(events.splice(0).sort()).toEqual(['cleanup b', 'cleanup c', 'cleanup root']);
+				// Disposal keeps the last DOM and its handlers stay retired.
+				expect(order()).toEqual(['root', 'b', 'c']);
+				section('b').querySelector('button')!.click();
+				expect(picks).toEqual([]);
+			}
+		});
+
+		// Mutually recursive views, one of them a plain local child, repeated with
+		// different props and entered through a caller's children slot.
+		// Fixed-prop specialization must not unroll the recursion.
+		it(`adopts and updates mutually recursive views with distinct props (${dev ? 'dev' : 'prod'})`, () => {
+			type Entry = { id: string; title: string; items: Entry[] };
+			const source = `import type { OctaneNode } from 'octane';
+type Entry = { id: string; title: string; items: readonly Entry[] };
+function Title({ text }: { text: string }) @{ <b>{text as string}</b> }
+function Frame({ depth, children }: { depth: number; children: OctaneNode }) @{
+  <li data-frame={depth}>{children}</li>
+}
+function Group({ entry, depth }: { entry: Entry; depth: number }) @{
+  <ul data-depth={depth}>
+    @for (const item of entry.items; key item.id) {
+      <Frame depth={depth}><Outline entry={item} depth={depth + 1} /></Frame>
+    }
+  </ul>
+}
+export function Outline({ entry, depth }: { entry: Entry; depth: number }) @{
+  'use dom bindings';
+  <div data-id={entry.id} data-depth={depth}>
+    <Title text={entry.title} />
+    @if (entry.items.length > 0) { <Group entry={entry} depth={depth} /> }
+  </div>
+}
+export function Page(props: { primary: Entry; secondary: Entry }) @{
+  'use dom bindings';
+  <main><Outline entry={props.primary} depth={0} /><Outline entry={props.secondary} depth={10} /></main>
+}`;
+			const entry = (id: string, title: string, items: Entry[] = []): Entry => ({
+				id,
+				title,
+				items,
+			});
+			const primary = entry('p', 'Primary', [entry('p1', 'P1', [entry('p11', 'P11')])]);
+			const secondary = entry('s', 'Secondary', [entry('s1', 'S1')]);
+			for (const fixed of [false, true]) {
+				for (const adopt of [true, false]) {
+					const fixture = authoredPresentation(
+						'Page',
+						{ primary, secondary },
+						dev,
+						source,
+						{},
+						fixed ? { domBindingFixedProps: ['depth'] } : {},
+					);
+					const host = document.createElement('div');
+					container.append(host);
+					host.innerHTML = adopt ? fixture.html : '';
+					const serverNodes = [...host.querySelectorAll('div, ul, li, b')];
+					const handle = adopt
+						? fixture.attach(host.querySelector('main')!, fixture.state)
+						: fixture.mount({ parent: host }, fixture.state);
+					const outline = (id: string) => host.querySelector(`div[data-id="${id}"]`)!;
+					const depths = () =>
+						[...host.querySelectorAll('div')].map(
+							(node) =>
+								`${node.dataset.id}:${node.dataset.depth}:${node.querySelector('b')!.textContent}`,
+						);
+					try {
+						expect(depths()).toEqual([
+							'p:0:Primary',
+							'p1:1:P1',
+							'p11:2:P11',
+							's:10:Secondary',
+							's1:11:S1',
+						]);
+						expect([...host.querySelectorAll('ul')].map((node) => node.dataset.depth)).toEqual([
+							'0',
+							'1',
+							'10',
+						]);
+						expect([...host.querySelectorAll('li')].map((node) => node.dataset.frame)).toEqual([
+							'0',
+							'1',
+							'10',
+						]);
+						if (adopt) expect([...host.querySelectorAll('div, ul, li, b')]).toEqual(serverNodes);
+						const p11 = outline('p11');
+						const s1 = outline('s1');
+
+						// One recursive use changes while the other keeps its nodes.
+						fixture.publish({
+							secondary: entry('s', 'Secondary', [
+								entry('s1', 'S1 edited', [entry('s11', 'S11')]),
+								entry('s2', 'S2'),
+							]),
+						});
+						expect(depths()).toEqual([
+							'p:0:Primary',
+							'p1:1:P1',
+							'p11:2:P11',
+							's:10:Secondary',
+							's1:11:S1 edited',
+							's11:12:S11',
+							's2:11:S2',
+						]);
+						expect(outline('p11')).toBe(p11);
+						expect(outline('s1')).toBe(s1);
+
+						// Collapsing a level removes its group; expanding builds it again.
+						fixture.publish({ primary: entry('p', 'Primary', [entry('p1', 'P1')]) });
+						expect(p11.isConnected).toBe(false);
+						expect(outline('p1').querySelector('ul')).toBeNull();
+						fixture.publish({ primary });
+						expect(outline('p11').getAttribute('data-depth')).toBe('2');
+						expect(outline('s1')).toBe(s1);
+					} finally {
+						handle.dispose();
+					}
+				}
+			}
+		});
+
+		// Suspension, failure and cancellation stay local to each recursive instance.
+		it(`keeps pending, failed and removed async reads local to recursive descendants (${dev ? 'dev' : 'prod'})`, async () => {
+			type Branch = { key: string; lazy: boolean; children: Branch[] };
+			const source = `import { answer$ } from './tree-state';
+type Branch = { key: string; lazy: boolean; children: readonly Branch[] };
+export function Lazy({ node }: { node: Branch }) @{
+  'use dom bindings';
+  <section data-key={node.key}>
+    @if (node.lazy) {
+      @try {
+        const answer = answer$.get();
+        <p data-answer>{answer as string}</p>
+      } @pending {
+        <p data-pending>loading</p>
+      } @catch (error) {
+        <p data-error>{String(error) as string}</p>
+      }
+    }
+    @for (const child of node.children; key child.key) { <Lazy node={child} /> }
+  </section>
+}`;
+			const scope = createScope({ scopeKey: `recursive-try-${dev}` });
+			const requests = new Map<number, ReturnType<typeof deferred<string>>>();
+			const request = (generation: number) => {
+				let pending = requests.get(generation);
+				if (!pending) requests.set(generation, (pending = deferred<string>()));
+				return pending;
+			};
+			const loadAnswer = query(
+				`recursive-answer-${dev}`,
+				(generation: number) => request(generation).promise,
+			);
+			const generation$ = scope.signal$('generation', 0);
+			const answer$ = createResource(scope, 'answer', () => loadAnswer(generation$.get()));
+			// Ready query publication may cross a host-task boundary.
+			const settle = () => act(async () => {});
+			const tree = (deep: boolean): Branch => ({
+				key: 'root',
+				lazy: false,
+				children: [
+					{
+						key: 'a',
+						lazy: false,
+						children: deep ? [{ key: 'deep', lazy: true, children: [] }] : [],
+					},
+					{ key: 'b', lazy: false, children: [] },
+				],
+			});
+			const fixture = authoredPresentation('Lazy', { node: tree(true) }, dev, source, {
+				'./tree-state': { answer$ },
+			});
+			const host = document.createElement('div');
+			container.append(host);
+			const handle = fixture.mount({ parent: host }, fixture.state);
+			const deep = () => host.querySelector('section[data-key="deep"]');
+			try {
+				const a = host.querySelector('section[data-key="a"]')!;
+				expect(deep()!.querySelector('[data-pending]')).not.toBeNull();
+				request(0).resolve('first');
+				await settle();
+				expect(deep()!.querySelector('[data-answer]')!.textContent).toBe('first');
+
+				// Removing a suspended descendant cancels it; its late value cannot
+				// rebuild content that is no longer in the tree.
+				generation$.set(1);
+				const suspended = deep()!;
+				expect(suspended.querySelector('[data-pending]')).not.toBeNull();
+				fixture.publish({ node: tree(false) });
+				expect(deep()).toBeNull();
+				expect(suspended.isConnected).toBe(false);
+				request(1).resolve('late');
+				await settle();
+				expect(host.querySelector('[data-answer]')).toBeNull();
+				expect(suspended.querySelector('[data-answer]')).toBeNull();
+				expect(host.querySelector('section[data-key="a"]')).toBe(a);
+
+				// Inserted again, the descendant reads the settled value.
+				fixture.publish({ node: tree(true) });
+				expect(deep()!.querySelector('[data-answer]')!.textContent).toBe('late');
+
+				// A failure selects the descendant's own @catch arm only.
+				generation$.set(2);
+				request(2).reject(new Error('broken'));
+				await settle();
+				expect(deep()!.querySelector('[data-error]')!.textContent).toBe('Error: broken');
+				expect([...host.querySelectorAll('section')].map((node) => node.dataset.key)).toEqual([
+					'root',
+					'a',
+					'deep',
+					'b',
+				]);
+			} finally {
+				handle.dispose();
+				scope.dispose();
+			}
+		});
+
+		it(`hands an early recursive conditional view to normal hydration (${dev ? 'dev' : 'prod'})`, () => {
+			type Link = { label: string; next: Link | null };
+			const link = (...labels: string[]): Link | null =>
+				labels.length === 0 ? null : { label: labels[0]!, next: link(...labels.slice(1)) };
+			const chain = authoredPresentation(
+				'Chain',
+				{ link: link('a', 'b')! },
+				dev,
+				`type Link = { label: string; next: Link | null };
+export function Chain({ link }: { link: Link }) @{
+  'use dom bindings';
+  <div title={link.label}>@if (link.next) { <Chain link={link.next} /> }</div>
+}`,
+			);
+			const host = document.createElement('div');
+			container.append(host);
+			host.innerHTML = chain.html;
+			const outer = host.querySelector('div')!;
+			const inner = outer.querySelector('div')!;
+			const titles = () => [...host.querySelectorAll('div')].map((node) => node.title);
+			const binding = chain.attach(outer, chain.state);
+			let root: ReturnType<typeof hydrateRoot> | undefined;
+			try {
+				chain.publish({ link: link('A', 'B')! });
+				expect(titles()).toEqual(['A', 'B']);
+				const Chain = chain.loadClient().Chain as never;
+				root = hydrateRoot(host, Chain, chain.state.getSnapshot(), { bindingLeases: [binding] });
+				flushSync(() => {});
+				flushEffects();
+				expect(chain.cleanup).toHaveBeenCalledOnce();
+				expect(host.querySelector('div')).toBe(outer);
+				expect(outer.querySelector('div')).toBe(inner);
+				expect(titles()).toEqual(['A', 'B']);
+				// The renderer now owns every level, including ones it adds.
+				chain.publish({ link: link('stale')! });
+				flushSync(() => root!.render(Chain, { link: link('x', 'y', 'z') }));
+				expect(titles()).toEqual(['x', 'y', 'z']);
+				expect(host.querySelector('div')).toBe(outer);
+				expect(outer.querySelector('div')).toBe(inner);
+			} finally {
+				root?.unmount();
+				binding.dispose();
+			}
+			expect(chain.cleanup).toHaveBeenCalledOnce();
+		});
+
+		// Each construct follows the recursive call, so planning passes through the
+		// recursion before it reaches the diagnostic.
+		it(`keeps binding diagnostics inside recursive views (${dev ? 'dev' : 'prod'})`, () => {
+			const recursive = (output: string, prefix = '') => `${prefix}
+type Branch = { key: string; html: string; tag: any; children: readonly Branch[] };
+export function Tree({ node }: { node: Branch }) @{
+  'use dom bindings';
+  <section>@for (const child of node.children; key child.key) { <Tree node={child} /> }${output}</section>
+}`;
+			for (const [source, diagnostic] of [
+				[
+					recursive('<div dangerouslySetInnerHTML={{ __html: node.html }} />'),
+					/OCTANE_STRONG_UNTRUSTED_HTML/,
+				],
+				[recursive('<node.tag />'), /directly imported named pure binding views/],
+				[recursive('<div {...node} />'), /attribute spreads must be explicitly unbound/],
+				[
+					recursive(
+						'<Leaf node={node} />',
+						`import { useState } from 'octane';
+function Leaf({ node }) @{ const [open] = useState(false); <i>{String(open) as string}</i> }`,
+					),
+					/pure const aliases and mount-only effects/,
+				],
+			] as const) {
+				for (const id of ['/src/tree.tsrx', '/src/tree.tsrx?octane-bindings=Tree'])
+					expect(() =>
+						loadCompiledFixtureSource(source, {
+							id,
+							mode: id.includes('?') ? 'client' : 'server',
+							compileOptions: { dev, hmr: false, strong: true },
+						}),
+					).toThrow(diagnostic);
+			}
+		});
+
+		// Recursion that enters a view again on every path would never end, on the
+		// server or in the browser, so the compiler rejects it.
+		it(`rejects recursion that renders on every path (${dev ? 'dev' : 'prod'})`, () => {
+			const shape = encodeURIComponent(JSON.stringify([1, ['n']]));
+			for (const [view, source, cycle] of [
+				[
+					'Loop',
+					`export function Loop({ n }) @{ 'use dom bindings'; <section><p><Loop n={n} /></p></section> }`,
+					'Loop → Loop',
+				],
+				[
+					'Outer',
+					`function Inner({ n }) @{ <b><Outer n={n} /></b> }
+export function Outer({ n }) @{ 'use dom bindings'; <div><Inner n={n} /></div> }`,
+					'Outer → Inner → Outer',
+				],
+				[
+					'Spread',
+					`export function Spread({ n, ...rest }) @{ 'use dom bindings'; <div {...rest}><Spread n={n} /></div> }`,
+					'Spread → Spread',
+				],
+			] as const) {
+				for (const id of [
+					'/src/loop.tsrx',
+					`/src/loop.tsrx?octane-bindings=${view}&octane-props=${shape}`,
+				])
+					expect(() =>
+						loadCompiledFixtureSource(source, {
+							id,
+							mode: id.includes('?') ? 'client' : 'server',
+							compileOptions: { dev, hmr: false },
+						}),
+					).toThrow(`binding view ${view} renders itself on every path (${cycle})`);
+			}
+
+			// One conditional call in the cycle is enough for the recursion to end.
+			type Link = { label: string; next: Link | null };
+			const link = (...labels: string[]): Link | null =>
+				labels.length === 0 ? null : { label: labels[0]!, next: link(...labels.slice(1)) };
+			const chain = authoredPresentation(
+				'Chain',
+				{ link: link('a', 'b')! },
+				dev,
+				`type Link = { label: string; next: Link | null };
+function Wrap({ link }: { link: Link }) @{ <article><Chain link={link} /></article> }
+export function Chain({ link }: { link: Link }) @{
+  'use dom bindings';
+  <section title={link.label}>@if (link.next) { <Wrap link={link.next} /> }</section>
+}`,
+			);
+			const host = document.createElement('div');
+			container.append(host);
+			const titles = () => [...host.querySelectorAll('section')].map((node) => node.title);
+			for (const adopt of [true, false]) {
+				host.innerHTML = adopt ? chain.html : '';
+				chain.publish({ link: link('a', 'b')! }, false);
+				const handle = adopt
+					? chain.attach(host.querySelector('section')!, chain.state)
+					: chain.mount({ parent: host }, chain.state);
+				try {
+					expect(titles()).toEqual(['a', 'b']);
+					chain.publish({ link: link('x', 'y', 'z')! });
+					expect(titles()).toEqual(['x', 'y', 'z']);
+					expect(host.querySelectorAll('article')).toHaveLength(2);
+				} finally {
+					handle.dispose();
+				}
+			}
+		});
+
 		// `@try` selects its arm from the reads its body performs, exactly like the
 		// renderer: pending shows `@pending`, an error shows `@catch` until reset.
 		it(`adopts and switches @try arms from imported async reads (${dev ? 'dev' : 'prod'})`, async () => {
@@ -8063,9 +9711,8 @@ export function Answer() @{
 			const answer$ = createResource(scope, 'answer', () => loadAnswer(generation$.get()));
 			const fixture = () =>
 				authoredPresentation('Answer', {}, dev, source, { './island-state': { answer$ } });
-			const settle = async () => {
-				for (let index = 0; index < 4; index++) await Promise.resolve();
-			};
+			// Ready query publication may cross a host-task boundary.
+			const settle = () => act(async () => {});
 			try {
 				// The server rendered @pending; activation adopts that fallback.
 				const pending = fixture();
@@ -8174,7 +9821,7 @@ export function Answer() @{
 				expect(container.querySelector('section')).toBe(section);
 				expect(section.querySelector('[data-pending]')!.textContent).toBe('waiting');
 				answer.resolve('fresh');
-				for (let index = 0; index < 4; index++) await Promise.resolve();
+				await act(async () => {});
 				expect(section.querySelector('[data-answer]')!.textContent).toBe('fresh');
 				expect(section.querySelector('[data-pending]')).toBeNull();
 				open$.set(false);
@@ -8213,7 +9860,7 @@ export function Answer() @{
 				const answer$ = createResource(scope, 'answer', () => loadAnswer(undefined));
 				if (outcome === 'ready') answer.resolve('ready');
 				else answer.reject(new Error('failed'));
-				for (let index = 0; index < 4; index++) await Promise.resolve();
+				await act(async () => {});
 				const fixture = authoredPresentation('Answer', {}, dev, source, {
 					'./island-state': { answer$ },
 				});
@@ -8234,6 +9881,61 @@ export function Answer() @{
 					hydratedRoot = undefined;
 					scope.dispose();
 				}
+			}
+		});
+
+		// hydrateRoot adopts a binding view's text holes in place, whether the
+		// server filled them or left them empty, and later writes keep the DOM
+		// identical to what the server renders for the same values.
+		it(`hydrates a binding view's filled and empty text holes with the ordinary renderer (${dev ? 'dev' : 'prod'})`, async () => {
+			const source = `import { label$, note$ } from './island-state';
+export function Label() @{
+  'use dom bindings';
+  <p>{label$.get() as string}<b>{note$.get() as string}</b></p>
+}`;
+			const scope = createScope({ scopeKey: `island-hydrate-text-${dev}` });
+			const label$ = scope.signal$('label', 'server label');
+			const note$ = scope.signal$('note', '');
+			const fixture = authoredPresentation('Label', {}, dev, source, {
+				'./island-state': { label$, note$ },
+			});
+			// The server may append a seed script that hydration consumes, so compare
+			// the view's own markup.
+			const serverMarkup = (html: string) => {
+				const template = document.createElement('template');
+				template.innerHTML = html;
+				return template.content.querySelector('p')!.outerHTML;
+			};
+			const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+			try {
+				container.innerHTML = fixture.html;
+				const paragraph = container.querySelector('p')!;
+				const label = [...paragraph.childNodes].find(
+					(node) => node.nodeType === 3 && node.nodeValue === 'server label',
+				)!;
+				expect(label).toBeDefined();
+				hydratedRoot = hydrateRoot(container, fixture.loadClient().Label, {});
+				await act(async () => {
+					for (let index = 0; index < 4; index++) await Promise.resolve();
+				});
+				expect(paragraph.outerHTML).toBe(serverMarkup(fixture.html));
+				act(() => {
+					label$.set('client label');
+					note$.set('client note');
+				});
+				expect(container.querySelector('p')).toBe(paragraph);
+				expect(label.isConnected).toBe(true);
+				expect(label.nodeValue).toBe('client label');
+				expect(container.querySelector('b')!.textContent).toBe('client note');
+				expect(paragraph.outerHTML).toBe(
+					serverMarkup(renderToString(fixture.server.Label, {}).html),
+				);
+				expect(error).not.toHaveBeenCalled();
+			} finally {
+				error.mockRestore();
+				hydratedRoot?.unmount();
+				hydratedRoot = undefined;
+				scope.dispose();
 			}
 		});
 
@@ -8292,13 +9994,104 @@ export function Streamed() @{
 				expect(container.querySelector('[data-pending]')).toBe(fallback);
 				expect(container.querySelector('[data-answer]')).toBeNull();
 				clientAnswer.resolve('live');
-				for (let index = 0; index < 4; index++) await Promise.resolve();
+				await act(async () => {});
 				expect(container.querySelectorAll('[data-answer]')).toHaveLength(1);
 				expect(container.querySelector('[data-answer]')!.textContent).toBe('live');
 				expect(container.querySelector('[data-pending]')).toBeNull();
 				handle.dispose();
 			} finally {
 				resetStreamRuntimeGlobals();
+				scope.dispose();
+			}
+		});
+
+		// Like the renderer's resolved boundary, a server-resolved @try arm stays
+		// while the client's own read is pending, then hydrates in place.
+		it(`keeps a server-resolved @try arm while the client read is pending (${dev ? 'dev' : 'prod'})`, async () => {
+			const source = `import { useLayoutEffect } from 'octane';
+import { answer$, log } from './island-state';
+function Mark() @{
+  useLayoutEffect(() => log('mark mounted'), []);
+  <i>mark</i>
+}
+export function Answer() @{
+  'use dom bindings';
+  <section>
+    @try {
+      <>
+        <p data-answer>{answer$.get() as string}</p>
+        <button type="button" onClick={() => log('clicked')}>go</button>
+        <Mark />
+      </>
+    } @pending {
+      <p data-pending>waiting</p>
+    }
+  </section>
+}`;
+			const scope = createScope({ scopeKey: `island-kept-try-${dev}` });
+			const events: string[] = [];
+			const log = (event: string) => events.push(event);
+			const serverAnswer = deferred<string>();
+			const loadServer = query(
+				`island-kept-server-${dev}`,
+				(_argument: undefined) => serverAnswer.promise,
+			);
+			const requests = new Map<number, ReturnType<typeof deferred<string>>>();
+			const request = (generation: number) => {
+				let pending = requests.get(generation);
+				if (!pending) requests.set(generation, (pending = deferred<string>()));
+				return pending;
+			};
+			const loadClient = query(
+				`island-kept-client-${dev}`,
+				(generation: number) => request(generation).promise,
+			);
+			const generation$ = scope.signal$('generation', 0);
+			const server = authoredPresentation('Answer', {}, dev, source, {
+				'./island-state': {
+					answer$: createResource(scope, 'server', () => loadServer(undefined)),
+					log,
+				},
+			});
+			const client = authoredPresentation('Answer', {}, dev, source, {
+				'./island-state': {
+					answer$: createResource(scope, 'client', () => loadClient(generation$.get())),
+					log,
+				},
+			});
+			// Ready query publication may cross a host-task boundary.
+			const settle = () => act(async () => {});
+			try {
+				serverAnswer.resolve('server');
+				await settle();
+				container.innerHTML = renderToString(server.server.Answer, {}).html;
+				const answer = container.querySelector('[data-answer]')!;
+				const button = container.querySelector('button')!;
+				expect(answer.textContent).toBe('server');
+				const handle = client.attach(container.querySelector('section')!, client.state);
+				expect(container.querySelector('[data-answer]')).toBe(answer);
+				expect(container.querySelector('[data-pending]')).toBeNull();
+				// Nothing in the kept arm is live before a client commit prepares it.
+				expect(events).toEqual([]);
+
+				request(0).resolve('client');
+				await settle();
+				expect(container.querySelector('[data-answer]')).toBe(answer);
+				expect(container.querySelector('button')).toBe(button);
+				expect(answer.textContent).toBe('client');
+				expect(events).toEqual(['mark mounted']);
+				button.click();
+				expect(events).toEqual(['mark mounted', 'clicked']);
+
+				// Once committed, the arm is the client's: a new read shows @pending.
+				generation$.set(1);
+				expect(container.querySelector('[data-pending]')).not.toBeNull();
+				expect(container.querySelector('[data-answer]')).toBeNull();
+				request(1).resolve('next');
+				await settle();
+				expect(container.querySelector('[data-answer]')!.textContent).toBe('next');
+				handle.dispose();
+			} finally {
 				scope.dispose();
 			}
 		});
@@ -8404,18 +10197,22 @@ export function Streamed() @{
 			failing.publish({ onInput: null }, false);
 			failing.attach(failedRange, failing.state).dispose({ preserveDOM: false });
 			const inlineOrder: string[] = [];
-			const inlineA = vi.fn((_element: Element | null) => {
+			const inlineASpy = vi.fn((_element: Element | null) => {
 				inlineOrder.push('attach A');
 				return () => {
 					inlineOrder.push('detach A');
 				};
 			});
-			const inlineB = vi.fn((_element: Element | null) => {
+			// An arrow callback cannot see `props` as its receiver, so the inline ref
+			// keeps it across unrelated publishes.
+			const inlineA = (element: Element | null) => inlineASpy(element);
+			const inlineBSpy = vi.fn((_element: Element | null) => {
 				inlineOrder.push('attach B');
 				return () => {
 					inlineOrder.push('detach B');
 				};
 			});
+			const inlineB = (element: Element | null) => inlineBSpy(element);
 			const inline = authoredPresentation(
 				'InlineRefPresentation',
 				{ title: 'First', onAttach: inlineA },
@@ -8428,17 +10225,46 @@ export function Streamed() @{
 			const inlineHandle = inline.attach(inlineInput, inline.state);
 			try {
 				inline.publish({ title: 'Unrelated change' });
-				expect(inlineA).toHaveBeenCalledOnce();
+				expect(inlineASpy).toHaveBeenCalledOnce();
 				expect(inlineOrder).toEqual(['attach A']);
 				inline.publish({ onAttach: inlineB });
 				expect(inlineOrder).toEqual(['attach A', 'detach A', 'attach B']);
 				inline.publish({ title: 'Another unrelated change' });
-				expect(inlineB).toHaveBeenCalledOnce();
+				expect(inlineBSpy).toHaveBeenCalledOnce();
 				expect(inlineHost.querySelector('input')).toBe(inlineInput);
 			} finally {
 				inlineHandle.dispose();
 			}
 			expect(inlineOrder).toEqual(['attach A', 'detach A', 'attach B', 'detach B']);
+		});
+
+		it(`keeps a guarded inline ref on a stable own function (${dev ? 'dev' : 'prod'})`, () => {
+			// The guarded `props.handler` read passes no receiver, so an ordinary
+			// stable function keeps the ref attached across unrelated publishes.
+			const attached: unknown[] = [];
+			const onAttach = (element: Element | null, handler: () => void) => {
+				if (element) attached.push(handler);
+			};
+			function handler() {}
+			function replacement() {}
+			const guarded = authoredPresentation(
+				'GuardedInlineRefPresentation',
+				{ enabled: true, handler, onAttach, title: 'First' },
+				dev,
+			);
+			const host = document.createElement('section');
+			container.append(host);
+			host.innerHTML = guarded.html;
+			const handle = guarded.attach(host.querySelector('input')!, guarded.state);
+			try {
+				expect(attached).toEqual([handler]);
+				guarded.publish({ title: 'Unrelated change' });
+				expect(attached).toEqual([handler]);
+				guarded.publish({ handler: replacement });
+				expect(attached).toEqual([handler, replacement]);
+			} finally {
+				handle.dispose();
+			}
 		});
 
 		it(`subscribes imported signal reads in every accessor form (${dev ? 'dev' : 'prod'})`, () => {

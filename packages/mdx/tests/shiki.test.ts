@@ -11,7 +11,8 @@ import rehypeShiki from '@shikijs/rehype';
 import * as Octane from 'octane';
 import * as ServerRT from 'octane/server';
 import * as Provider from '@octanejs/mdx';
-import * as ServerProvider from '@octanejs/mdx/server';
+// @ts-expect-error The shared fixture loader compiles the provider graph for SSR.
+import * as ServerProvider from './_fixtures/provider-server.ts?octane-ssr';
 import { compileMdx, type CompileMdxOptions } from '@octanejs/mdx/compile';
 import { evalModuleCode, stripMarkers } from './_helpers';
 
@@ -20,9 +21,10 @@ const OPTIONS: Pick<CompileMdxOptions, 'rehypePlugins'> = {
 	rehypePlugins: [[rehypeShiki, { theme: 'github-light' }]],
 };
 
-async function modules() {
-	const client = await compileMdx(SOURCE, '/docs/shiki.mdx', { mode: 'client', ...OPTIONS });
-	const server = await compileMdx(SOURCE, '/docs/shiki.mdx', { mode: 'server', ...OPTIONS });
+async function modules(overridableTags?: readonly string[]) {
+	const options = { ...OPTIONS, strong: true, overridableTags };
+	const client = await compileMdx(SOURCE, '/docs/shiki.mdx', { mode: 'client', ...options });
+	const server = await compileMdx(SOURCE, '/docs/shiki.mdx', { mode: 'server', ...options });
 	return {
 		client: evalModuleCode(client.code, { octane: Octane, '@octanejs/mdx': Provider }),
 		server: evalModuleCode(server.code, {
@@ -84,21 +86,43 @@ describe('shiki (optional, via rehypePlugins)', () => {
 		container.remove();
 	});
 
-	it('hydrates the server-rendered highlighted document', async () => {
-		const { client, server } = await modules();
-		const { html } = ServerRT.renderToString(server.default, {});
-		const container = document.createElement('div');
-		document.body.appendChild(container);
-		container.innerHTML = html;
-		const beforeHydrate = container.innerHTML; // DOM-normalized server payload
-		const pre = container.querySelector('pre.shiki');
+	it.each([undefined, ['pre']])(
+		'adopts highlighted tokens with overridable tags %j',
+		async (overridableTags) => {
+			const { client, server } = await modules(overridableTags);
+			const { html } = ServerRT.renderToString(server.default, {});
+			const container = document.createElement('div');
+			document.body.appendChild(container);
+			container.innerHTML = html;
+			const beforeHydrate = container.innerHTML; // DOM-normalized server payload
+			const pre = container.querySelector('pre.shiki');
+			const code = container.querySelector('code');
+			const tokens = [...container.querySelectorAll('code span span')];
+			const text = tokens.map((token) => token.firstChild);
+			expect(tokens.length).toBeGreaterThan(1);
+			const recoverable: unknown[] = [];
 
-		const root = Octane.hydrateRoot(container, client.default, {});
-		Octane.flushSync(() => {});
-		// Hydration changed nothing, and the highlighted tree was adopted.
-		expect(container.innerHTML).toBe(beforeHydrate);
-		expect(container.querySelector('pre.shiki')).toBe(pre);
-		root.unmount();
-		container.remove();
-	});
+			const root = Octane.hydrateRoot(
+				container,
+				client.default,
+				{},
+				{
+					onRecoverableError: (error) => recoverable.push(error),
+				},
+			);
+			Octane.flushSync(() => {});
+			expect(stripMarkers(container.innerHTML)).toBe(stripMarkers(beforeHydrate));
+			expect(container.querySelector('pre.shiki')).toBe(pre);
+			expect(container.querySelector('code')).toBe(code);
+			const adoptedTokens = [...container.querySelectorAll('code span span')];
+			expect(adoptedTokens).toHaveLength(tokens.length);
+			adoptedTokens.forEach((token, index) => {
+				expect(token).toBe(tokens[index]);
+				expect(token.firstChild).toBe(text[index]);
+			});
+			expect(recoverable).toEqual([]);
+			root.unmount();
+			container.remove();
+		},
+	);
 });

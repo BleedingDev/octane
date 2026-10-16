@@ -56,6 +56,46 @@ function emittedHeadKey(code: string | undefined): string | undefined {
 }
 
 describe('bundler-neutral compiler integration', () => {
+	it('retains TypeScript and maps across renderer-selected components and custom hooks', () => {
+		const directory = mkdtempSync(join(tmpdir(), 'octane-ts-handoff-'));
+		try {
+			writeFileSync(
+				join(directory, 'package.json'),
+				JSON.stringify({ dependencies: { octane: '*' } }),
+			);
+			for (const target of ['dom', 'valdi']) {
+				const compiler = createOctaneCompiler({
+					root: directory,
+					output: 'ts',
+					hmr: false,
+					renderers:
+						target === 'valdi'
+							? {
+									registry: { native: { module: '@fixture/adapter', target: 'valdi' } },
+									default: 'native',
+								}
+							: undefined,
+				});
+				const component = compiler.transform(
+					'export interface Props { label: string }\nexport function App(props: Props) @{ <label value={props.label} /> }',
+					join(directory, 'App.tsrx'),
+				);
+				expect(component?.lang).toBe('ts');
+				expect(component?.code).toContain('interface Props');
+				const source =
+					"import { useState } from 'octane';\nexport function useCount(initial: number) { return useState<number>(initial); }";
+				const helper = compiler.transform(source, join(directory, 'useCount.ts'));
+				expect(helper?.lang).toBe('ts');
+				expect(helper?.map.sourcesContent).toEqual([source]);
+				expect(helper?.code).toContain('initial: number');
+				expect(helper?.code).toContain(target === 'valdi' ? '@fixture/adapter' : 'octane');
+				if (target === 'valdi') expect(helper?.code).not.toMatch(/from ['"]octane['"]/);
+			}
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it.each(['online', 'once', 'only', 'onclick', 'onkeydown', 'ONCLICK'])(
 		'diagnoses %s as an unsupported binding attribute, not an event handler',
 		(name) => {
@@ -80,6 +120,52 @@ ${extension === 'tsrx' ? '}' : '); }'}`;
 			}
 		},
 	);
+
+	// List numbering and row spans are presentation channels. Form values, form
+	// identity and a spelling the numeric rule would not match stay outside.
+	it.each([
+		['<ol start={props.value}><li value={props.value}>A</li></ol>', null],
+		['<table><tbody><tr><td rowspan={props.value}>A</td></tr></tbody></table>', null],
+		['<svg><text start={props.value}>A</text></svg>', null],
+		[
+			'<select><option value={props.value}>A</option></select>',
+			'native state and identity attribute "value" must be static or explicitly unbound',
+		],
+		[
+			'<data value={props.value}>A</data>',
+			'native state and identity attribute "value" must be static or explicitly unbound',
+		],
+		[
+			'<input form={props.value} />',
+			'native state and identity attribute "form" must be static or explicitly unbound',
+		],
+		[
+			'<svg><text rowSpan={props.value}>A</text></svg>',
+			'attribute "rowSpan" is not supported in binding views',
+		],
+	])('classifies bound %s as a presentation channel or rejects it', (markup, message) => {
+		for (const dev of [false, true]) {
+			for (const mode of ['client', 'server'] as const) {
+				for (const extension of ['tsx', 'tsrx']) {
+					const source = `export function View(props) ${extension === 'tsrx' ? "@{ 'use dom bindings';" : "{ 'use dom bindings'; return ("}
+ ${markup}
+${extension === 'tsrx' ? '}' : '); }'}`;
+					const id = `/src/AttributeView.${extension}`;
+					const moduleIds =
+						mode === 'server'
+							? [id]
+							: [id, `${id}?octane-bindings=View`, `${id}?octane-bindings=View&octane-mount=1`];
+					for (const moduleId of moduleIds) {
+						// Strong reaches only the `.tsrx` view; a Strong `.tsx` module is an error.
+						const strong = extension === 'tsrx';
+						const result = () => compile(source, moduleId, { mode, dev, hmr: false, strong });
+						if (message === null) expect(result).not.toThrow();
+						else expect(result).toThrow(message);
+					}
+				}
+			}
+		}
+	});
 
 	it.each([
 		'(external as typeof external)(stylex.attrs(styles))',
@@ -927,6 +1013,42 @@ export function Pair(props) @{ 'use dom bindings'; <section>
 		}
 	});
 
+	it('reports the package that owns a module and whether transform compiles it', () => {
+		const root = mkdtempSync(join(tmpdir(), 'octane-module-package-'));
+		try {
+			const manifest = (directory: string, body: object) => {
+				mkdirSync(directory, { recursive: true });
+				writeFileSync(join(directory, 'package.json'), JSON.stringify(body));
+			};
+			manifest(root, { name: 'application', dependencies: { octane: '*' } });
+			const kit = join(root, 'node_modules', '@example', 'kit');
+			manifest(kit, { name: '@example/kit', peerDependencies: { octane: '*' } });
+			const plain = join(root, 'node_modules', 'plain');
+			manifest(plain, { name: 'plain' });
+			const compiler = createOctaneCompiler({ root });
+			const card = 'export function Card() { return <div />; }\n';
+			const constant = 'export const size = 1;\n';
+			const cases = [
+				[COMPONENT, join(root, 'src/App.tsrx'), 'application', root, true],
+				[card, join(kit, 'src/Card.tsx'), '@example/kit', kit, true],
+				[HOOK, join(kit, 'src/use-count.ts'), '@example/kit', kit, true],
+				[constant, join(kit, 'src/size.ts'), '@example/kit', kit, false],
+				[card, join(plain, 'Card.tsx'), 'plain', plain, false],
+			] as const;
+
+			for (const [source, filename, name, packageRoot, compiled] of cases) {
+				expect(compiler.modulePackage(source, filename)).toEqual({
+					name,
+					root: packageRoot,
+					compiled,
+				});
+				expect((compiler.transform(source, filename)?.kind ?? 'none') !== 'none').toBe(compiled);
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it('keeps Strong directives subordinate to mixed-toolchain ownership', () => {
 		const compiler = createOctaneCompiler({
 			root: '/project',
@@ -938,7 +1060,7 @@ export function Pair(props) @{ 'use dom bindings'; <section>
 
 		expect(() => compiler.transform(unowned, '/project/src/Host.tsx')).not.toThrow();
 		expect(() => compiler.transform(owned, '/project/src/Island.tsx')).toThrow(
-			/OCTANE_STRONG_RENDER_STATE_UPDATE|useLinkedState/,
+			'OCTANE_STRONG_TSX_MODULE',
 		);
 	});
 
@@ -993,12 +1115,28 @@ export function Pair(props) @{ 'use dom bindings'; <section>
 			'/src/App.tsrx',
 		);
 		expect(canonicalModuleId(resolve('/external/App.tsrx') + '?raw', root)).toBe(
-			resolve('/external/App.tsrx'),
+			'../external/App.tsrx',
 		);
-		expect(canonicalModuleId(String.raw`C:\external\App.tsrx`, String.raw`C:\project`)).toBe(
-			'C:/external/App.tsrx',
+		expect(canonicalModuleId(String.raw`D:\external\App.tsrx`, String.raw`C:\project`)).toBe(
+			'D:/external/App.tsrx',
 		);
 		expect(canonicalModuleId('#nitro/virtual/polyfills', root)).toBe('#nitro/virtual/polyfills');
+	});
+
+	// A checkout-path-dependent ID changed every component site hash in files
+	// outside the Vite root, so identical source built to different bytes.
+	it('compiles files outside the root identically from any checkout location', () => {
+		const source =
+			"function Inner() @{ <span>{'inner'}</span> }\nexport function Card() @{ <div><Inner /></div> }";
+		const build = (checkout: string) =>
+			createOctaneCompiler({ root: `${checkout}/apps/web` }).transform(
+				source,
+				`${checkout}/packages/ui/src/Card.tsrx`,
+				{ environment: 'client' },
+			)?.code;
+
+		expect(build('/checkout-a')).toContain('c:');
+		expect(build('/checkout-a')).toBe(build('/tmp/elsewhere/checkout-b'));
 	});
 
 	it('uses the shared canonical module id for client/server head ownership', () => {
@@ -1485,6 +1623,59 @@ export default interface ErasedShape { value: string }
 		).toThrow(/Client-only export "default".*server: "omit-child"/s);
 	});
 
+	it('rejects a client-only binding in a .tsrx enum initializer', () => {
+		const compiler = createOctaneCompiler({ root: '/project' });
+		expect(() =>
+			compiler.transform(
+				"import Scene from './Scene.object.tsrx';\nenum Value { SceneValue = Scene }\nexport function App() @{\n\t<p>{String(Value.SceneValue) as string}</p>\n}\n",
+				'/project/src/leak.tsrx',
+				{
+					environment: 'server',
+					clientOnlyImports: [
+						{
+							request: './Scene.object.tsrx',
+							resolvedId: '/project/src/Scene.object.tsrx',
+							reference: {
+								id: 'octane-client-reference-v1:object:/src/Scene.object.tsrx',
+								moduleId: '/src/Scene.object.tsrx',
+								renderer: 'object',
+							},
+						},
+					],
+				},
+			),
+		).toThrow(/Client-only export "default".*server: "omit-child"/s);
+	});
+
+	it('lets an enum member shadow a client-only import in later initializers', () => {
+		const compiler = createOctaneCompiler({ root: '/project' });
+		const enumSource = 'export enum Value { Scene = 1, Next = Scene + 1 }\n';
+		for (const [filename, body] of [
+			['/project/src/member.ts', enumSource],
+			[
+				'/project/src/member.tsrx',
+				`${enumSource}export function App() @{\n\t<p>{String(Value.Next) as string}</p>\n}\n`,
+			],
+		]) {
+			expect(() =>
+				compiler.transform(`import Scene from './Scene.object.tsrx';\n${body}`, filename, {
+					environment: 'server',
+					clientOnlyImports: [
+						{
+							request: './Scene.object.tsrx',
+							resolvedId: '/project/src/Scene.object.tsrx',
+							reference: {
+								id: 'octane-client-reference-v1:object:/src/Scene.object.tsrx',
+								moduleId: '/src/Scene.object.tsrx',
+								renderer: 'object',
+							},
+						},
+					],
+				}),
+			).not.toThrow();
+		}
+	});
+
 	it('allows a named class expression to shadow a client-only import in its own body', () => {
 		const compiler = createOctaneCompiler({ root: '/project' });
 		expect(() =>
@@ -1585,7 +1776,9 @@ export default interface ErasedShape { value: string }
 			// The neutral compiler cannot know what a bundler alias or virtual load
 			// makes this request mean, so an on-disk lookalike is never proof.
 			const unproven = compiler.transform(defaultEntry, entry);
-			expect(unproven).toMatchObject({ kind: 'none', code: defaultEntry });
+			expect(unproven?.kind).toBe('slots');
+			expect(unproven?.code).toContain('__createRootDefaultOptions as');
+			expect(unproven?.code).not.toContain('__createVoidRoot');
 			expect(unproven?.dependencies).not.toContain(component);
 
 			const compiledDefault = compiler.transform(defaultComponent, component, {
@@ -1713,8 +1906,8 @@ export default interface ErasedShape { value: string }
 			expect(named?.kind).toBe('slots');
 			expect(named?.code).toContain('__createVoidRoot');
 
-			// Specialize the proven disposable expression without changing a
-			// neighboring unknown render or a root retained for later renders.
+			// The unproven import keeps generic returned-value reconciliation while
+			// omitting options; the escaped root keeps generic returned-value handling.
 			const unknown = join(src, 'Unknown.js');
 			writeFileSync(unknown, 'export function Unknown() { return null; }\n');
 			const mixedEntry =
@@ -1730,9 +1923,13 @@ export default interface ErasedShape { value: string }
 					request === './Main.tsrx' && imported === 'Main',
 			});
 			expect(mixed?.kind).toBe('slots');
-			expect(mixed?.code.match(/_\$createVoidRoot\(/g)).toHaveLength(1);
-			expect(mixed?.code).toContain('createRoot(document.documentElement).render(Unknown)');
-			expect(mixed?.code).toContain('export const retained = createRoot(document.body)');
+			expect(mixed?.code.match(/_\$createVoidRootDefaultOptions\(/g)).toHaveLength(1);
+			expect(mixed?.code).toContain(
+				'_$createRootDefaultOptions(document.documentElement).render(Unknown)',
+			);
+			expect(mixed?.code).toContain(
+				'export const retained = _$createRootDefaultOptions(document.body)',
+			);
 
 			// A module-private root whose every use is proven has a closed lifetime.
 			const privateRoot = compiler.transform(
@@ -1743,8 +1940,10 @@ export default interface ErasedShape { value: string }
 						request === './Main.tsrx' && imported === 'Main',
 				},
 			);
-			expect(privateRoot?.code.match(/_\$createVoidRoot\(/g)).toHaveLength(2);
-			expect(privateRoot?.code).toContain('createRoot(document.documentElement).render(Unknown)');
+			expect(privateRoot?.code.match(/_\$createVoidRootDefaultOptions\(/g)).toHaveLength(2);
+			expect(privateRoot?.code).toContain(
+				'_$createRootDefaultOptions(document.documentElement).render(Unknown)',
+			);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -1847,43 +2046,6 @@ export function App() @{ <Boundary fallback={async (error) => String(error)}><sp
 		);
 		expect(ordinaryTry?.code).toContain('_$tryBlock(');
 		expect(ordinaryTry?.code).not.toContain('_$errorBlock(');
-	});
-
-	it('preserves proven single-host roots through exact production memo wrappers only', () => {
-		const compiler = createOctaneCompiler({ root: '/project', hmr: false, dev: false });
-		const source = `
-import { memo as remember } from 'octane';
-import { External } from './external';
-function Host(props) @{ <li>{props.label as string}</li> }
-function Optional(props) @{ if (!props.visible) return null; <li>{props.label as string}</li> }
-const indirect = remember;
-export const Stable = remember(Host);
-export const Nullable = remember(Optional);
-export const Compared = remember(Host, () => true);
-export const Imported = remember(External);
-export const Indirect = indirect(Host);
-`;
-		const id = '/project/src/MemoRoots.tsrx';
-		const production = compiler.transform(source, id, { hmr: false, dev: false });
-		expect(production?.code).toMatch(
-			/Stable\s*=\s*(?:\/\*[^*]*\*\/\s*)?_\$__s\((?:\/\*[^*]*\*\/\s*)?remember\(Host\)\)/,
-		);
-		expect(production?.code).toMatch(/Nullable\s*=\s*(?:\/\*[^*]*\*\/\s*)?remember\(Optional\)/);
-		expect(production?.code).toMatch(
-			/Compared\s*=\s*(?:\/\*[^*]*\*\/\s*)?remember\(Host,\s*\(\)\s*=>\s*true\)/,
-		);
-		expect(production?.code).toMatch(/Imported\s*=\s*(?:\/\*[^*]*\*\/\s*)?remember\(External\)/);
-		expect(production?.code).toMatch(/Indirect\s*=\s*indirect\(Host\)/);
-
-		for (const options of [
-			{ hmr: false, dev: true },
-			{ hmr: 'vite' as const, dev: true },
-			{ hmr: false, dev: false, profile: true },
-			{ environment: 'server' as const, hmr: false, dev: false },
-		]) {
-			const output = compiler.transform(source, id, options);
-			expect(output?.code).not.toMatch(/_\$__s\((?:\/\*[^*]*\*\/\s*)?remember\(Host\)\)/);
-		}
 	});
 
 	it('applies profiling metadata only to client transforms', () => {
@@ -2129,6 +2291,50 @@ export const Indirect = indirect(Host);
 		}
 	});
 
+	it('does not attribute a node_modules build cache to the package that installed it', () => {
+		const root = mkdtempSync(join(tmpdir(), 'octane-bundler-cache-'));
+		try {
+			const appManifest = join(root, 'package.json');
+			writeFileSync(
+				appManifest,
+				JSON.stringify({ name: 'app', private: true, dependencies: { octane: '*' } }),
+			);
+			const packageRoot = join(root, 'node_modules/raw-octane');
+			mkdirSync(join(packageRoot, 'src'), { recursive: true });
+			writeFileSync(
+				join(packageRoot, 'package.json'),
+				JSON.stringify({ name: 'raw-octane', peerDependencies: { octane: '*' } }),
+			);
+			// Nitro feeds the SSR build's chunks back through the bundler from here.
+			const chunks = join(root, 'node_modules/.nitro/vite/services/ssr/assets');
+			const cache = join(root, 'node_modules/.cache');
+			mkdirSync(chunks, { recursive: true });
+			mkdirSync(cache, { recursive: true });
+			const compiler = createOctaneCompiler({ root });
+
+			// Semantic control: the same module is slotted inside a package whose
+			// manifest declares Octane, and as application source.
+			expect(compiler.transform(HOOK, join(packageRoot, 'src/useCount.js'))?.kind).toBe('slots');
+			expect(compiler.transform(HOOK, join(root, 'src/useCount.js'))?.kind).toBe('slots');
+
+			for (const environment of ['client', 'server'] as const) {
+				const chunk = compiler.transform(HOOK, join(chunks, 'useCount-Dx1.js'), { environment });
+				expect(chunk?.kind ?? 'none', environment).toBe('none');
+				expect(chunk?.dependencies ?? [], environment).not.toContain(appManifest);
+			}
+			const loose = compiler.transform(HOOK, join(root, 'node_modules/useCount.js'));
+			expect(loose?.kind ?? 'none').toBe('none');
+			const cachedView = compiler.transform(
+				`export function App() { return <p>{'cached'}</p>; }`,
+				join(cache, 'App.tsx'),
+			);
+			expect(cachedView?.kind ?? 'none').toBe('none');
+			expect(cachedView?.dependencies ?? []).not.toContain(appManifest);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it('uses portable source names in profile metadata', () => {
 		const fixtureRoot = mkdtempSync(join(tmpdir(), 'octane-profile-source-'));
 		try {
@@ -2361,21 +2567,14 @@ describe('requireDirective ownership gate', () => {
 		(environment) => {
 			const compiler = createOctaneCompiler({ root: resolve('/project'), requireDirective: true });
 			const pragma = '/** @jsxImportSource octane/strong */\n';
-			const trusted =
-				pragma +
-				"'use strong';\nimport { trustHTML } from 'octane';\n" +
-				'export function App() { return <div dangerouslySetInnerHTML={trustHTML("<b>safe</b>")} />; }';
-			expect(compiler.transform(trusted, '/project/src/Strong.tsx', { environment })?.kind).toBe(
-				'compile',
-			);
+			// The pragma claims the `.tsx` module, which Strong then rejects.
 			expect(() =>
 				compiler.transform(
-					pragma +
-						"'use strong';\nexport function Raw() { return <div dangerouslySetInnerHTML={{__html: 'raw'}} />; }",
-					'/project/src/Raw.tsx',
+					pragma + "'use strong';\nexport function App() { return <div />; }",
+					'/project/src/Strong.tsx',
 					{ environment },
 				),
-			).toThrow(/OCTANE_STRONG_UNTRUSTED_HTML/);
+			).toThrow(/OCTANE_STRONG_TSX_MODULE/);
 			expect(
 				compiler.transform(
 					'// @jsxImportSource octane/strong\n' + HOOK,

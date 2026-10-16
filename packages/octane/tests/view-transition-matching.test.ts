@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { act } from './_helpers';
+import { act, nextTask } from './_helpers';
 import {
 	addTransitionType,
 	createRoot,
@@ -19,6 +19,7 @@ import {
 	MultiHostLayoutApp,
 	NestedShareApp,
 } from './_fixtures/view-transition-matching.tsrx';
+import { loadCompiledFixtureSource } from './_server-fixture.js';
 
 function holdFonts() {
 	let resolve!: () => void;
@@ -45,8 +46,6 @@ function holdFonts() {
 		},
 	};
 }
-
-const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe('ViewTransition activation and matching', () => {
 	let mocks: ViewTransitionMocks;
@@ -223,6 +222,10 @@ describe('ViewTransition activation and matching', () => {
 	});
 
 	it('finishes mutation cleanup before fonts load and attaches refs before deferred layout effects', async () => {
+		let enteredNative!: () => void;
+		const nativeStarted = new Promise<void>((resolve) => {
+			enteredNative = resolve;
+		});
 		const events: string[] = [];
 		let resolveFont!: () => void;
 		const fonts = {
@@ -237,6 +240,7 @@ describe('ViewTransition activation and matching', () => {
 			input: (() => unknown) | { update: () => unknown },
 		) => {
 			const ready = Promise.resolve((typeof input === 'function' ? input : input.update)());
+			enteredNative();
 			return { ready, updateCallbackDone: ready, finished: ready, skipTransition() {} };
 		};
 		const requestFont = () => {
@@ -251,7 +255,7 @@ describe('ViewTransition activation and matching', () => {
 				startTransition(() =>
 					root.render(LayoutReadinessApp, { text: 'after', events, requestFont }),
 				);
-				await new Promise<void>((resolve) => setTimeout(resolve, 0));
+				await nativeStarted;
 				pendingEvents = events.slice();
 				pendingText = container.textContent!;
 				fonts.status = 'loaded';
@@ -274,6 +278,10 @@ describe('ViewTransition activation and matching', () => {
 	});
 
 	it('completes deferred layout once before an urgent update interrupts the font wait', async () => {
+		let enteredNative!: () => void;
+		const nativeStarted = new Promise<void>((resolve) => {
+			enteredNative = resolve;
+		});
 		const events: string[] = [];
 		let resolveFont!: () => void;
 		const fonts = {
@@ -288,6 +296,7 @@ describe('ViewTransition activation and matching', () => {
 			input: (() => unknown) | { update: () => unknown },
 		) => {
 			const ready = Promise.resolve((typeof input === 'function' ? input : input.update)());
+			enteredNative();
 			return { ready, updateCallbackDone: ready, finished: ready, skipTransition() {} };
 		};
 		const requestFont = () => {
@@ -301,7 +310,7 @@ describe('ViewTransition activation and matching', () => {
 				startTransition(() =>
 					root.render(LayoutReadinessApp, { text: 'after', events, requestFont }),
 				);
-				await new Promise<void>((resolve) => setTimeout(resolve, 0));
+				await nativeStarted;
 				flushSync(() => root.render(LayoutReadinessApp, { text: 'urgent', events, requestFont }));
 				afterUrgent = events.slice();
 				fonts.status = 'loaded';
@@ -329,6 +338,10 @@ describe('ViewTransition activation and matching', () => {
 	});
 
 	it('keeps a later foreign-root transition queued through the first animation', async () => {
+		let enteredNative!: () => void;
+		const nativeStarted = new Promise<void>((resolve) => {
+			enteredNative = resolve;
+		});
 		const fonts = holdFonts();
 		const otherContainer = document.createElement('div');
 		document.body.append(otherContainer);
@@ -337,10 +350,15 @@ describe('ViewTransition activation and matching', () => {
 		const firstFinished = new Promise<void>((resolve) => {
 			finish = resolve;
 		});
+		let firstReady!: Promise<unknown>;
 		let calls = 0;
 		(document as any).startViewTransition = (input: { update: () => unknown }) => {
 			const first = ++calls === 1;
 			const ready = Promise.resolve(input.update());
+			if (first) {
+				firstReady = ready;
+				enteredNative();
+			}
 			return { ready, finished: first ? firstFinished : ready, skipTransition() {} };
 		};
 		try {
@@ -357,10 +375,12 @@ describe('ViewTransition activation and matching', () => {
 						requestFont: fonts.request,
 					}),
 				);
-				await nextTask();
+				await nativeStarted;
+				expect(calls).toBe(1);
 				startTransition(() => otherRoot.render(MatchingApp, { text: 'later', transition: {} }));
 				await nextTask();
 				fonts.release();
+				await firstReady;
 				await nextTask();
 				duringFirst = otherContainer.textContent!;
 				finish();
@@ -376,14 +396,101 @@ describe('ViewTransition activation and matching', () => {
 		}
 	});
 
-	it('holds passive effects from layout cascades until the native animation finishes', async () => {
+	it('runs a deferred layout cascade urgently when a commit inside a transition interrupts it', async () => {
+		let enteredNative!: () => void;
+		const nativeStarted = new Promise<void>((resolve) => {
+			enteredNative = resolve;
+		});
+		const fonts = holdFonts();
+		const { Counter } = loadCompiledFixtureSource(
+			`import { useLayoutEffect, useState } from 'octane';
+export function Counter(props) @{
+	const [value, setValue] = useState(0);
+	props.expose(setValue);
+	useLayoutEffect(() => {
+		props.onLayout(value);
+	}, [value]);
+	<i>{String(value) as string}</i>
+}`,
+			{
+				id: '/packages/octane/tests/_fixtures/view-transition-interrupting-counter.tsrx',
+				mode: 'client',
+				compileOptions: { hmr: false },
+			},
+		);
+		const otherContainer = document.createElement('div');
+		document.body.append(otherContainer);
+		const otherRoot = createRoot(otherContainer);
 		const events: string[] = [];
+		let setCount!: (value: number) => void;
+		(document as any).startViewTransition = (input: { update: () => unknown }) => {
+			const ready = Promise.resolve(input.update());
+			enteredNative();
+			return { ready, updateCallbackDone: ready, finished: ready, skipTransition() {} };
+		};
+		try {
+			await act(() => {
+				root.render(DeferredOwnershipApp, {
+					generation: 0,
+					cascade: true,
+					events,
+					requestFont: fonts.request,
+				});
+				otherRoot.render(Counter, {
+					expose: (setter: typeof setCount) => (setCount = setter),
+					onLayout: () => {},
+				});
+			});
+			events.length = 0;
+			let interrupted: string[] = [];
+			let interruptedText = '';
+			await act(async () => {
+				startTransition(() =>
+					root.render(DeferredOwnershipApp, {
+						generation: 1,
+						cascade: true,
+						events,
+						requestFont: fonts.request,
+					}),
+				);
+				await nativeStarted;
+				expect(events).not.toContain('layout:1:0');
+				setCount(1);
+				startTransition(() => {
+					// The urgent commit completes the deferred layout. Its cascade is a
+					// commit-phase update, not part of the surrounding transition.
+					flushSync(() => {});
+					interrupted = events.slice();
+					interruptedText = container.textContent!;
+				});
+				fonts.release();
+			});
+			expect(interrupted).toContain('layout:1:0');
+			expect(interrupted).toContain('layout:1:1');
+			expect(interruptedText).toBe('11');
+			expect(otherContainer.textContent).toBe('1');
+		} finally {
+			fonts.restore();
+			otherRoot.unmount();
+			otherContainer.remove();
+		}
+	});
+
+	it('holds passive effects from layout cascades until the native animation finishes', async () => {
+		let enteredNative!: () => void;
+		const nativeStarted = new Promise<void>((resolve) => {
+			enteredNative = resolve;
+		});
+		const events: string[] = [];
+		let nativeReady!: Promise<unknown>;
 		let finish!: () => void;
 		const finished = new Promise<void>((resolve) => {
 			finish = resolve;
 		});
 		(document as any).startViewTransition = (input: { update: () => unknown }) => {
 			const ready = Promise.resolve(input.update());
+			nativeReady = ready;
+			enteredNative();
 			return { ready, finished, skipTransition() {} };
 		};
 		await act(() => root.render(DeferredOwnershipApp, { generation: 0, cascade: true, events }));
@@ -393,7 +500,8 @@ describe('ViewTransition activation and matching', () => {
 			startTransition(() =>
 				root.render(DeferredOwnershipApp, { generation: 1, cascade: true, events }),
 			);
-			await nextTask();
+			await nativeStarted;
+			await nativeReady;
 			duringAnimation = events.slice();
 			finish();
 		});
@@ -403,10 +511,15 @@ describe('ViewTransition activation and matching', () => {
 	});
 
 	it('runs deferred deletion subscription cleanup synchronously on public root unmount', async () => {
+		let enteredNative!: () => void;
+		const nativeStarted = new Promise<void>((resolve) => {
+			enteredNative = resolve;
+		});
 		const fonts = holdFonts();
 		const events: string[] = [];
 		(document as any).startViewTransition = (input: { update: () => unknown }) => {
 			const ready = Promise.resolve(input.update());
+			enteredNative();
 			return { ready, finished: ready, skipTransition() {} };
 		};
 		try {
@@ -429,7 +542,7 @@ describe('ViewTransition activation and matching', () => {
 						requestFont: fonts.request,
 					}),
 				);
-				await nextTask();
+				await nativeStarted;
 				root.unmount();
 				afterUnmount = events.slice();
 				fonts.release();
@@ -444,6 +557,10 @@ describe('ViewTransition activation and matching', () => {
 	it('completes pending layout before a synchronous root replacement mutates its DOM', async () => {
 		const fonts = holdFonts();
 		const observations: string[] = [];
+		let enteredNative!: () => void;
+		const nativeStarted = new Promise<void>((resolve) => {
+			enteredNative = resolve;
+		});
 		const props = {
 			events: [],
 			requestFont: fonts.request,
@@ -451,6 +568,7 @@ describe('ViewTransition activation and matching', () => {
 		};
 		(document as any).startViewTransition = (input: { update: () => unknown }) => {
 			const ready = Promise.resolve(input.update());
+			enteredNative();
 			return { ready, finished: ready, skipTransition() {} };
 		};
 		try {
@@ -458,8 +576,11 @@ describe('ViewTransition activation and matching', () => {
 			observations.length = 0;
 			await act(async () => {
 				startTransition(() => root.render(LayoutReadinessApp, { ...props, text: 'after' }));
-				await nextTask();
+				// The transition now starts in a host task. A timer can win that race.
+				await nativeStarted;
+				expect(observations).toEqual([]);
 				root.render(MatchingApp, { text: 'replacement', transition: {} });
+				expect(observations).toEqual(['after:after']);
 				fonts.release();
 			});
 			expect(observations).toEqual(['after:after']);

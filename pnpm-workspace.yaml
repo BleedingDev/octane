@@ -37,6 +37,7 @@ packages:
   - benchmarks/lynx-list
   - benchmarks/lynx-table
   - benchmarks/bundle-size
+  - benchmarks/bundle-size/apps/app-shell/*
   - benchmarks/three
   - benchmarks/async-waterfall
   - benchmarks/async-waterfall/*
@@ -111,15 +112,10 @@ overrides:
   # esrap <2.3.2 printed `declare` on every bodyless function, corrupting the
   # virtual TSX for plain overload signatures (TS2384). See issue #736.
   esrap: ^2.3.2
-  # Solid 2.0 SSR alignment: vite-plugin-solid@3.0.0-next.5 pulls an older
-  # beta preset transitively. Keep the transform on the beta.20 line required
-  # by @tsrx/solid so generated SSR helpers match the installed runtime.
-  babel-preset-solid: '2.0.0-beta.20'
-  babel-plugin-jsx-dom-expressions: '0.50.0-next.14'
   # INTERIM: @tanstack/devtools (the Solid UI core reused by
   # @octanejs/tanstack-devtools) targets Solid 1.x and imports `solid-js/web`,
   # which Solid 2.0-beta removed (web renderer moved to @solidjs/web). The
-  # workspace otherwise pins Solid 2.0-beta for @tsrx/solid, so isolate the
+  # workspace otherwise pins Solid 2.0 RC for @tsrx/solid, so isolate the
   # devtools island — and every Solid package it shares an owner with — on a
   # single Solid 1.x copy. Remove once @tanstack/devtools ships a Solid-2 build.
   '@tanstack/devtools>solid-js': '1.9.14'
@@ -136,6 +132,12 @@ packageExtensions:
   '@lynx-js/rspeedy@0.16.0':
     peerDependencies:
       '@rspack/core': 2.1.3
+  # vaul's declarations import 'react' but list no @types/react, so without a
+  # peer they resolve whichever @types/react pnpm hoists, which can be 18.x after
+  # an incremental install. As a peer it is linked from the installing package.
+  vaul@1.1.2:
+    peerDependencies:
+      '@types/react': '*'
 
 catalogs:
   # Immer 11's published Iterator global conflicts with TypeScript's ESNext
@@ -171,6 +173,17 @@ catalogs:
     '@rsbuild/core': 2.1.4
     '@rspack/core': 2.1.3
     typescript: 5.9.3
+  # The repository's only TypeScript 7: octane-tsc, the local tools on its
+  # `typescript/unstable/*` API, and the native pristine type lanes. It is a 7.1
+  # nightly because only those type-check `.tsrx` through `--runExternalCode`
+  # and @tsrx/content-mapper. The alias lets a package keep the classic
+  # `typescript` (default catalog) beside it; its root export has no classic
+  # compiler API. Later nightlies (through 7.1.0-dev.20261004.1) report false
+  # TS7031 errors for a `{ … } = {}` parameter default
+  # (microsoft/TypeScript#64431); move on once a nightly includes the fix
+  # (microsoft/TypeScript#64440).
+  native:
+    typescript-native: npm:typescript@7.1.0-dev.20260921.1
   default:
     babel-plugin-inferno: 6.8.5
     '@react-rxjs/core': 0.10.8
@@ -262,7 +275,7 @@ catalogs:
     '@sanity/react-loader': 2.2.1
     '@ripple-ts/adapter': ^0.4.0
     '@ripple-ts/vite-plugin': ^0.4.0
-    '@solidjs/web': '2.0.0-beta.20'
+    '@solidjs/web': '2.0.0-rc.14'
     '@stylexjs/babel-plugin': '0.19.0'
     '@stylexjs/stylex': '0.19.0'
     '@tanstack/ai': 0.41.0
@@ -276,11 +289,9 @@ catalogs:
     '@tanstack/react-query': ^5.102.8
     '@tanstack/react-router': 1.170.41
     '@tanstack/react-store': ^0.11.1
-    '@tanstack/react-table': 8.21.3
     '@tanstack/react-virtual': 3.14.5
     '@tanstack/router-core': 1.171.34
     '@tanstack/store': ^0.9.3
-    '@tanstack/table-core': 8.21.3
     '@tanstack/virtual-core': 3.17.3
     '@wagmi/connectors': 8.2.0
     '@wagmi/core': 3.6.5
@@ -294,14 +305,15 @@ catalogs:
     '@vitest/coverage-v8': 4.1.10
     '@volar/language-core': 2.4.28
     '@volar/typescript': 2.4.28
-    '@tsrx/core': ^0.4.0
-    '@tsrx/prettier-plugin': ^0.4.10
-    '@tsrx/typescript-plugin': ^0.4.10
+    '@tsrx/content-mapper': 0.1.2
+    '@tsrx/core': ^0.5.5
+    '@tsrx/prettier-plugin': ^0.6.3
+    '@tsrx/typescript-plugin': ^0.6.3
     '@tsrx/ripple': ^0.2.0
-    '@tsrx/react': ^0.3.7
-    '@tsrx/solid': ^0.2.7
-    '@tsrx/vite-plugin-react': ^0.0.112
-    '@tsrx/vite-plugin-solid': ^0.0.109
+    '@tsrx/react': ^0.4.5
+    '@tsrx/solid': ^0.3.5
+    '@tsrx/vite-plugin-react': ^0.0.120
+    '@tsrx/vite-plugin-solid': ^0.0.117
     '@types/babel__core': 7.20.5
     '@types/d3-array': 3.0.3
     '@types/d3-chord': ^1.0.14
@@ -350,7 +362,7 @@ catalogs:
     es-module-lexer: ^1.7.0
     esbuild: ^0.28.1
     esrap: ^2.3.2
-    '@tsrx/oxc': 0.16.0
+    '@tsrx/oxc': 0.20.0
     sucrase: ^3.35.1
     graphql: ^16.14.2
     gsap: 3.15.0
@@ -381,12 +393,14 @@ catalogs:
     motion: ^12.42.2
     motion-dom: ^12.0.0
     miniflare: 4.20260714.0
+    # Depends on exactly the miniflare above, so both share one workerd binary.
+    wrangler: 4.112.0
     nuqs: 2.9.1
     '@standard-schema/spec': 1.1.0
     playwright: ^1.61.1
     picocolors: ^1.1.1
     '@clack/prompts': ^1.7.0
-    prettier: ^3.9.6
+    prettier: ^3.9.9
     '@xyflow/system': 0.0.79
     '@xyflow/react': 12.11.2
     preact: ^10.29.8
@@ -466,7 +480,7 @@ catalogs:
     ripple: ^0.4.0
     rxjs: ^7.8.2
     rulesync: ^8.32.0
-    solid-js: '2.0.0-beta.20'
+    solid-js: '2.0.0-rc.14'
     sonner: 2.0.7
     thinking-orbs: 0.2.0
     styled-components: 6.4.3
@@ -474,7 +488,7 @@ catalogs:
     '@types/stylis': ^4.2.7
     '@emotion/is-prop-valid': 1.4.0
     csstype: 3.2.3
-    svelte: ^5.56.7
+    svelte: ^5.57.2
     svelte-check: ^4.7.3
     shadcn: 4.21.0
     tailwindcss: 4.3.3
@@ -486,14 +500,14 @@ catalogs:
     valtio: ^2.3.2
     vite: ^8.1.5
     astro: ^5.16.0
-    vite-plugin-solid: '3.0.0-next.5'
+    '@solidjs/vite-plugin': '3.0.0-next.49'
     # Vue Vapor (vapor-mode benchmark fixtures) — 3.6 is the first line with
-    # vapor; pinned to a 3.6 prerelease like solid-js's 2.0 beta. The fixtures
+    # vapor; pinned to a 3.6 prerelease like solid-js's 2.0 RC. The fixtures
     # alias `vue` to a shim over @vue/runtime-dom + @vue/runtime-vapor (see
     # their vite.config.js), so those are direct deps at the same pin.
-    vue: 3.6.0-rc.1
-    '@vue/runtime-dom': 3.6.0-rc.1
-    '@vue/runtime-vapor': 3.6.0-rc.1
+    vue: 3.6.0-rc.10
+    '@vue/runtime-dom': 3.6.0-rc.10
+    '@vue/runtime-vapor': 3.6.0-rc.10
     '@vitejs/plugin-vue': ^6.0.8
     vitest: ^4.1.10
     yjs: ^13.6.31
@@ -503,7 +517,7 @@ catalogs:
     "@zag-js/store": 1.42.0
     "@zag-js/types": 1.42.0
     "@zag-js/utils": 1.42.0
-    alien-signals: 1.0.4
+    alien-signals: 3.2.1
     react-transition-group: 4.4.5
     "@date-fns/tz": ^1.4.1
     date-fns: ^4.1.0
@@ -532,11 +546,6 @@ catalogs:
     react: 19.2.7
     react-dom: 19.2.7
   dnd-kit-react-oracle:
-    react: 19.2.7
-    react-dom: 19.2.7
-  tanstack-pacer-react-oracle:
-    "@types/react": 19.2.17
-    "@types/react-dom": 19.2.3
     react: 19.2.7
     react-dom: 19.2.7
   tanstack-devtools-react-oracle:
@@ -596,29 +605,33 @@ minimumReleaseAgeExclude:
   - '@blocknote/core@0.53.0'
   - '@blocknote/react@0.53.0'
   - '@tanstack/db@0.7.0'
-  - '@tsrx/oxc-darwin-arm64@0.16.0'
-  - '@tsrx/oxc-darwin-x64@0.16.0'
-  - '@tsrx/oxc-linux-arm64-gnu@0.16.0'
-  - '@tsrx/oxc-linux-arm64-musl@0.16.0'
-  - '@tsrx/oxc-linux-x64-gnu@0.16.0'
-  - '@tsrx/oxc-linux-x64-musl@0.16.0'
-  - '@tsrx/oxc-win32-arm64-msvc@0.16.0'
-  - '@tsrx/oxc-win32-x64-msvc@0.16.0'
-  - '@tsrx/oxc@0.16.0'
+  - '@tsrx/oxc-darwin-arm64@0.20.0'
+  - '@tsrx/oxc-darwin-x64@0.20.0'
+  - '@tsrx/oxc-linux-arm64-gnu@0.20.0'
+  - '@tsrx/oxc-linux-arm64-musl@0.20.0'
+  - '@tsrx/oxc-linux-x64-gnu@0.20.0'
+  - '@tsrx/oxc-linux-x64-musl@0.20.0'
+  - '@tsrx/oxc-win32-arm64-msvc@0.20.0'
+  - '@tsrx/oxc-win32-x64-msvc@0.20.0'
+  - '@tsrx/oxc@0.20.0'
+  - '@tanstack/octane-hotkeys@0.3.0'
+  - '@tanstack/octane-pacer@0.3.0'
+  - '@tanstack/octane-store@0.13.0'
+  - '@tanstack/octane-table@9.3.0'
   - '@ripple-ts/adapter@0.4.0'
   - '@ripple-ts/vite-plugin@0.4.0'
-  - '@tsrx/core@0.3.2 || 0.4.0'
-  - '@tsrx/prettier-plugin@0.4.10'
-  - '@tsrx/react@0.3.7'
+  - '@tsrx/core@0.5.5'
+  - '@tsrx/prettier-plugin@0.6.3'
+  - '@tsrx/react@0.4.5'
   - '@tsrx/ripple@0.2.0'
-  - '@tsrx/solid@0.2.7'
-  - '@tsrx/typescript-plugin@0.4.10'
-  - '@tsrx/vite-plugin-react@0.0.112'
-  - '@tsrx/vite-plugin-solid@0.0.109'
+  - '@tsrx/solid@0.3.5'
+  - '@tsrx/typescript-plugin@0.6.3'
+  - '@tsrx/vite-plugin-react@0.0.120'
+  - '@tsrx/vite-plugin-solid@0.0.117'
   - ripple@0.4.0
-  - '@tsrx/runtime@0.2.3 || 0.2.4'
-  - '@tsrx/react-runtime@0.1.11'
-  - '@tsrx/solid-runtime@0.1.11'
+  - '@tsrx/runtime@0.2.4'
+  - '@tsrx/react-runtime@0.1.12'
+  - '@tsrx/solid-runtime@0.1.12'
   - cn@0.2.6
   - '@tanstack/react-virtual@3.14.12'
   - '@tanstack/virtual-core@3.17.10'
@@ -627,27 +640,39 @@ minimumReleaseAgeExclude:
   - '@tanstack/start-client-core@1.170.34'
   - '@tanstack/start-server-core@1.169.39'
   - '@tanstack/start-storage-context@1.167.36'
+  - '@solidjs/vite-plugin@3.0.0-next.49'
 
 # The JSX type-only, generic-arrow, and typed-default mapping fixes formerly
 # patched into @tsrx/core are published in the required @tsrx/core >= 0.1.69,
 # and the parameter-property and bodyless-method mapping fix
-# (https://github.com/tsrx-org/tsrx/pull/143) in @tsrx/core >= 0.3.0.
+# (https://github.com/tsrx-org/tsrx/pull/143) in @tsrx/core >= 0.3.0, and the
+# parenthesized `<style>` apply target and source-phase import printing fixes in
+# @tsrx/core >= 0.5.5.
 patchedDependencies:
-  # Print source-phase imports (`import source x from`, `import.source()`) in
-  # withDeferredImports. It printed only the `defer` phase, and esrap ignores
-  # `phase`, so compiled output silently became an evaluation-phase import. Not
-  # yet fixed upstream in tsrx-org/tsrx (checked through @tsrx/core 0.5.2).
-  # SCOPE: like every entry here, this does not ship in the published octane
-  # tarball; consumers resolve unpatched @tsrx/core until an upstream release is
-  # adopted. Guarded by packages/octane/tests/compiler/module-import-phases.test.ts.
-  # Drop when the adopted @tsrx/core prints the source phase.
-  '@tsrx/core@0.4.0': patches/@tsrx__core@0.4.0.patch
-  # Print labeled statements and empty statement bodies instead of deleting
-  # them, and throw on a node type with no printer instead of writing a
-  # placeholder comment. Backports tsrx-org/tsrx#322 and the empty-body part of
-  # tsrx-org/tsrx#283 (both in @tsrx/prettier-plugin >= 0.4.12); guarded by
-  # scripts/tsrx-prettier-plugin.test.mjs. Drop when the plugin is upgraded.
-  '@tsrx/prettier-plugin@0.4.10': patches/@tsrx__prettier-plugin@0.4.10.patch
+  # Test a comment's blank-line condition only once the text before it is
+  # whitespace, the only case that reads it. In 0.5.x, comment attachment
+  # copied all the code from every node to the next comment, so parsing a
+  # large module with few comments was quadratic. Octane's Vite plugin parses
+  # every module it compiles with @tsrx/core. Before #1852 it also parsed the
+  # SSR chunks Nitro re-bundles, and the website's 5 MB docs chunk ran its
+  # production build past the 420 s limit.
+  # Not yet fixed upstream in tsrx-org/tsrx (checked through @tsrx/core 0.5.5).
+  # SCOPE: this does not ship in the published octane tarball; consumers resolve
+  # unpatched @tsrx/core until an upstream release is adopted. Guarded by
+  # packages/octane/tests/compiler/compiler-vite-options.test.ts. Drop when the
+  # adopted @tsrx/core no longer scans past non-whitespace text for blank lines.
+  '@tsrx/core@0.5.5': patches/@tsrx__core@0.5.5.patch
+  # Verify Chromium request interception is live before a browser mock route is
+  # added, and keep it on across files. The provider mocks through
+  # context.route(); clearing mocks between files removes every route, and
+  # Playwright 1.61.1 re-sends Fetch.enable on the next route, which Chromium
+  # applies after its ack, so a module request issued right after vi.mock can
+  # load the real module (vitest-dev/vitest#8339). Backports
+  # vitest-dev/vitest#11083 (d6620fae, in no 4.x release); see
+  # docs/browser-diagnostics.md. Guarded by the probe check in
+  # test-utils/vitest-browser-collection.test.ts. Drop when Vitest is upgraded
+  # to a release that contains the fix.
+  '@vitest/browser-playwright@4.1.10': patches/@vitest__browser-playwright@4.1.10.patch
   # Preserve sibling package URLs when browser mocks share a directory-name prefix.
   # Browser ships its own prebundled copy of the mocker implementation.
   '@vitest/browser@4.1.10': patches/@vitest__browser@4.1.10.patch

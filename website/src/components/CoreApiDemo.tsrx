@@ -1,3 +1,5 @@
+'use strong';
+
 // Small, real Octane components embedded throughout the Core APIs guide.
 // Each demo keeps one concept tangible without depending on a backend.
 //
@@ -15,99 +17,101 @@ import {
 	useTransition,
 } from 'octane';
 
-const demoControls = <style>
-	.button {
-		min-height: 2.5rem;
-		border: 1px solid transparent;
-		border-radius: 999px;
-		padding: 0.5rem 1rem;
-		font: inherit;
-		font-size: 0.875rem;
-		font-weight: 700;
-		cursor: pointer;
-		transition:
-			background 0.15s,
-			border-color 0.15s;
-	}
-	.primary {
-		background: var(--accent);
-		color: var(--on-accent);
-	}
-	.secondary {
-		border-color: var(--border);
-		background: var(--surface-subtle);
-		color: var(--text);
-	}
-	.disabled {
-		opacity: 0.42;
-		cursor: not-allowed;
-	}
-	.input {
-		width: 100%;
-		min-height: 2.75rem;
-		border: 1px solid var(--border);
-		border-radius: 0.75rem;
-		padding: 0.6rem 0.8rem;
-		background: var(--field-bg);
-		color: var(--text);
-		font: inherit;
-		font-size: 0.9rem;
-	}
-	.demo-actions {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.65rem;
-	}
-	.demo-status {
-		margin: 0;
-		color: var(--text-secondary);
-		font-size: 0.82rem;
-	}
-	.demo-field {
-		display: grid;
-		gap: 0.35rem;
-		min-width: 0;
-		color: var(--text);
-		font-size: 0.8rem;
-		font-weight: 700;
-	}
-	.packedLabel {
-		color: var(--text-secondary);
-		text-decoration: line-through;
-	}
-	.shortcutKey {
-		display: inline-block;
-		min-width: 1.5rem;
-		border: 1px solid var(--border);
-		border-bottom-color: var(--border-strong);
-		border-radius: 0.35rem;
-		padding: 0.05rem 0.35rem;
-		background: var(--surface);
-		color: var(--text);
-		font-size: 0.75rem;
-		text-align: center;
-	}
-	.success {
-		color: var(--success-text);
-	}
-	.error {
-		color: var(--danger-text);
-	}
-	.data-empty,
-	.data-loading,
-	.data-error {
-		margin: 0;
-		color: var(--text-secondary);
-		font-size: 0.875rem;
-		text-align: center;
-	}
-	.data-loading {
-		color: var(--text);
-	}
-	.data-error {
-		color: var(--danger-text);
-	}
-</style>;
+const demoControls = (
+	<style>
+		.button {
+			min-height: 2.5rem;
+			border: 1px solid transparent;
+			border-radius: 999px;
+			padding: 0.5rem 1rem;
+			font: inherit;
+			font-size: 0.875rem;
+			font-weight: 700;
+			cursor: pointer;
+			transition:
+				background 0.15s,
+				border-color 0.15s;
+		}
+		.primary {
+			background: var(--accent);
+			color: var(--on-accent);
+		}
+		.secondary {
+			border-color: var(--border);
+			background: var(--surface-subtle);
+			color: var(--text);
+		}
+		.disabled {
+			opacity: 0.42;
+			cursor: not-allowed;
+		}
+		.input {
+			width: 100%;
+			min-height: 2.75rem;
+			border: 1px solid var(--border);
+			border-radius: 0.75rem;
+			padding: 0.6rem 0.8rem;
+			background: var(--field-bg);
+			color: var(--text);
+			font: inherit;
+			font-size: 0.9rem;
+		}
+		.demo-actions {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 0.65rem;
+		}
+		.demo-status {
+			margin: 0;
+			color: var(--text-secondary);
+			font-size: 0.82rem;
+		}
+		.demo-field {
+			display: grid;
+			gap: 0.35rem;
+			min-width: 0;
+			color: var(--text);
+			font-size: 0.8rem;
+			font-weight: 700;
+		}
+		.packedLabel {
+			color: var(--text-secondary);
+			text-decoration: line-through;
+		}
+		.shortcutKey {
+			display: inline-block;
+			min-width: 1.5rem;
+			border: 1px solid var(--border);
+			border-bottom-color: var(--border-strong);
+			border-radius: 0.35rem;
+			padding: 0.05rem 0.35rem;
+			background: var(--surface);
+			color: var(--text);
+			font-size: 0.75rem;
+			text-align: center;
+		}
+		.success {
+			color: var(--success-text);
+		}
+		.error {
+			color: var(--danger-text);
+		}
+		.data-empty,
+		.data-loading,
+		.data-error {
+			margin: 0;
+			color: var(--text-secondary);
+			font-size: 0.875rem;
+			text-align: center;
+		}
+		.data-loading {
+			color: var(--text);
+		}
+		.data-error {
+			color: var(--danger-text);
+		}
+	</style>
+);
 
 interface DemoFrameProps {
 	id: string;
@@ -190,7 +194,9 @@ function DemoFrame(props: DemoFrameProps) @{
 			</div>
 			<div class="demo-preview">
 				<div class="demo-copy">
-					<p id={props.id + '-title'} class="demo-title">{props.title as string}</p>
+					<p id={props.id + '-title'} class="demo-title">
+						{props.title as string}
+					</p>
 					<p class="demo-description">{props.description as string}</p>
 				</div>
 				{props.children}
@@ -242,12 +248,7 @@ export function CoreApiDemo() @{
 				<div class={['demo-actions', 'counter-actions']}>
 					<button
 						type="button"
-						class={[
-							'demo-button',
-							'button',
-							'secondary',
-							count === 0 && 'disabled',
-						]}
+						class={['demo-button', 'button', 'secondary', count === 0 && 'disabled']}
 						disabled={count === 0}
 						onClick={() => setCount((current) => Math.max(0, current - 1))}
 					>
@@ -349,11 +350,9 @@ export function ListConditionsDemo() @{
 									checked={item.packed}
 									onInput={(event) => {
 										const packed = (event.target as HTMLInputElement).checked;
-										setItems(
-											(current) => current.map(
-												(currentItem) => currentItem.id === item.id
-													? { ...currentItem, packed }
-													: currentItem,
+										setItems((current) =>
+											current.map((currentItem) =>
+												currentItem.id === item.id ? { ...currentItem, packed } : currentItem,
 											),
 										);
 									}}
@@ -361,7 +360,9 @@ export function ListConditionsDemo() @{
 								<label
 									for={'packing-item-' + item.id}
 									class={['packing-label', item.packed && 'packedLabel']}
-								>{item.label as string}</label>
+								>
+									{item.label as string}
+								</label>
 							</li>
 						} @empty {
 							<>
@@ -383,12 +384,7 @@ export function ListConditionsDemo() @{
 			<div class="demo-actions">
 				<button
 					type="button"
-					class={[
-						'demo-button',
-						'button',
-						'secondary',
-						items.length === 0 && 'disabled',
-					]}
+					class={['demo-button', 'button', 'secondary', items.length === 0 && 'disabled']}
 					disabled={items.length === 0}
 					onClick={() => setItems([])}
 				>
@@ -411,11 +407,15 @@ export function RefEffectDemo() @{
 			const target = event.target;
 			const isEditable =
 				target instanceof HTMLElement &&
-					(target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+				(target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
 
 			if (
-				event.key !== '/' || event.altKey || event.ctrlKey || event.metaKey || event.isComposing ||
-					isEditable
+				event.key !== '/' ||
+				event.altKey ||
+				event.ctrlKey ||
+				event.metaKey ||
+				event.isComposing ||
+				isEditable
 			) {
 				return;
 			}
@@ -545,7 +545,9 @@ function ProfileResult(props: { request: Promise<DemoProfile> }) @{
 			}
 		</style>
 		<article class="profile-card">
-			<span class="profile-avatar" aria-hidden="true">{profile.initials as string}</span>
+			<span class="profile-avatar" aria-hidden="true">
+				{profile.initials as string}
+			</span>
 			<div>
 				<strong class="profile-name">{profile.name as string}</strong>
 				<span class="profile-role">{profile.role as string}</span>
@@ -562,9 +564,7 @@ function ProfileRequest(props: { request: Promise<DemoProfile> }) @{
 		} @pending {
 			<p class="data-loading">Loading profile…</p>
 		} @catch (error) {
-			<p class="data-error">
-				{error instanceof Error ? error.message : 'The request failed.'}
-			</p>
+			<p class="data-error">{error instanceof Error ? error.message : 'The request failed.'}</p>
 		}
 	</>
 }
@@ -655,8 +655,7 @@ function loadDashboardReport(id: DashboardTab): Promise<DashboardReport> {
 }
 
 function DashboardReportPanel(props: { value: DashboardReport | Promise<DashboardReport> }) @{
-	const report =
-		props.value instanceof Promise ? use(props.value) : props.value;
+	const report = props.value instanceof Promise ? use(props.value) : props.value;
 
 	<>
 		<style>
@@ -722,20 +721,8 @@ export function TransitionDemo() @{
 		value: DASHBOARD_REPORTS.overview,
 	});
 	const [isPending, startTransition] = useTransition();
-	const pendingTab = useRef<DashboardTab | null>(null);
-	const isLoading = isPending && pendingTab.current !== null;
-
-	const openReport = (next: DashboardTab) => {
-		if (selection.id === next || pendingTab.current !== null) return;
-
-		const request = loadDashboardReport(next);
-		pendingTab.current = next;
-		startTransition(async () => {
-			setSelection({ id: next, value: request });
-			await request;
-			pendingTab.current = null;
-		});
-	};
+	const [pendingTab, setPendingTab, getPendingTab] = useState<DashboardTab | null>(null);
+	const isLoading = isPending && pendingTab !== null;
 
 	<DemoFrame
 		id="transition"
@@ -752,6 +739,17 @@ export function TransitionDemo() @{
 			</style>
 			<section aria-busy={isLoading}>
 				@{
+					const openReport = (next: DashboardTab) => {
+						if (selection.id === next || getPendingTab() !== null) return;
+
+						const request = loadDashboardReport(next);
+						setPendingTab(next);
+						startTransition(async () => {
+							setSelection({ id: next, value: request });
+							await request;
+							setPendingTab(null);
+						});
+					};
 					<>
 						<style>
 							.demo-tabs {
@@ -791,21 +789,25 @@ export function TransitionDemo() @{
 									class={[
 										'demo-tab',
 										selection.id === tab && 'demo-tab-selected',
-										isLoading && pendingTab.current === tab && 'demo-tab-pending',
+										isLoading && pendingTab === tab && 'demo-tab-pending',
 									]}
 									role="tab"
 									aria-selected={selection.id === tab}
 									disabled={isLoading}
 									onClick={() => openReport(tab)}
-								>{DASHBOARD_REPORTS[tab].label as string}</button>
+								>
+									{DASHBOARD_REPORTS[tab].label as string}
+								</button>
 							}
 						</div>
 					</>
 				}
 				<p class="demo-status transition-status" aria-live="polite">
-					@if (isLoading && pendingTab.current !== null) {
+					@if (isLoading && pendingTab !== null) {
 						<span>
-							{'Loading ' + DASHBOARD_REPORTS[pendingTab.current].label + ' — ' +
+							{'Loading ' +
+								DASHBOARD_REPORTS[pendingTab].label +
+								' — ' +
 								DASHBOARD_REPORTS[selection.id].label +
 								' stays on screen.'}
 						</span>
@@ -847,8 +849,8 @@ function searchDemoProducts(query: string): Promise<DemoProduct[]> {
 		request = new Promise((resolve) => {
 			setTimeout(() => {
 				resolve(
-					DEMO_PRODUCTS.filter(
-						(product) => (product.name + ' ' + product.category).toLowerCase().includes(normalized),
+					DEMO_PRODUCTS.filter((product) =>
+						(product.name + ' ' + product.category).toLowerCase().includes(normalized),
 					),
 				);
 			}, 650);
@@ -859,10 +861,8 @@ function searchDemoProducts(query: string): Promise<DemoProduct[]> {
 }
 
 function ProductResults(props: { query: string; isStale: boolean }) @{
-	const products =
-		props.query === '' ? DEMO_PRODUCTS : use(searchDemoProducts(props.query));
-	const visibleQuery =
-		props.query === '' ? 'all products' : '“' + props.query + '”';
+	const products = props.query === '' ? DEMO_PRODUCTS : use(searchDemoProducts(props.query));
+	const visibleQuery = props.query === '' ? 'all products' : '“' + props.query + '”';
 
 	<>
 		<style>
@@ -1063,12 +1063,7 @@ export function FormActionDemo() @{
 					</label>
 					<button
 						type="submit"
-						class={[
-							'demo-button',
-							'button',
-							'primary',
-							isPending && 'disabled',
-						]}
+						class={['demo-button', 'button', 'primary', isPending && 'disabled']}
 						disabled={isPending}
 					>
 						{isPending ? 'Saving…' : 'Save name'}
@@ -1082,7 +1077,9 @@ export function FormActionDemo() @{
 						result.status === 'error' && 'error',
 					]}
 					aria-live="polite"
-				>{result.message as string}</p>
+				>
+					{result.message as string}
+				</p>
 			</form>
 		</>
 	</DemoFrame>

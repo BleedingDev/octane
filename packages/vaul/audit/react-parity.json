@@ -34,9 +34,9 @@
       "node": ">=22",
       "platform": "any",
       "arch": "any",
-      "packageManager": "pnpm@11.15.1",
+      "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "91136aca7e454123147ee81e429398d60a872288b7ce288a72b4cfbf3c038dc2"
+      "lockfileSha256": "6df573d6aa854c122b0cea3e8c3be46fb67e3debe9ce0f329a773850bbd87706"
     }
   },
   "lanes": [
@@ -154,7 +154,7 @@
         {
           "path": "packages/vaul/tsconfig.json",
           "role": "support",
-          "sha256": "a42fbdc850941411a0bda3a8aafa26008bfc772b7964e447a8c042e3096e1605"
+          "sha256": "ce5308bbf5481fc976e394aab7d0e563d036cecca4f388cdb393e891e3a75132"
         },
         {
           "path": "packages/vaul/typetests/assertions.md",
@@ -276,7 +276,7 @@
         {
           "path": "packages/vaul/tests/browser/harness/main.tsrx",
           "role": "support",
-          "sha256": "0c1d24f0e67a7b9013389d54bdd80871cf1b63fdd61b6ac0fdb7c058ef644b35"
+          "sha256": "5997d5285a72c9b68f256a8f6a4f847eb05bfce1006bf14915a37c493d10d68a"
         },
         {
           "path": "packages/vaul/tests/browser/harness/index.html",

@@ -10,11 +10,11 @@
     "noErrorTruncation": true,
     "noUnusedLocals": false,
     "noUnusedParameters": false,
-    "baseUrl": ".",
     "paths": {
       "octane": ["../../octane/src/index.ts"],
       "octane/*": ["../../octane/src/*"]
-    }
+    },
+    "types": []
   },
   "include": ["./**/*.test-d.ts", "../src/types.ts"]
 }

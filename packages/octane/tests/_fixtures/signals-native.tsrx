@@ -11,7 +11,7 @@ import {
 	useTransition,
 } from 'octane';
 import { createResource, createScope, query, type QueryContext } from 'octane/signals';
-import { formatCounter$ } from './signals-native-readers';
+import { boxValue, counterParts$, formatCounter$ } from './signals-native-readers';
 
 export function createCounter$(scopeKey = 'native-counter', initial = 0) {
 	const scope = createScope({ scopeKey });
@@ -32,6 +32,27 @@ export function DerivedReader(props: CounterFixture) @{
 
 export function ImportedReader(props: CounterFixture) @{
 	<p class="signal-value">{formatCounter$(props) as string}</p>
+}
+
+// A chain of cached calculations whose first link reads a signal inside an
+// imported helper. The read witness must invalidate that link, and through it
+// the link the template reads.
+export function NativeChainedReader(
+	props: CounterFixture & {
+		identify: (value: object) => string;
+	},
+) @{
+	const [tick, setTick] = useState(0);
+	const parts = counterParts$(props);
+	const boxed = boxValue(parts);
+	<section>
+		<button class="tick" onClick={() => setTick(tick + 1)}>
+			{'tick'}
+		</button>
+		<p class="signal-value">{String(boxed.value[0])}</p>
+		<span class="identity">{props.identify(boxed) as string}</span>
+		<span class="tick-value">{String(tick)}</span>
+	</section>
 }
 
 const MemoReader = memo(SignalReader);
@@ -93,7 +114,9 @@ export function EventWrites(props: CounterFixture & { log: (entry: string) => vo
 				props.scope.set(props.count$, 2);
 				props.log('child:' + props.scope.get(props.count$));
 			}}
-		>{String(props.scope.get(props.count$))}</button>
+		>
+			{String(props.scope.get(props.count$))}
+		</button>
 	</section>
 }
 
@@ -140,18 +163,25 @@ export function NativeHeldBoundary(props: ResourceFixture) @{
 	</section>
 }
 
-function NativeHeldCount(props: Pick<ResourceFixture, 'scope' | 'count$'> & {
-	log: (entry: string) => void;
-}) @{
+function NativeHeldCount(
+	props: Pick<ResourceFixture, 'scope' | 'count$'> & {
+		log: (entry: string) => void;
+	},
+) @{
 	const value = props.scope.get(props.count$);
-	const ref = useCallback((node: HTMLButtonElement | null) => {
-		props.log('ref:' + value + ':' + (node === null ? 'detach' : 'attach'));
-	}, [value, props.log]);
+	const ref = useCallback(
+		(node: HTMLButtonElement | null) => {
+			props.log('ref:' + value + ':' + (node === null ? 'detach' : 'attach'));
+		},
+		[value, props.log],
+	);
 	useLayoutEffect(() => {
 		props.log('layout:' + value);
 		return () => props.log('cleanup:' + value);
 	}, [value]);
-	<button class="count" ref={ref}>{String(value)}</button>
+	<button class="count" ref={ref}>
+		{String(value)}
+	</button>
 }
 
 export function NativeHeldSiblings(props: ResourceFixture & { log: (entry: string) => void }) @{
@@ -170,19 +200,23 @@ export function NativeHeldSiblings(props: ResourceFixture & { log: (entry: strin
 export function NativeHeldBindings(props: ResourceFixture) @{
 	<section>
 		<input class="direct-control" value={props.key$} />
-		<output class="direct-child" title={props.key$}>{props.key$}</output>
+		<output class="direct-child" title={props.key$}>
+			{props.key$}
+		</output>
 		<div class="direct-style" style={{ left: props.count$, '--key': props.key$ }} />
 	</section>
 }
 
-export function NativeHeldIsolation(props: ResourceFixture & {
-	outside: CounterFixture;
-	log: (entry: string) => void;
-	gate?: Promise<unknown>;
-	settle?: Promise<unknown>;
-	lateKey?: boolean;
-	observeUpdater?: (value: number) => void;
-}) @{
+export function NativeHeldIsolation(
+	props: ResourceFixture & {
+		outside: CounterFixture;
+		log: (entry: string) => void;
+		gate?: Promise<unknown>;
+		settle?: Promise<unknown>;
+		lateKey?: boolean;
+		observeUpdater?: (value: number) => void;
+	},
+) @{
 	const [pending, start] = useTransition();
 	const [local, setLocal] = useState(0);
 	const write = () => {
@@ -213,14 +247,18 @@ export function NativeHeldIsolation(props: ResourceFixture & {
 			{pending ? 'pending' : 'ready'}
 		</button>
 		<form>
-			<button class="form-transition" formAction={action}>{'submit'}</button>
+			<button class="form-transition" formAction={action}>
+				{'submit'}
+			</button>
 		</form>
 		<p class="action-state">{String(local)}</p>
 		<button
 			class="urgent"
 			onClick={() => props.count$.set(2)}
 			onPointerMove={() => props.count$.set(3)}
-		>{'urgent'}</button>
+		>
+			{'urgent'}
+		</button>
 		<aside class="outside">
 			<NativeHeldCount {...props.outside} log={(entry) => props.log('outside:' + entry)} />
 		</aside>
@@ -235,9 +273,11 @@ function NativeHeldAsyncLayer(props: ResourceFixture) @{
 	</div>
 }
 
-export function NativeNestedHeldSiblings(props: ResourceFixture & {
-	log: (entry: string) => void;
-}) @{
+export function NativeNestedHeldSiblings(
+	props: ResourceFixture & {
+		log: (entry: string) => void;
+	},
+) @{
 	<section>
 		@try {
 			<div class="panel">
@@ -266,7 +306,9 @@ export function NativeErrorBoundary(props: ResourceFixture) @{
 	} @pending {
 		<p class="pending">{'loading'}</p>
 	} @catch (_error, reset) {
-		<button class="caught" onClick={reset}>{'reset boundary'}</button>
+		<button class="caught" onClick={reset}>
+			{'reset boundary'}
+		</button>
 	}
 }
 
@@ -281,16 +323,22 @@ function DeletionWriter(props: CounterFixture & { deleted?: () => void }) @{
 	<i class="deleted">{'delete me'}</i>
 }
 
-export function NativeDeletionRace(props: CounterFixture & {
-	show: boolean;
-	log: (entry: string) => void;
-	deleted?: () => void;
-}) @{
+export function NativeDeletionRace(
+	props: CounterFixture & {
+		show: boolean;
+		log: (entry: string) => void;
+		deleted?: () => void;
+	},
+) @{
 	const value = props.scope.get(props.count$);
 	const output = useRef<HTMLOutputElement | null>(null);
 	useLayoutEffect(() => {
 		props.log(
-			'commit:' + value + ':' + output.current?.textContent + ':live:' +
+			'commit:' +
+				value +
+				':' +
+				output.current?.textContent +
+				':live:' +
 				props.scope.get(props.count$),
 		);
 	}, [value, props.show]);
@@ -302,11 +350,10 @@ export function NativeDeletionRace(props: CounterFixture & {
 	</section>
 }
 
-type NativeFallbackProps =
-	ResourceFixture & {
-		log: (entry: string) => void;
-		hostRef?: (node: HTMLParagraphElement | null) => void;
-	};
+type NativeFallbackProps = ResourceFixture & {
+	log: (entry: string) => void;
+	hostRef?: (node: HTMLParagraphElement | null) => void;
+};
 
 function NativeFallbackSample(props: NativeFallbackProps) @{
 	const value = props.scope.get(props.count$);
@@ -314,7 +361,9 @@ function NativeFallbackSample(props: NativeFallbackProps) @{
 	useLayoutEffect(() => {
 		props.log(value + ':' + output.current?.textContent + ':' + props.scope.get(props.count$));
 	}, [value, props.log]);
-	<output class="sampled-fallback" ref={output}>{String(value)}</output>
+	<output class="sampled-fallback" ref={output}>
+		{String(value)}
+	</output>
 }
 
 function NativeBoundaryCleanupWriter(props: ResourceFixture) @{
@@ -336,7 +385,9 @@ export function NativeDetachedErrorCleanup(props: NativeFallbackProps) @{
 function NativePrimaryCleanup(props: NativeFallbackProps) @{
 	const value = props.scope.get(props.value$);
 	useLayoutEffect(() => () => props.scope.set(props.count$, 1), []);
-	<p class="cleanup-primary" ref={props.hostRef}>{value}</p>
+	<p class="cleanup-primary" ref={props.hostRef}>
+		{value}
+	</p>
 }
 
 export function NativeTimedCleanup(props: NativeFallbackProps) @{
@@ -349,12 +400,14 @@ export function NativeTimedCleanup(props: NativeFallbackProps) @{
 	}
 }
 
-export function NativeSupersessionReader(props: CounterFixture & {
-	label: string;
-	phase: 'ref' | 'layout' | 'write';
-	log: (entry: string) => void;
-	replace: () => void;
-}) @{
+export function NativeSupersessionReader(
+	props: CounterFixture & {
+		label: string;
+		phase: 'ref' | 'layout' | 'write';
+		log: (entry: string) => void;
+		replace: () => void;
+	},
+) @{
 	const value = props.scope.get(props.count$);
 	useLayoutEffect(() => {
 		props.log('layout-first:' + props.label + ':' + value);
@@ -384,12 +437,14 @@ export function NativeSupersessionReader(props: CounterFixture & {
 	</section>
 }
 
-export function NativeStablePublication(props: CounterFixture & {
-	label: string;
-	stableRef: ((node: HTMLSpanElement | null) => void) | { current: HTMLSpanElement | null };
-	log: (entry: string) => void;
-	replace: () => void;
-}) @{
+export function NativeStablePublication(
+	props: CounterFixture & {
+		label: string;
+		stableRef: ((node: HTMLSpanElement | null) => void) | { current: HTMLSpanElement | null };
+		log: (entry: string) => void;
+		replace: () => void;
+	},
+) @{
 	const value = props.scope.get(props.count$);
 	useLayoutEffect(() => {
 		props.log('setup:' + props.label);
@@ -403,6 +458,8 @@ export function NativeStablePublication(props: CounterFixture & {
 		>
 			{props.label + ':' + value}
 		</span>
-		<span class="stable-ref" ref={props.stableRef}>{props.label + ':' + value}</span>
+		<span class="stable-ref" ref={props.stableRef}>
+			{props.label + ':' + value}
+		</span>
 	</section>
 }

@@ -1,11 +1,18 @@
 {
   "schemaVersion": 1,
-  "scope": "Projects and explicit private-port exceptions added by the 2026-09-02 cleanup audit.",
+  "scope": "Projects and explicit exceptions for the root octane-tsc typecheck. Every published package's tsconfig.json and .tsrx-aware typecheck projects must be reached, or listed here with a reason and an expiry date.",
   "requiredProjects": [
     "packages/blocknote/tsconfig.supported.json",
     "packages/puck/tsconfig.json",
     "packages/thinking-orbs/tsconfig.json",
     "packages/xyflow/tsconfig.json"
   ],
-  "privateExceptions": []
+  "privateExceptions": [],
+  "publishedExceptions": [],
+  "materializedProjects": [
+    {
+      "project": "packages/floating-ui/typetests/tsconfig.adapted.json",
+      "reason": "Compiles the upstream @floating-ui/react type tests that the React parity harness materializes into packages/floating-ui/tests/upstream/, which is gitignored, so a clean checkout has no inputs. The parity lane typechecks it after materializing."
+    }
+  ]
 }

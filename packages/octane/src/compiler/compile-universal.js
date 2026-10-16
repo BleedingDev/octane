@@ -8,6 +8,7 @@
  * to the selected renderer module.
  */
 import { builders as b, clone_ast_node, parseModule } from '@tsrx/core';
+import { adoptTemplateShape } from './parser-template-shape.js';
 import { normalizeUniversalRuntime } from './universal-runtime.js';
 import { createContextSourceFacts } from './context-provider.js';
 import { inheritGeneratedOrigin } from './generated-origin.js';
@@ -266,6 +267,7 @@ const UNIVERSAL_RUNTIME_IMPORTS = new Set([
 	'useOptimistic',
 	'useReducer',
 	'useRef',
+	'useLazyRef',
 	'useState',
 	'useSyncExternalStore',
 	'useTransition',
@@ -526,6 +528,7 @@ const NON_RUNTIME_AST_KEYS = new Set([
 ]);
 const RUNTIME_TYPESCRIPT_NODES = new Set([
 	'TSAsExpression',
+	'TSEnumBody',
 	'TSEnumDeclaration',
 	'TSEnumMember',
 	'TSExportAssignment',
@@ -651,7 +654,15 @@ function createLexicalScope(parent, isFunction = false) {
 	return scope;
 }
 
+// Rewrites are copy-on-write, so an analysis depends only on its root node.
+// A pass that leaves the module unchanged hands the next pass the same root,
+// which reuses this analysis instead of walking the module again. Callers
+// share the result, so it is frozen; copy it to attach pass-local state.
+const lexicalAnalyses = new WeakMap();
+
 export function createLexicalAnalysis(ast) {
+	let analysis = lexicalAnalyses.get(ast);
+	if (analysis !== undefined) return analysis;
 	const bindingNodes = new WeakSet();
 	const nonReferenceNodes = new WeakSet();
 	const nodeScopes = new WeakMap();
@@ -869,7 +880,7 @@ export function createLexicalAnalysis(ast) {
 			if (node.declare === true) return;
 			const enumScope = createLexicalScope(scope);
 			if (node.id) declarePattern(node.id, enumScope);
-			for (const member of node.members ?? []) {
+			for (const member of node.body?.members ?? []) {
 				if (member.computed !== true && member.id?.type === 'Identifier') {
 					declarePattern(member.id, enumScope);
 				}
@@ -905,7 +916,7 @@ export function createLexicalAnalysis(ast) {
 		return null;
 	};
 	const isBound = (scope, name) => resolveBinding(scope, name) !== null;
-	return {
+	analysis = Object.freeze({
 		bindingNodes,
 		commonJsSource,
 		nonReferenceNodes,
@@ -913,7 +924,9 @@ export function createLexicalAnalysis(ast) {
 		rootScope,
 		isBound,
 		resolveBinding,
-	};
+	});
+	lexicalAnalyses.set(ast, analysis);
+	return analysis;
 }
 
 export function isIdentifierReference(node, parent, key, lexicalAnalysis) {
@@ -1587,7 +1600,7 @@ function importSourceRanges(sources) {
 /** Validate a renderer-selected helper module without compiling or rewriting it. */
 export function validateRendererModuleSource(source, filename, renderer) {
 	if (renderer?.validation === undefined) return;
-	const ast = parseModule(source, filename);
+	const ast = adoptTemplateShape(parseModule(source, filename));
 	validateRendererAst(ast, filename, renderer);
 }
 
@@ -1718,10 +1731,12 @@ function isStaticallyPrimitiveTextExpression(node) {
 }
 
 function validateHostTemplates(ast, state, validation, isAuthored) {
+	const allowedTags = validation.allowedTags === undefined ? null : new Set(validation.allowedTags);
 	const textParents = validation.textParents === undefined ? null : new Set(validation.textParents);
 	const textHosts = validation.textHosts === undefined ? null : new Set(validation.textHosts);
 	const hostProps = validation.hostProps;
-	if (textParents === null && textHosts === null && hostProps === undefined) return;
+	if (allowedTags === null && textParents === null && textHosts === null && hostProps === undefined)
+		return;
 	const sharedProps = hostProps?.['*'] ?? [];
 	const seen = new WeakSet();
 	const visit = (node, nearestHost = null) => {
@@ -1772,6 +1787,13 @@ function validateHostTemplates(ast, state, validation, isAuthored) {
 			// the caller's nearest host through that semantic boundary; the component
 			// body is validated independently at the host site it actually authors.
 			const nextHost = isHost ? name : null;
+			if (isHost && allowedTags !== null && !allowedTags.has(name) && isAuthored(node)) {
+				throw universalError(
+					state.filename,
+					node,
+					`renderer ${JSON.stringify(state.renderer.id)} does not allow <${name}>.`,
+				);
+			}
 			if (
 				isHost &&
 				textHosts !== null &&
@@ -2602,6 +2624,37 @@ function componentShape(node, state) {
 		};
 	}
 	return null;
+}
+
+// `export default (function Name() @{…})` binds `Name` only inside the
+// component, so the rest of the module may bind or read `Name` on its own.
+// Reports whether it does: a module-scope binding of `Name`, or a read of
+// `Name` outside `component` that no scope binds, which a module binding of
+// `Name` would capture. Type-only declarations bind nothing at runtime.
+function moduleClaimsName(ast, name, component) {
+	const analysis = createLexicalAnalysis(ast);
+	const { nodeScopes, rootScope, isBound } = analysis;
+	if (rootScope.bindings.has(name)) return true;
+	let claimed = false;
+	const visit = (node, parent = null, key = null) => {
+		if (claimed || node === component || !node || typeof node !== 'object') return;
+		const reads =
+			node.name === name &&
+			(node.type === 'Identifier'
+				? isIdentifierReference(node, parent, key, analysis)
+				: node.type === 'JSXIdentifier' &&
+					(((parent?.type === 'JSXOpeningElement' || parent?.type === 'JSXClosingElement') &&
+						key === 'name' &&
+						isComponentElement(parent)) ||
+						(parent?.type === 'JSXMemberExpression' && key === 'object')));
+		if (reads && !isBound(nodeScopes.get(node) ?? rootScope, name)) {
+			claimed = true;
+			return;
+		}
+		forEachRuntimeAstChild(node, (child, childKey) => visit(child, node, childKey));
+	};
+	visit(ast);
+	return claimed;
 }
 
 function hasOwnTemplateReturn(fn) {
@@ -3966,6 +4019,17 @@ function emitComponentAst(shape, state) {
 	if (render === null) return null;
 	let name = shape.name ?? fn.id?.name;
 	if (!name) name = allocName(state, '__octaneUniversalDefault');
+	// The component's module binding. When the module claims a named default
+	// function expression's name, the binding takes a fresh one. The function
+	// keeps its own name, which its body's self-references and the component
+	// metadata resolve through.
+	const binding =
+		exportKind === 'default' &&
+		fn.type === 'FunctionExpression' &&
+		fn.id != null &&
+		moduleClaimsName(state.ast, name, fn)
+			? allocName(state, name)
+			: name;
 	const loc = fn.loc?.start;
 	state.components.push({
 		name,
@@ -4029,7 +4093,7 @@ function emitComponentAst(shape, state) {
 			[b.literal(state.renderer.id), wrapped],
 			fn,
 		);
-		state.hmrComponents.push({ name, exportKind, origin: fn });
+		state.hmrComponents.push({ name: binding, exportKind, origin: fn });
 	}
 	if (state.profile) {
 		const metadata = {
@@ -4043,7 +4107,7 @@ function emitComponentAst(shape, state) {
 		wrapped = generatedCall(state.helpers.profile, [wrapped, jsonValueToAst(metadata, fn)], fn);
 	}
 	const declaration = generatedConst(
-		name,
+		binding,
 		wrapped,
 		fn,
 		state.hmr && exportKind !== null ? 'let' : 'const',
@@ -4056,8 +4120,8 @@ function emitComponentAst(shape, state) {
 			declaration,
 			inheritGeneratedOrigin(
 				state.hmr
-					? b.export(null, [b.export_specifier(name, 'default')])
-					: b.export_default(generatedIdentifier(name, fn)),
+					? b.export(null, [b.export_specifier(binding, 'default')])
+					: b.export_default(generatedIdentifier(binding, fn)),
 				fn,
 			),
 		];
@@ -4307,8 +4371,10 @@ function buildUniversalHmrBlocksAst(state, origin) {
 	}
 	// Rspack only lowers the webpackHot root reliably. Vite's self-accept call
 	// must stay a direct import.meta.hot.accept(...) for its static analysis.
+	// The module owner and each renderer region allocate from separate name sets,
+	// so the names a region declares here carry its reserved prefix.
 	const webpack = state.hmrDialect === 'webpack';
-	const hotName = webpack ? allocName(state, '__octaneWebpackHot') : null;
+	const hotName = webpack ? allocName(state, `${state.planPrefix ?? '__octane'}WebpackHot`) : null;
 	const hot =
 		hotName === null ? importMetaMember('hot', origin) : generatedIdentifier(hotName, origin);
 	const prelude =
@@ -4321,7 +4387,7 @@ function buildUniversalHmrBlocksAst(state, origin) {
 	const save = b.stmt(b.assignment('=', store, hmrComponentObject(state, store, origin)));
 	const ready =
 		webpack && state.hmrComponents.length > 0 && disposals.length > 0
-			? allocName(state, '__octaneUniversalHmrComponentsReady')
+			? allocName(state, `${state.planPrefix ?? '__octaneUniversal'}HmrComponentsReady`)
 			: null;
 	if (ready !== null) prelude.push(generatedConst(ready, b.literal(false), origin, 'let'));
 	if (disposals.length > 0) {
@@ -4331,14 +4397,40 @@ function buildUniversalHmrBlocksAst(state, origin) {
 			...(ready === null ? [] : [b.if(b.id(ready), b.block([save]))]),
 			...disposals,
 		];
+		const disposeWith = (body) => b.stmt(b.call(b.member(hot, 'dispose'), b.arrow([data], body)));
+		// Vite runs only the last dispose handler a module registers, but the owner
+		// and each renderer region own thread functions. Each unit queues its
+		// cleanup on the persistent data and registers the same draining handler,
+		// so whichever registers last cleans up every unit.
+		const queue = (root) => b.member(root, '__octaneThreadDisposals');
+		const dispose = generatedIdentifier('dispose', origin);
 		prelude.push(
 			inheritGeneratedOrigin(
-				b.if(
-					hot,
-					b.block([
-						b.stmt(b.call(b.member(hot, 'dispose'), b.arrow([data], b.block(disposalBody)))),
-					]),
-				),
+				webpack
+					? b.if(hot, b.block([disposeWith(b.block(disposalBody))]))
+					: b.if(
+							b.logical('&&', hot, b.member(hot, 'data')),
+							b.block([
+								b.stmt(
+									b.call(
+										b.member(
+											b.assignment('??=', queue(b.member(hot, 'data')), b.array([])),
+											'push',
+										),
+										b.arrow([], b.block(disposals)),
+									),
+								),
+								disposeWith(
+									b.block([
+										b.for_of(
+											b.const(dispose, null),
+											b.call(b.member(queue(data), 'splice'), b.literal(0)),
+											b.stmt(b.call(dispose)),
+										),
+									]),
+								),
+							]),
+						),
 				origin,
 			),
 		);
@@ -4367,36 +4459,8 @@ function buildUniversalHmrBlocksAst(state, origin) {
 				),
 			);
 		}
-		const acceptArgs = [];
-		if (!webpack) {
-			const moduleName = allocName(state, '__octaneUniversalHmrModule');
-			const changedExports = state.hmrComponents
-				.map((component) =>
-					b.binary(
-						'!==',
-						b.member(
-							b.id(moduleName),
-							component.exportKind === 'default' ? 'default' : component.name,
-						),
-						b.id(component.name),
-					),
-				)
-				.reduce((left, right) => b.logical('||', left, right));
-			// The handoff already refreshed compatible exports. Missing or changed
-			// boundaries must invalidate rather than leave the previous owner live.
-			acceptArgs.push(
-				b.arrow(
-					[b.id(moduleName)],
-					b.block([
-						b.if(
-							b.logical('&&', b.id(moduleName), changedExports),
-							b.stmt(b.call(b.member(hot, 'invalidate'))),
-						),
-					]),
-				),
-			);
-		}
-		handoff.push(b.stmt(b.call(b.member(hot, 'accept'), ...acceptArgs)));
+		// The DOM compile that prints every module accepts once for all of its
+		// renderers, comparing these components beside the module's other exports.
 		tail.push(inheritGeneratedOrigin(b.if(hot, b.block(handoff)), origin));
 	}
 	return { prelude, tail };
@@ -4721,6 +4785,7 @@ export function lowerUniversalRendererRegionAst(
 				block: state.helpers.block,
 			}),
 			components: Object.freeze(state.components),
+			hmrComponents: Object.freeze(state.hmrComponents),
 			bindings: Object.freeze([...specializationBindings]),
 			generatedRuntimeAliases,
 			renderer,
@@ -4770,7 +4835,7 @@ export function compileUniversal(
 		throw new TypeError('Octane universal compiler requires a resolved universal renderer.');
 	}
 	const universalRuntime = normalizeUniversalRuntime(options.universalRuntime);
-	const ast = parsedAst ?? parseModule(source, filename);
+	const ast = parsedAst ?? adoptTemplateShape(parseModule(source, filename));
 	const hmrDialect = options.hmr === true ? 'vite' : options.hmr || false;
 	const state = {
 		source,
@@ -4790,6 +4855,7 @@ export function compileUniversal(
 		componentNames: collectComponentNames(ast),
 		contextSourceFacts: createContextSourceFacts(ast),
 		runtimeImports: new Map(),
+		ast,
 	};
 	state.explicitThreeHostIntrinsics = collectExplicitThreeHostIntrinsics(ast, renderer);
 	state.ownerFreeThreeHostComponents = collectOwnerFreeThreeHostComponents(
@@ -4866,6 +4932,7 @@ export function compileUniversal(
 			block: state.helpers.block,
 		},
 		components: state.components,
+		hmrComponents: state.hmrComponents,
 	};
 	const profileImport = universalProfileImportAst(state, moduleOrigin);
 	const threeHostIntrinsics = threeHostIntrinsicStatementsAst(state, moduleOrigin);

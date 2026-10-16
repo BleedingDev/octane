@@ -10,8 +10,10 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as ServerRT from 'octane/server';
-import * as ServerProvider from '@octanejs/mdx/server';
+// @ts-expect-error The shared fixture loader compiles the provider graph for SSR.
+import * as ServerProvider from './_fixtures/provider-server.ts?octane-ssr';
 import { compileMdxSync } from '@octanejs/mdx/compile';
+import type { MDXComponents } from '@octanejs/mdx';
 import { evalModuleCode } from './_helpers';
 
 const FIXTURES = join(process.cwd(), 'packages/mdx/tests/_fixtures');
@@ -34,6 +36,42 @@ function stripMarkers(html: string): string {
 }
 
 describe('SSR', () => {
+	it.each([undefined, ['h1'], []])(
+		'preserves server mapping precedence with overridable tags %j',
+		(overridableTags) => {
+			const { code } = compileMdxSync(
+				'# Heading\n\nA *word*.\n\n<h1>Literal</h1>\n\n<Widget>Named</Widget>',
+				'/docs/overrides.mdx',
+				{ mode: 'server', strong: true, overridableTags },
+			);
+			const Doc = evalModuleCode(code, {
+				'octane/server': ServerRT,
+				'@octanejs/mdx/server': ServerProvider,
+			}).default;
+			const { html } = ServerRT.renderToString(ServerProvider.MDXProvider as any, {
+				components: { h1: 'h2', em: 'i', Widget: 'strong', wrapper: 'section' },
+				children: ServerRT.createElement(Doc, {
+					components: {
+						h1: 'h3',
+						em: 'b',
+						Widget: 'small',
+						wrapper: (props: { children?: unknown }) =>
+							ServerRT.createElement('main', null, props.children),
+					},
+				}),
+			});
+			const flat = stripMarkers(html);
+			expect(flat).toContain(
+				overridableTags?.length === 0 ? '<h1>Heading</h1>' : '<h3>Heading</h3>',
+			);
+			expect(flat).toContain(overridableTags === undefined ? '<b>word</b>' : '<em>word</em>');
+			expect(flat).toContain('<h1>Literal</h1>');
+			expect(flat).toContain('<small>Named</small>');
+			expect(flat).toContain('<main>');
+			expect(flat).not.toContain('<section>');
+		},
+	);
+
 	it('renderToString renders a markdown document', () => {
 		const mod = serverModule('basic.mdx');
 		const { html } = ServerRT.renderToString(mod.default, {});
@@ -80,6 +118,57 @@ describe('SSR', () => {
 		const flat = stripMarkers(html);
 		expect(flat).toContain('<h3>Hello, MDX</h3>'); // prop wins
 		expect(flat).toContain('<i>emphasis</i>'); // context still applies
+	});
+
+	it.each([
+		{
+			name: 'merges an object over the parent',
+			components: { h1: 'h3' },
+			disableParentContext: false,
+			emphasis: 'i',
+		},
+		{
+			name: 'replaces the parent with a function result',
+			components: (inherited: MDXComponents) => {
+				expect(inherited).toEqual({ h1: 'h2', em: 'i' });
+				return { h1: 'h3' };
+			},
+			disableParentContext: false,
+			emphasis: 'em',
+		},
+		{
+			name: 'ignores the parent when disabled',
+			components: { h1: 'h3' },
+			disableParentContext: true,
+			emphasis: 'em',
+		},
+		{
+			name: 'passes an empty mapping to a function when disabled',
+			components: (inherited: MDXComponents) => {
+				expect(inherited).toEqual({});
+				return { h1: 'h3' };
+			},
+			disableParentContext: true,
+			emphasis: 'em',
+		},
+	])('nested MDXProvider $name', ({ components, disableParentContext, emphasis }) => {
+		const mod = serverModule('basic.mdx');
+		const { html } = ServerRT.renderToString(ServerProvider.MDXProvider as any, {
+			components: { h1: 'h2', em: 'i' },
+			children: ServerRT.createElement(ServerProvider.MDXProvider as any, {
+				components,
+				disableParentContext,
+				children: ServerRT.createElement(mod.default as any, {}),
+			}),
+		});
+		const flat = stripMarkers(html);
+		expect(flat).toContain('<h3>Hello, MDX</h3>');
+		expect(flat).toContain(`<${emphasis}>emphasis</${emphasis}>`);
+
+		// A later render outside a provider must not inherit this render's mapping.
+		const withoutProvider = stripMarkers(ServerRT.renderToString(mod.default, {}).html);
+		expect(withoutProvider).toContain('<h1>Hello, MDX</h1>');
+		expect(withoutProvider).toContain('<em>emphasis</em>');
 	});
 
 	// The provider route and the prop route produce the SAME payload — the

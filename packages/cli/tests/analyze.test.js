@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, symlinkSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createFixture, runCli } from './helpers/fixture.js';
@@ -113,13 +113,56 @@ export function Hint({ value }) @{
 	it('reports a file that will not parse as an error, and keeps going', async () => {
 		const result = await analyze({
 			'src/Broken.tsrx': 'export function Broken() @{ <div> }\n',
-			'src/Fine.tsrx': "export function Fine() @{ <div>{'ok' as string}</div> }\n",
+			'src/Bad.tsrx':
+				'export function Bad() @{\n\t<input type="text" value={\'a\' as string} onChange={() => {}} />\n}\n',
 		});
 
 		const report = result.json();
-		expect(report.summary).toEqual({ errors: 1, warnings: 0, hints: 0 });
+		expect(report.summary).toEqual({ errors: 1, warnings: 1, hints: 0 });
 		expect(report.analyzed).toBe(2);
-		expect(report.findings[0].code).toBe('OCTANE_PARSE_ERROR');
+		// The next file's findings survive the parse failure before it.
+		expect(report.findings).toEqual([
+			expect.objectContaining({
+				file: expect.stringMatching(/Broken\.tsrx$/),
+				code: 'OCTANE_PARSE_ERROR',
+			}),
+			expect.objectContaining({
+				file: expect.stringMatching(/Bad\.tsrx$/),
+				code: 'OCTANE_NATIVE_TEXT_ONCHANGE',
+			}),
+		]);
+		expect(result.exitCode).toBe(3);
+	});
+
+	it('points a parse failure at its position without repeating it in the message', async () => {
+		// A syntax error carries Acorn's `loc: { line, column }` and repeats it as a
+		// `(2:10)` message tail; a parser diagnostic with a range, such as two
+		// outputs in one code block, carries `loc: { start, end }` instead.
+		const result = await analyze({
+			'src/Syntax.tsrx': 'export function Syntax() @{\n\t<div>{1 +}</div>\n}\n',
+			'src/Outputs.tsrx': 'export function Outputs() @{\n\t<div />\n\t<span />\n}\n',
+		});
+
+		const findings = result.json().findings;
+		const finding = (/** @type {string} */ name) =>
+			findings.find((/** @type {{ file: string }} */ found) => found.file.endsWith(name));
+		expect(finding('Syntax.tsrx')).toEqual(
+			expect.objectContaining({
+				code: 'OCTANE_PARSE_ERROR',
+				line: 2,
+				column: 11,
+				message: 'Unexpected token',
+			}),
+		);
+		expect(finding('Outputs.tsrx')).toEqual(
+			expect.objectContaining({
+				code: 'OCTANE_PARSE_ERROR',
+				line: 3,
+				column: 2,
+				message:
+					"A code block renders a single node; wrap multiple nodes or text in a fragment '<>…</>'.",
+			}),
+		);
 		expect(result.exitCode).toBe(3);
 	});
 
@@ -259,6 +302,39 @@ describe('octane analyze Strong coverage', () => {
 		expect((await run(loose.root)).json().findings).toEqual([]);
 	});
 
+	it('applies compiler.strong to Octane .tsx found by default, not to React .tsx', async () => {
+		const effectUpdate =
+			"import { useState, useEffect } from 'octane';\n" +
+			'export function App({ value }) {\n' +
+			'  const [current, setCurrent] = useState(0);\n' +
+			'  useEffect(() => { setCurrent(value); });\n' +
+			'  return <p>{current}</p>;\n' +
+			'}\n';
+		const { root } = app({
+			...CONFIG_STRONG,
+			// tsconfig hands .tsx to React; only the pragma claims Island for Octane.
+			'tsconfig.json': { compilerOptions: { jsx: 'react-jsx', jsxImportSource: 'react' } },
+			'src/Host.tsx': effectUpdate,
+			'src/Island.tsx': `/** @jsxImportSource octane */\n${effectUpdate}`,
+		});
+
+		const report = (await run(root)).json();
+		expect(report.analyzed).toBe(1);
+		// Strong does not compile `.tsx`, so the module reports that first.
+		expect(report.findings).toEqual([
+			expect.objectContaining({
+				file: 'src/Island.tsx',
+				code: 'OCTANE_STRONG_TSX_MODULE',
+				line: 1,
+			}),
+			expect.objectContaining({
+				file: 'src/Island.tsx',
+				code: 'OCTANE_STRONG_EFFECT_STATE_UPDATE',
+				line: 5,
+			}),
+		]);
+	});
+
 	it('records every Octane module that compiles without Strong mode', async () => {
 		const { root } = app({
 			'tsconfig.json': { compilerOptions: { jsx: 'preserve', jsxImportSource: 'octane' } },
@@ -284,6 +360,8 @@ describe('octane analyze Strong coverage', () => {
 			'src/mixed.ts':
 				"import { type OctaneNode, useState } from 'octane';\nexport function useNode(): OctaneNode { return useState(null)[0]; }\n",
 			'src/math.ts': 'export const add = (a: number, b: number) => a + b;\n',
+			// A code sample's import is text, so the module never imports octane.
+			'src/sample.ts': "export const SAMPLE = `\nimport { useState } from 'octane';\n`;\n",
 			'src/env.d.ts': "import 'octane';\n",
 		});
 
@@ -440,5 +518,382 @@ describe('octane analyze Strong coverage', () => {
 		const result = await run(root, ['--strong-baseline', 'init', '--dry-run']);
 		expect(result.exitCode).toBe(0);
 		expect(existsSync(path.join(root, 'octane-strong-baseline.json'))).toBe(false);
+	});
+
+	it('lists the non-Strong Octane modules that Strong modules import from other packages', async () => {
+		const octane = { peerDependencies: { octane: '*' } };
+		const hook = (/** @type {string} */ name) =>
+			`import { useState } from 'octane';\nexport function ${name}() { return useState(0); }\n`;
+		const { root } = app({
+			'src/App.tsrx':
+				'"use strong";\n' +
+				"import { Button, Chart, Dialog, Menu, Sheet } from './ui';\n" +
+				"import Toolbar, { Badge, Fancy, Panel, Wrapped } from '@kit/panel';\n" +
+				"import { useStore } from '@kit/store';\n" +
+				"import { format } from 'plain';\n" +
+				"import { Local } from './Local';\n" +
+				// A code sample's imports are text, not dependencies.
+				'const SAMPLE = `\n' +
+				"import { ReactCompat } from 'octane/react';\n" +
+				"import { Extra } from '@kit/extra';\n" +
+				'`;\n' +
+				'export function App() @{ <Button /> }\n',
+			// The app's own barrel is followed through to the package it re-exports.
+			'src/ui.ts': "export * from '@kit/ui';\n",
+			'src/Local.tsrx': PLAIN,
+			'src/Bridge.tsrx': `"use strong";\nimport { ReactCompat } from 'octane/react';\n${PLAIN}`,
+			// Only Strong modules are followed.
+			'src/Loose.tsrx': `import { Extra } from '@kit/extra';\n${PLAIN}`,
+			'node_modules/@kit/ui/package.json': {
+				name: '@kit/ui',
+				...octane,
+				exports: {
+					'.': { types: './src/index.ts', require: './dist/index.cjs', import: './src/index.ts' },
+				},
+			},
+			// Only the modules that define a name App imports count, not every
+			// module the barrel re-exports.
+			'node_modules/@kit/ui/src/index.ts':
+				"export { Button } from './Button';\n" +
+				"export * from './dialog/index.js';\n" +
+				"export * from './hooks';\n" +
+				"export { Chart } from './Chart';\n" +
+				"export { Unused } from './Unused';\n" +
+				"export * as Menu from './Menu';\n",
+			'node_modules/@kit/ui/src/Button.tsx': 'export function Button() { return <button />; }\n',
+			'node_modules/@kit/ui/src/Menu.tsx':
+				"import { Item } from './MenuItem';\nexport function Root() { return <Item />; }\n",
+			// Menu's own import is its implementation, not something App imports.
+			'node_modules/@kit/ui/src/MenuItem.tsx': 'export function Item() { return <li />; }\n',
+			'node_modules/@kit/ui/src/dialog/index.ts':
+				"export { Dialog } from './Dialog';\nexport { Sheet } from './Sheet';\n",
+			'node_modules/@kit/ui/src/dialog/Sheet.tsx':
+				'export function Sheet() { return <aside />; }\n',
+			// A Strong dependency answers to the same rule, so what it imports counts.
+			'node_modules/@kit/ui/src/dialog/Dialog.tsrx':
+				'"use strong";\n' +
+				"import { Backdrop } from './Backdrop';\n" +
+				'export function Dialog() @{ <dialog><Backdrop /></dialog> }\n',
+			'node_modules/@kit/ui/src/dialog/Backdrop.tsx':
+				"import { ReactCompat } from 'octane/react';\nexport function Backdrop() { return <ReactCompat />; }\n",
+			'node_modules/@kit/ui/src/hooks.ts': `import { ReactCompat } from 'octane/react';\n${hook('useHidden')}`,
+			'node_modules/@kit/ui/src/Unused.tsx': 'export function Unused() { return <u />; }\n',
+			'node_modules/@kit/ui/src/Chart.tsx':
+				"import { ReactCompat } from 'octane/react';\nexport function Chart() { return <ReactCompat />; }\n",
+			'node_modules/@kit/panel/package.json': {
+				name: '@kit/panel',
+				...octane,
+				exports: './src/index.ts',
+			},
+			// An export that only renames an import passes its module on, as a
+			// re-export does. One that builds a new value is declared here, and
+			// what it builds from is its implementation.
+			'node_modules/@kit/panel/src/index.ts':
+				"import { memo } from 'octane';\n" +
+				"import * as Panels from './Panel.tsrx';\n" +
+				"import Toolbar from './Toolbar.tsrx';\n" +
+				// A comment's backticks are not code, even inside a clause.
+				"import {\n\t// the `Badge` export\n\tBadge as Pill,\n} from './Badge.tsrx';\n" +
+				"import { Internal } from './Internal.tsrx';\n" +
+				'export const Panel = Panels.Panel;\n' +
+				'export { Pill as Badge };\n' +
+				'export default Toolbar;\n' +
+				'export const Wrapped = memo(Internal);\n' +
+				"export { Fancy } from './Fancy.tsrx';\n",
+			// A tagged template builds a new value; it does not rename its tag.
+			'node_modules/@kit/panel/src/Fancy.tsrx':
+				"import { styled } from './styled';\nexport const Fancy = styled`color: red`;\n",
+			'node_modules/@kit/panel/src/styled.ts':
+				'export const styled = (strings: TemplateStringsArray) => () => strings;\n',
+			'node_modules/@kit/panel/src/Panel.tsrx': 'export function Panel() @{ <section /> }\n',
+			'node_modules/@kit/panel/src/Toolbar.tsrx':
+				'export default function Toolbar() @{ <nav /> }\n',
+			'node_modules/@kit/panel/src/Badge.tsrx': 'export function Badge() @{ <b /> }\n',
+			'node_modules/@kit/panel/src/Internal.tsrx': 'export function Internal() @{ <i /> }\n',
+			'node_modules/@kit/store/package.json': {
+				name: '@kit/store',
+				...octane,
+				exports: './src/index.ts',
+			},
+			'node_modules/@kit/store/src/index.ts': hook('useStore'),
+			'node_modules/@kit/extra/package.json': { name: '@kit/extra', ...octane, main: 'index.tsx' },
+			'node_modules/@kit/extra/index.tsx': 'export function Extra() { return <b />; }\n',
+			// Not an Octane package, so its .tsx is not Octane's to make Strong.
+			'node_modules/plain/package.json': { name: 'plain', main: 'index.js' },
+			'node_modules/plain/index.js': "export { format } from './format.tsx';\n",
+			'node_modules/plain/format.tsx': 'export const format = () => <b />;\n',
+		});
+
+		const result = await run(root, ['--strong-dependencies', '--strict']);
+		expect(result.exitCode).toBe(0);
+		expect(result.json().strongDependencies).toEqual({
+			packages: [
+				{
+					name: '@kit/panel',
+					modules: [
+						'src/Badge.tsrx',
+						'src/Fancy.tsrx',
+						'src/Panel.tsrx',
+						'src/Toolbar.tsrx',
+						'src/index.ts',
+					],
+					importers: ['src/App.tsrx'],
+				},
+				{ name: '@kit/store', modules: ['src/index.ts'], importers: ['src/App.tsrx'] },
+				{
+					name: '@kit/ui',
+					modules: [
+						'src/Button.tsx',
+						'src/Chart.tsx',
+						'src/Menu.tsx',
+						'src/dialog/Backdrop.tsx',
+						'src/dialog/Sheet.tsx',
+					],
+					importers: ['src/App.tsrx'],
+				},
+			],
+			reactCompat: [
+				{ package: '@kit/ui', module: 'src/Chart.tsx', importers: ['src/App.tsrx'] },
+				{ package: '@kit/ui', module: 'src/dialog/Backdrop.tsx', importers: ['src/App.tsrx'] },
+				{ package: 'analyzed', module: 'src/Bridge.tsrx', importers: ['src/Bridge.tsrx'] },
+			],
+		});
+	});
+
+	it('resolves Strong dependencies the way a client build does', async () => {
+		const component = (/** @type {string} */ name) =>
+			`export function ${name}() { return <b />; }\n`;
+		const { root } = app({
+			'src/App.tsrx':
+				'"use strong";\n' +
+				"import Kit, { Star, Pair, Duo, Broken } from '@kit/lib';\n" +
+				"import { Server } from '@kit/lib/server';\n" +
+				"import { Ring } from '@kit/lib/icons/ring';\n" +
+				PLAIN,
+			'node_modules/@kit/lib/package.json': {
+				name: '@kit/lib',
+				peerDependencies: { octane: '*' },
+				exports: {
+					// An array lists fallbacks in order.
+					'.': [{ import: './src/index.ts' }, './dist/index.cjs'],
+					// A matched null target excludes the export from client builds.
+					'./server': { browser: null, default: './src/Server.tsx' },
+					// The pattern with the longest prefix wins, whatever the key order.
+					'./*': { require: './dist/*.cjs' },
+					'./icons/*': './src/icons/*.tsx',
+				},
+			},
+			'node_modules/@kit/lib/src/index.ts':
+				"export * from './Star';\n" +
+				// `export *` never passes on a default export.
+				"export * from './Fallback';\n" +
+				"export { default } from './Kit';\n" +
+				"export { Pair } from './pair';\n" +
+				"export { Duo } from './duo';\n" +
+				"export { Broken } from './Broken';\n",
+			'node_modules/@kit/lib/src/Star.tsx': component('Star'),
+			'node_modules/@kit/lib/src/Fallback.tsx':
+				'export default function Fallback() { return <i />; }\n',
+			'node_modules/@kit/lib/src/Kit.tsx': 'export default function Kit() { return <u />; }\n',
+			// A second declarator, and a destructured name, are declared here.
+			'node_modules/@kit/lib/src/pair.tsx':
+				'export const Left = () => <i />, Pair = () => <b />;\n',
+			'node_modules/@kit/lib/src/duo.tsx': 'export const { Duo } = { Duo: () => <u /> };\n',
+			// A module that does not parse fails its own build and is left out.
+			'node_modules/@kit/lib/src/Broken.tsx':
+				'"use strong";\nexport function Broken() { return <div> }\n',
+			'node_modules/@kit/lib/src/Server.tsx': component('Server'),
+			'node_modules/@kit/lib/src/icons/ring.tsx': component('Ring'),
+		});
+
+		const result = await run(root, ['--strong-dependencies']);
+		expect(result.json().strongDependencies).toEqual({
+			packages: [
+				{
+					name: '@kit/lib',
+					modules: [
+						'src/Kit.tsx',
+						'src/Star.tsx',
+						'src/duo.tsx',
+						'src/icons/ring.tsx',
+						'src/pair.tsx',
+					],
+					importers: ['src/App.tsrx'],
+				},
+			],
+			reactCompat: [],
+		});
+	});
+});
+
+describe('octane analyze Strong migration', () => {
+	/**
+	 * @param {Record<string, string | object>} files
+	 */
+	function app(files) {
+		const created = project(files);
+		mkdirSync(path.join(created.root, 'node_modules'), { recursive: true });
+		symlinkSync(OCTANE, path.join(created.root, 'node_modules/octane'), 'dir');
+		return created;
+	}
+
+	/**
+	 * @param {string} root
+	 * @param {string[]} [extra]
+	 */
+	const run = (root, extra = []) => runCli(['analyze', '--cwd', root, ...extra, '--json']);
+
+	const CLOCK =
+		'"use strong";\n' +
+		'export function Clock() {\n' +
+		'  const now = Date.now();\n' +
+		'  const seed = Math.random();\n' +
+		'  return <span>{now}:{seed}</span>;\n' +
+		'}\n';
+
+	const CART =
+		"import { useCallback, useMemo, useRef, useState } from 'octane';\n" +
+		'class Store { add() {} }\n' +
+		'export function Cart({ items }: { items: number[] }) {\n' +
+		'  const store = useRef<Store | null>(null);\n' +
+		'  if (store.current === null) store.current = new Store();\n' +
+		'  const total = useMemo(() => items.reduce((a, b) => a + b, 0), [items]);\n' +
+		'  const add = useCallback(() => store.current?.add(), []);\n' +
+		'  const [open] = useState(false);\n' +
+		'  return <button onClick={add}>{String(total) + String(open)}</button>;\n' +
+		'}\n';
+
+	it('reports every Strong violation in a file, not only the first', async () => {
+		const result = await analyze({ 'src/Clock.tsrx': CLOCK });
+
+		expect(result.json().findings).toEqual([
+			expect.objectContaining({ code: 'OCTANE_STRONG_RENDER_IMPURE_CALL', line: 3 }),
+			expect.objectContaining({ code: 'OCTANE_STRONG_RENDER_IMPURE_CALL', line: 4 }),
+		]);
+		expect(result.json().findings[0].url).toBe(
+			'https://octanejs.dev/docs/strong-mode#octane-strong-render-impure-call',
+		);
+		expect(result.exitCode).toBe(3);
+	});
+
+	it('keeps Strong findings when code generation then fails', async () => {
+		const result = await analyze({
+			'src/Loop.tsrx':
+				'"use strong";\n' +
+				"import { useEffect, useState } from 'octane';\n" +
+				"import { observe } from './external';\n" +
+				'export function Loop({ value }) @{\n' +
+				'\tuseEffect(() => { observe(value); }, [value]);\n' +
+				'\tfor (const item of [1, 2]) {\n' +
+				'\t\tconst [current] = useState(item);\n' +
+				'\t}\n' +
+				'\t<div />\n' +
+				'}\n',
+		});
+
+		// Strong analysis passes the module with a hint, and slotting its hooks
+		// then throws. Neither hides the other.
+		expect(result.json().findings).toEqual([
+			expect.objectContaining({ code: 'OCTANE_STRONG_EXPLICIT_DEPENDENCIES', severity: 'hint' }),
+			expect.objectContaining({ code: 'OCTANE_COMPILE_ERROR', line: 7 }),
+		]);
+	});
+
+	it("analyzes Octane .tsx by default and leaves another framework's .tsx alone", async () => {
+		const { root } = app({
+			'tsconfig.json': { compilerOptions: { jsx: 'preserve', jsxImportSource: 'octane' } },
+			'src/Clock.tsx': CLOCK,
+			// Strong would reject this, but its JSX belongs to React.
+			'src/Host.tsx': `/** @jsxImportSource react */\n${CLOCK}`,
+		});
+
+		const report = (await run(root)).json();
+		expect(report.analyzed).toBe(1);
+		expect(new Set(report.findings.map((/** @type {{ file: string }} */ f) => f.file))).toEqual(
+			new Set(['src/Clock.tsx']),
+		);
+	});
+
+	it('previews what Strong would reject without failing the run', async () => {
+		const { root } = app({ 'src/Cart.tsx': CART });
+
+		const result = await run(root, ['--strong-preview']);
+		expect(result.exitCode).toBe(0);
+		expect(result.json().strongPreview).toEqual({
+			findings: 3,
+			modules: 1,
+			byCode: {
+				OCTANE_STRONG_TSX_MODULE: 1,
+				OCTANE_STRONG_RENDER_REF_READ: 1,
+				OCTANE_STRONG_RENDER_REF_WRITE: 1,
+			},
+		});
+		expect(result.json().findings.every((/** @type {{ preview?: true }} */ f) => f.preview)).toBe(
+			true,
+		);
+		// Without the preview the module is not Strong, so there is nothing to report.
+		expect((await run(root)).json().findings).toEqual([]);
+	});
+
+	it('applies the suggested rewrites with --fix, and writes nothing under --dry-run', async () => {
+		const { root } = app({ 'src/Cart.tsx': CART });
+		const file = path.join(root, 'src/Cart.tsx');
+
+		const dry = await run(root, ['--strong-preview', '--fix', '--dry-run']);
+		expect(dry.json().fixed).toEqual({ findings: 1, files: ['src/Cart.tsx'] });
+		expect(readFileSync(file, 'utf8')).toBe(CART);
+
+		const result = await run(root, ['--strong-preview', '--fix']);
+		expect(result.json().fixed).toEqual({ findings: 1, files: ['src/Cart.tsx'] });
+		expect(readFileSync(file, 'utf8')).toBe(
+			"import { useCallback, useMemo, useState, useLazyRef } from 'octane';\n" +
+				'class Store { add() {} }\n' +
+				'export function Cart({ items }: { items: number[] }) {\n' +
+				'  const store = useLazyRef(() => new Store());\n' +
+				'  const total = useMemo(() => items.reduce((a, b) => a + b, 0), [items]);\n' +
+				'  const add = useCallback(() => store.current?.add(), []);\n' +
+				'  const [open] = useState(false);\n' +
+				'  return <button onClick={add}>{String(total) + String(open)}</button>;\n' +
+				'}\n',
+		);
+		// What remains is reported from the rewritten module: only the `.tsx`
+		// module itself, which has to become `.tsrx` before it can be Strong.
+		expect(result.json().findings).toEqual([
+			expect.objectContaining({ code: 'OCTANE_STRONG_TSX_MODULE', preview: true }),
+		]);
+		expect(result.json().strongPreview.findings).toBe(1);
+	});
+
+	it('falls back to the first error with an older compiler that cannot collect', async () => {
+		// An installed octane from before collectDiagnostics exposes only
+		// compile(). The real compile() stands in for it, so the fallback reports
+		// the error that compile() actually throws.
+		const { root } = project({
+			'node_modules/octane/package.json': {
+				name: 'octane',
+				type: 'module',
+				exports: { './compiler': './compiler.js' },
+			},
+			'node_modules/octane/compiler.js': `export { compile } from ${JSON.stringify(
+				pathToFileURL(path.join(OCTANE, 'src/compiler/index.js')).href,
+			)};\n`,
+			'src/Clock.tsrx':
+				'"use strong";\n' +
+				'export function Clock() @{\n' +
+				'  const now = Date.now();\n' +
+				'  const seed = Math.random();\n' +
+				'  <span>{(String(now) + String(seed)) as string}</span>\n' +
+				'}\n',
+		});
+
+		const result = await runCli(['analyze', '--cwd', root, '--json']);
+		// Both clock reads are violations, but compile() throws only the first.
+		expect(result.json().findings).toEqual([
+			expect.objectContaining({ code: 'OCTANE_STRONG_RENDER_IMPURE_CALL', line: 3, column: 15 }),
+		]);
+		expect(result.exitCode).toBe(3);
+		// The report must not read as complete when it cannot be.
+		const text = await runCli(['analyze', '--cwd', root]);
+		expect(text.stdout + text.stderr).toContain('reports only the first error in each file');
 	});
 });

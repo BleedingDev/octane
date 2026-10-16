@@ -11,8 +11,8 @@
 // match — so the 404 lands inside the layout chrome.
 import { useContext, createElement, Suspense } from 'octane';
 import { rootRouteId } from '@tanstack/router-core';
-import { useStore } from './useStore.ts';
-import { useRouter, matchContext } from './context.ts';
+import { useStore } from './useStore';
+import { useRouter, matchContext } from './context';
 import { Match } from './Match.tsrx';
 import { RouteNotFound } from './RouteNotFound.tsrx';
 import { SafeFragment } from './SafeFragment.tsrx';
@@ -39,10 +39,8 @@ export function Outlet() @{
 	// whose fallback is the router's defaultPendingComponent (react-router's
 	// Outlet does the same) — the outermost pending UI for the initial load.
 	const DefaultPending = router.options.defaultPendingComponent;
-	const RootSuspense =
-		routeId === rootRouteId ? Suspense : SafeFragment;
-	const pendingElement =
-		DefaultPending ? createElement(DefaultPending, {}) : null;
+	const RootSuspense = routeId === rootRouteId ? Suspense : SafeFragment;
+	const pendingElement = DefaultPending ? createElement(DefaultPending, {}) : null;
 
 	@if (notFound.global) {
 		<RouteNotFound routeId={routeId} error={notFound.error} />

@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { Miniflare } from 'miniflare';
 import { build } from 'vite';
 
 const sourceRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -115,6 +116,7 @@ describe('built MCP handler', () => {
 			'octane_docs_read',
 			'octane_docs_search',
 			'octane_skill',
+			'octane_strong_explain',
 		]);
 	});
 
@@ -143,6 +145,18 @@ describe('built MCP handler', () => {
 		expect(payload.code).toContain('X');
 	});
 
+	it('explains a Strong diagnostic from the bundled catalog', async () => {
+		const call = await rpc(
+			'tools/call',
+			{ name: 'octane_strong_explain', arguments: { code: 'RENDER_REF_READ' } },
+			5,
+		);
+		const text = call.result.content[0].text as string;
+		expect(text).toMatch(/^# OCTANE_STRONG_RENDER_REF_READ\n/);
+		expect(text).toContain('useLazyRef');
+		expect(text).toContain('https://octanejs.dev/docs/strong-mode#recipe-lazy-ref');
+	});
+
 	it('serves the REST surface', async () => {
 		const index = await handler(new Request('http://localhost/v1/docs'));
 		expect(index.status).toBe(200);
@@ -165,5 +179,76 @@ describe('built MCP handler', () => {
 	it('404s unmatched paths', async () => {
 		const response = await handler(new Request('http://localhost/definitely/not/a/path'));
 		expect(response.status).toBe(404);
+	});
+});
+
+describe('built MCP Worker (Cloudflare adapter)', () => {
+	let workerRoot = '';
+	let worker: Miniflare;
+
+	beforeAll(async () => {
+		workerRoot = stageProject();
+		// Workers Builds sets WORKERS_CI, which selects the Cloudflare adapter.
+		const previous = process.env.WORKERS_CI;
+		process.env.WORKERS_CI = '1';
+		try {
+			await build({ root: workerRoot, logLevel: 'silent' });
+		} finally {
+			if (previous === undefined) delete process.env.WORKERS_CI;
+			else process.env.WORKERS_CI = previous;
+		}
+		const serverDir = path.join(workerRoot, 'dist/server');
+		worker = new Miniflare({
+			modules: true,
+			scriptPath: path.join(serverDir, 'worker.js'),
+			// workerd refuses module paths that climb out of its root, and the
+			// staged project lives under the OS temp directory.
+			modulesRoot: serverDir,
+			modulesRules: [{ type: 'ESModule', include: ['**/*.js'], fallthrough: true }],
+			compatibilityDate: '2026-07-14',
+			compatibilityFlags: ['nodejs_compat'],
+		});
+	}, 240_000);
+
+	afterAll(async () => {
+		await worker?.dispose();
+		if (workerRoot) fs.rmSync(workerRoot, { recursive: true, force: true });
+	});
+
+	async function workerRpc(method: string, params: unknown, id: number) {
+		const response = await worker.dispatchFetch(MCP_URL, {
+			method: 'POST',
+			headers: MCP_HEADERS,
+			body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+		});
+		expect(response.status).toBe(200);
+		return response.json() as Promise<any>;
+	}
+
+	it('starts in workerd and answers MCP initialize', async () => {
+		const initialize = await workerRpc(
+			'initialize',
+			{
+				protocolVersion: '2025-06-18',
+				capabilities: {},
+				clientInfo: { name: 'e2e', version: '0.0.0' },
+			},
+			1,
+		);
+		expect(initialize.result.serverInfo.name).toBe('octane');
+	});
+
+	it('compiles .tsrx through the bundled compiler inside workerd', async () => {
+		const call = await workerRpc(
+			'tools/call',
+			{
+				name: 'octane_compile',
+				arguments: { source: `export function X() @{ <div>{'hi'}</div> }` },
+			},
+			2,
+		);
+		const payload = JSON.parse(call.result.content[0].text);
+		expect(payload.ok).toBe(true);
+		expect(payload.code).toContain('X');
 	});
 });

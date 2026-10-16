@@ -1,4 +1,4 @@
-import type { ThreeElements as ThreeIntrinsicElements } from './core/catalogue.js';
+import type { ThreeKey, ThreeElements as ThreeIntrinsicElements } from './core/catalogue.js';
 
 export type {
 	Args,
@@ -35,4 +35,12 @@ export type {
 /** TypeScript resolves this namespace through the intrinsic jsx-runtime export. */
 export namespace JSX {
 	export interface IntrinsicElements extends ThreeIntrinsicElements {}
+	export interface ElementChildrenAttribute {
+		children: {};
+	}
+	// Every element accepts a key, components included (a keyed `@for` row
+	// places its key on the row's root).
+	export interface IntrinsicAttributes {
+		key?: ThreeKey;
+	}
 }

@@ -6,9 +6,6 @@
  * handful of repository-side decisions user-visible defects rather than house
  * style, and each of them has already let broken source ship (issue #721):
  *
- *   - Typechecking a package that ships `.tsrx` with `tsgo`. `tsgo` has no
- *     `.tsrx` support: it ignores those files and exits 0, so a binding's
- *     components are never checked at all.
  *   - Pinning `types: ["node"]` in the project that validates shipped source.
  *     The tsconfig `octane init` scaffolds has no `types` field and a browser
  *     application installs no `@types/node`, so `process.env.NODE_ENV` in
@@ -17,13 +14,18 @@
  *     The file ships unchecked.
  *   - Publishing a `.js` module with no sibling `.d.ts`. The consumer gets
  *     `any` (or an error under `noImplicitAny`) for our public API.
+ *   - Checking shipped `.ts` or `.tsrx` without `noUnusedLocals` and
+ *     `noUnusedParameters`. A consumer that enables either flag gets an unused
+ *     import, local, or parameter of ours reported in their program, and
+ *     `skipLibCheck` does not help (issue #1694). With both flags on in the
+ *     project that validates `src`, the root typecheck reports it first.
  *
- * Only the first rule is about what the root typecheck chain runs, so only it is
- * driven by parsing that chain. The other two tsconfig rules are about the file
- * a consumer's compile is measured against, which exists whether or not the
- * chain happens to name it, so they are driven by walking the workspace: a
- * package that validates through a package script, through a wrapper the chain
- * parser cannot read, or that the chain never reaches at all is still checked.
+ * Which checker runs which project is check-typecheck-coverage.mjs's concern.
+ * These rules are about the file a consumer's compile is measured against, which
+ * exists whether or not the root typecheck chain happens to name it, so they are
+ * driven by walking the workspace: a package that validates through a package
+ * script, through a wrapper the chain parser cannot read, or that the chain never
+ * reaches at all is still checked.
  *
  * Everything already broken is enumerated in SOURCE_PUBLICATION_DEBT below, so
  * this gate is green today and refuses anything new.
@@ -34,10 +36,10 @@ import { fileURLToPath } from 'node:url';
 import { getPublishablePackages, REPO_ROOT } from './workspace-packages.mjs';
 
 export const RULES = {
-	tsgo: 'tsrx-typechecked-by-tsgo',
 	nodeTypes: 'node-types-in-validation-tsconfig',
 	excluded: 'excluded-shipped-source',
 	untypedJavaScript: 'untyped-published-javascript',
+	unusedFlags: 'shipped-source-checked-without-unused-flags',
 };
 
 /**
@@ -52,7 +54,6 @@ export const RULES = {
  * Nothing may be added here without the issue that tracks the fix.
  */
 export const SOURCE_PUBLICATION_DEBT = {
-	[RULES.tsgo]: [],
 	// These validation projects still hand shipped source the Node globals a
 	// browser application does not have. Dropping `types: ["node"]` is the fix;
 	// where shipped source genuinely reads `process`, the source is the defect.
@@ -63,6 +64,16 @@ export const SOURCE_PUBLICATION_DEBT = {
 	// workspace: each validates through a package script or a wrapper the chain
 	// parser cannot follow, or the chain never names it. They are the same defect
 	// under the same issue, not a new class.
+	//
+	// email (`node:` imports in its Tailwind pipeline), ink (a terminal renderer
+	// on `node:` modules), opentui (@opentui/core types its renderer events
+	// through Node's EventEmitter), swr (`.cts` entries that call `require`), and
+	// wouter (its SSR tests reach `octane/server`, whose source uses Node's
+	// `process` and streams) declared no `types` and received every
+	// installed @types package from TypeScript 5.9's default, which octane-tsc
+	// emulated until #1731 made each project declare its types. Declaring the
+	// Node types they compile against surfaced them here; same issue, not a new
+	// class.
 	[RULES.nodeTypes]: [
 		'packages/adapter-cloudflare/tsconfig.typecheck.json',
 		'packages/adapter-vercel/tsconfig.typecheck.json',
@@ -86,12 +97,14 @@ export const SOURCE_PUBLICATION_DEBT = {
 		'packages/drei/tsconfig.json',
 		'packages/dropzone/tsconfig.json',
 		'packages/electron/tsconfig.json',
+		'packages/email/tsconfig.json',
 		'packages/embla-carousel/tsconfig.json',
 		'packages/floating-ui/tsconfig.json',
 		'packages/gsap/tsconfig.json',
 		'packages/hook-form/tsconfig.json',
 		'packages/i18next/tsconfig.json',
 		'packages/inertia/tsconfig.json',
+		'packages/ink/tsconfig.json',
 		'packages/lexical/tsconfig.json',
 		'packages/livestore/tsconfig.json',
 		'packages/lucide/tsconfig.json',
@@ -101,6 +114,7 @@ export const SOURCE_PUBLICATION_DEBT = {
 		'packages/mobx/tsconfig.json',
 		'packages/motion/tsconfig.json',
 		'packages/nuqs/tsconfig.json',
+		'packages/opentui/tsconfig.json',
 		'packages/pdf/tsconfig.json',
 		'packages/phosphor-icons/tsconfig.json',
 		'packages/popper/tsconfig.json',
@@ -119,20 +133,17 @@ export const SOURCE_PUBLICATION_DEBT = {
 		'packages/spring/tsconfig.json',
 		'packages/styled-components/tsconfig.json',
 		'packages/stylex/tsconfig.json',
+		'packages/swr/tsconfig.json',
 		'packages/tanstack-ai/tsconfig.json',
 		'packages/tanstack-devtools/tsconfig.json',
 		'packages/tanstack-form/tsconfig.json',
-		'packages/tanstack-hotkeys/tsconfig.json',
-		'packages/tanstack-pacer/tsconfig.json',
 		'packages/tanstack-query/tsconfig.json',
 		'packages/tanstack-router-ssr-query/tsconfig.octane.json',
 		'packages/tanstack-router/tsconfig.json',
 		'packages/tanstack-start/tsconfig.json',
 		'packages/tanstack-store/tsconfig.json',
-		'packages/tanstack-table/tsconfig.json',
 		'packages/tanstack-virtual/tsconfig.json',
 		'packages/tauri/tsconfig.json',
-		'packages/testing-library/tsconfig.json',
 		'packages/textarea-autosize/tsconfig.json',
 		'packages/three/tsconfig.json',
 		'packages/tiptap/tsconfig.json',
@@ -142,6 +153,7 @@ export const SOURCE_PUBLICATION_DEBT = {
 		'packages/vite-plugin-octane/tsconfig.typecheck.json',
 		'packages/wagmi/tsconfig.json',
 		'packages/window/tsconfig.json',
+		'packages/wouter/tsconfig.json',
 		'packages/zag/tsconfig.json',
 		'packages/zustand/tsconfig.json',
 	],
@@ -167,10 +179,13 @@ export const SOURCE_PUBLICATION_DEBT = {
 		'@octanejs/vite-plugin',
 		'create-octane',
 	],
+	[RULES.unusedFlags]: [],
 };
 
-const CHECKERS = new Set(['octane-tsc', 'tsgo', 'tsrx-tsc', 'tsc']);
-const TSRX_CHECKERS = new Set(['octane-tsc', 'tsrx-tsc']);
+const CHECKERS = new Set(['octane-tsc', 'tsrx-tsc', 'tsc']);
+const UNUSED_FLAGS = ['noUnusedLocals', 'noUnusedParameters'];
+const COMPILED_SOURCE = /\.(?:[cm]?ts|tsx|tsrx)$/;
+const DECLARATION_FILE = /\.d\.[cm]?ts$/;
 const JAVASCRIPT_MODULE = /\.[cm]?js$/;
 const TEST_MODULE = /\.(?:test|spec)\.[cm]?js$/;
 const TSCONFIG_FILE = /^tsconfig(?:\..+)?\.json$/;
@@ -362,14 +377,35 @@ function collectPackageRootProjects(pkg, chainProjects) {
 }
 
 /**
- * Pinned upstream provenance lanes compile vendored React sources with the
- * upstream compiler on purpose; `.tsrx` never reaches them.
+ * A project's compiler options with its relative `extends` chain applied. A
+ * package-name base is not followed: options it would supply read as unset, so
+ * the flags rule asks for them in a repository file instead of trusting one.
  */
-function isPinnedUpstreamProject(project, pkg) {
-	return toPosix(path.relative(pkg.directory, project))
-		.split('/')
-		.slice(0, -1)
-		.some((segment) => segment === 'audit' || segment.startsWith('upstream'));
+function effectiveCompilerOptions(project, seen = new Set()) {
+	if (seen.has(project) || !existsSync(project)) return {};
+	seen.add(project);
+	const config = readJson(project);
+	const inherited = [config.extends ?? []]
+		.flat()
+		.filter((base) => typeof base === 'string' && base.startsWith('.'))
+		.map((base) => {
+			const resolved = path.resolve(path.dirname(project), base);
+			return effectiveCompilerOptions(
+				resolved.endsWith('.json') ? resolved : `${resolved}.json`,
+				seen,
+			);
+		});
+	return Object.assign({}, ...inherited, config.compilerOptions);
+}
+
+/** Whether a project's own `files`/`include`, less its `exclude`, reach a source file. */
+function projectChecks(config, file) {
+	const specs = [
+		...(Array.isArray(config.files) ? config.files : []),
+		...(Array.isArray(config.include) ? config.include : []),
+	];
+	const included = !specs.length || specs.some((spec) => createSpecMatcher(spec)(file));
+	return included && !(config.exclude ?? []).some((entry) => createSpecMatcher(entry)(file));
 }
 
 export function findSourcePublicationViolations(
@@ -383,35 +419,12 @@ export function findSourcePublicationViolations(
 		if (!shipsSource(pkg)) continue;
 		const sourceFiles = collectSourceFiles(path.join(pkg.directory, 'src'));
 		const sourceFileSet = new Set(sourceFiles);
-		const publishesTsrx = sourceFiles.some((file) => file.endsWith('.tsrx'));
-		const packageProjects = [...projects.keys()].filter(
-			(project) => project.startsWith(`${pkg.directory}${path.sep}`) && existsSync(project),
-		);
+		const validationProjects = [];
 
-		// The tsgo rule is about what the chain actually runs, so it stays keyed to
-		// the chain.
-		for (const project of packageProjects.sort()) {
-			const checkers = projects.get(project);
-			if (
-				publishesTsrx &&
-				![...checkers].some((checker) => TSRX_CHECKERS.has(checker)) &&
-				!isPinnedUpstreamProject(project, pkg)
-			) {
-				violations.push({
-					rule: RULES.tsgo,
-					id: toPosix(path.relative(repo, project)),
-					detail: `${pkg.name} ships .tsrx, but this project runs ${[...checkers].join(
-						', ',
-					)}, which ignores .tsrx files and exits 0`,
-				});
-			}
-		}
-
-		// The tsconfig rules are about the project a consumer's compile is measured
-		// against, which exists whether or not the chain reaches it.
 		for (const project of collectPackageRootProjects(pkg, projects.keys())) {
 			const config = readJson(project);
 			if (!coversShippedSource(config, sourceFiles)) continue;
+			validationProjects.push({ project, config });
 			const id = toPosix(path.relative(repo, project));
 
 			const types = config.compilerOptions?.types;
@@ -436,6 +449,29 @@ export function findSourcePublicationViolations(
 					detail: `${pkg.name} excludes shipped source from validation: ${excluded.join(', ')}`,
 				});
 			}
+		}
+
+		// A consumer's compiler applies its unused-declaration flags to every `.ts`
+		// and `.tsrx` module of ours that its program reaches. JavaScript and
+		// declaration files give either flag nothing to check.
+		const flagged = validationProjects.filter(({ project }) => {
+			const options = effectiveCompilerOptions(project);
+			return UNUSED_FLAGS.every((flag) => options[flag] === true);
+		});
+		const unchecked = sourceFiles
+			.filter((file) => COMPILED_SOURCE.test(file) && !DECLARATION_FILE.test(file))
+			.filter((file) => !flagged.some(({ config }) => projectChecks(config, `src/${file}`)))
+			.sort();
+		if (unchecked.length) {
+			violations.push({
+				rule: RULES.unusedFlags,
+				id: pkg.name,
+				detail: `${unchecked.length} shipped module(s), starting with ${unchecked
+					.slice(0, 3)
+					.join(', ')}, are not in a package-root tsconfig that enables ${UNUSED_FLAGS.join(
+					' and ',
+				)}; a consumer that enables either flag compiles them`,
+			});
 		}
 
 		const untyped = sourceFiles

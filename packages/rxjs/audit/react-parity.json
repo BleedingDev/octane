@@ -35,9 +35,9 @@
       "node": ">=22",
       "platform": "any",
       "arch": "any",
-      "packageManager": "pnpm@11.15.1",
+      "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "91136aca7e454123147ee81e429398d60a872288b7ce288a72b4cfbf3c038dc2"
+      "lockfileSha256": "6df573d6aa854c122b0cea3e8c3be46fb67e3debe9ce0f329a773850bbd87706"
     }
   },
   "lanes": [
@@ -65,7 +65,7 @@
         {
           "path": "packages/rxjs/tests/_fixtures/parity.tsrx",
           "role": "support",
-          "sha256": "bade9a89853f40d2f82aeb04cd08c85829a2d9026ef780c545a61beadb3d6c53"
+          "sha256": "b3a5f06d80602ff13eb9989f6a4cd86fca209fe353e317f5b24353c6d42951e2"
         },
         {
           "path": "packages/rxjs/tests/differential/_setup.ts",

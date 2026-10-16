@@ -5,6 +5,7 @@ import {
 	useLayoutEffect,
 	useMemo,
 	useDeferredValue,
+	useSyncExternalStore,
 	Suspense as ResourceSuspense,
 	ErrorBoundary as ResourceErrorBoundary,
 } from 'octane';
@@ -98,7 +99,7 @@ export function CatchRejection(props) @{
 		} @pending {
 			<div class="fallback">{'loading'}</div>
 		} @catch (err) {
-			<div class="error">{'caught: ' + err.message as string}</div>
+			<div class="error">{('caught: ' + err.message) as string}</div>
 		}
 	</>
 }
@@ -112,7 +113,9 @@ export function RetryFromCatch(props) @{
 		} @pending {
 			<div class="fallback">{'loading'}</div>
 		} @catch (err, reset) {
-			<button id="retry" onClick={reset}>{'retry: ' + err.message as string}</button>
+			<button id="retry" onClick={reset}>
+				{('retry: ' + err.message) as string}
+			</button>
 		}
 	</>
 }
@@ -124,7 +127,7 @@ export function TwoUses(props) @{
 		@try {
 			const a = use(props.a);
 			const b = use(props.b);
-			<div class="both">{a + '/' + b as string}</div>
+			<div class="both">{(a + '/' + b) as string}</div>
 		} @pending {
 			<div class="fallback">{'loading'}</div>
 		}
@@ -133,7 +136,7 @@ export function TwoUses(props) @{
 
 // useDeferredValue + use() — the React-idiomatic stale-data pattern. When
 // `props.promise` changes, useDeferredValue returns the prior value for one
-// render, then commits the new value on a microtask. The first render reads
+// render, then commits the new value in a later task. The first render reads
 // the cached fulfilled state of the old promise (no suspend) and can flag
 // `isStale`; the deferred-commit render suspends on the new promise.
 export function DeferredSwap(props) @{
@@ -158,8 +161,10 @@ export function StateInsideTry(props) @{
 			const value = use(props.promise);
 			const [n, setN] = useState(0);
 			<div>
-				<span id="val">{value + ':' + n as string}</span>
-				<button id="inc" onClick={() => setN(n + 1)}>{'inc'}</button>
+				<span id="val">{(value + ':' + n) as string}</span>
+				<button id="inc" onClick={() => setN(n + 1)}>
+					{'inc'}
+				</button>
 			</div>
 		} @pending {
 			<div class="fallback">{'loading'}</div>
@@ -174,9 +179,12 @@ export function EffectAfterResolve(props) @{
 	<>
 		@try {
 			const value = use(props.promise);
-			useEffect((log) => {
-				log.push('mounted:' + value);
-			}, [props.log, value]);
+			useEffect(
+				(log) => {
+					log.push('mounted:' + value);
+				},
+				[props.log, value],
+			);
 			<div>{value as string}</div>
 		} @pending {
 			<div class="fallback">{'pending'}</div>
@@ -212,7 +220,7 @@ export function RejectVsPending(props) @{
 		} @pending {
 			<div class="fallback">{'p'}</div>
 		} @catch (err) {
-			<div class="caught">{'rejected: ' + err.message as string}</div>
+			<div class="caught">{('rejected: ' + err.message) as string}</div>
 		}
 	</>
 }
@@ -225,8 +233,10 @@ export function ReplayHookCache(props) @{
 			const [n, setN] = useState(0);
 			const value = use(props.promise);
 			<div>
-				<span id="val">{value + ':' + n as string}</span>
-				<button id="inc" onClick={() => setN(n + 1)}>{'inc'}</button>
+				<span id="val">{(value + ':' + n) as string}</span>
+				<button id="inc" onClick={() => setN(n + 1)}>
+					{'inc'}
+				</button>
 			</div>
 		} @pending {
 			<div class="fallback">{'loading'}</div>
@@ -245,16 +255,22 @@ export function EffectsSkippedForSuspended(props) @{
 		</li>
 		@try {
 			const v = use(props.promise);
-			useEffect((log) => {
-				log.push('B-mount');
-			}, [props.log, v]);
+			useEffect(
+				(log) => {
+					log.push('B-mount');
+				},
+				[props.log, v],
+			);
 			<li>
-				<span class="b">{'B:' + v as string}</span>
+				<span class="b">{('B:' + v) as string}</span>
 			</li>
 		} @pending {
-			useEffect((log) => {
-				log.push('fallback-mount');
-			}, [props.log]);
+			useEffect(
+				(log) => {
+					log.push('fallback-mount');
+				},
+				[props.log],
+			);
 			<li class="loading-li">{'Loading...'}</li>
 		}
 		<li>
@@ -270,10 +286,10 @@ export function NestedRevealOrder(props) @{
 		@try {
 			const a = use(props.a);
 			<div>
-				<span class="a-resolved">{'A:' + a as string}</span>
+				<span class="a-resolved">{('A:' + a) as string}</span>
 				@try {
 					const b = use(props.b);
-					<span class="b-resolved">{'B:' + b as string}</span>
+					<span class="b-resolved">{('B:' + b) as string}</span>
 				} @pending {
 					<span class="b-loading">{'B-loading'}</span>
 				}
@@ -291,7 +307,7 @@ function LeafA(props) @{
 	<>
 		@try {
 			const v = use(props.p);
-			<li class="leaf-a">{'A:' + v as string}</li>
+			<li class="leaf-a">{('A:' + v) as string}</li>
 		} @pending {
 			<li class="leaf-a-loading">{'A-loading'}</li>
 		}
@@ -302,7 +318,7 @@ function LeafB(props) @{
 	<>
 		@try {
 			const v = use(props.p);
-			<li class="leaf-b">{'B:' + v as string}</li>
+			<li class="leaf-b">{('B:' + v) as string}</li>
 		} @pending {
 			<li class="leaf-b-loading">{'B-loading'}</li>
 		}
@@ -330,7 +346,7 @@ export function ParallelInOneBoundary(props) @{
 			const [pa, pb] = useMemo(() => [props.startA(), props.startB()], [props.cacheKey]);
 			const a = use(pa);
 			const b = use(pb);
-			<div class="both">{a + '/' + b as string}</div>
+			<div class="both">{(a + '/' + b) as string}</div>
 		} @pending {
 			<div class="fallback">{'loading'}</div>
 		}
@@ -347,7 +363,7 @@ export function WaterfallBody(props) @{
 		@try {
 			const a = use(props.startA());
 			const b = use(props.startB());
-			<div class="both">{a + '/' + b as string}</div>
+			<div class="both">{(a + '/' + b) as string}</div>
 		} @pending {
 			<div class="fallback">{'loading'}</div>
 		}
@@ -365,11 +381,43 @@ export function ReplayChurnBody(props) @{
 			props.onAttempt();
 			const a = use(props.a);
 			const b = use(props.b);
-			<div class="both">{a + '/' + b as string}</div>
+			<div class="both">{(a + '/' + b) as string}</div>
 		} @pending {
 			<div class="fallback">{'loading'}</div>
 		}
 	</>
+}
+
+// `source.promise` may mint a fresh promise on every read. A member read is
+// batched but not memoized, so each replay reaches the batch with a new promise.
+function BatchedSourceReader(props) @{
+	const value = use(props.source.promise);
+	<b>{value as string}</b>
+}
+
+// A custom hook's use() runs between the two batched unwraps, so it takes the
+// call position after the first one.
+function useLabel(label) {
+	return use(label);
+}
+
+function BatchedPairReader(props) @{
+	const first = use(props.first.promise);
+	const label = useLabel(props.label);
+	const second = use(props.second.promise);
+	<b>{(first + '/' + label + '/' + second) as string}</b>
+}
+
+export function BatchedFreshPromiseResume(props) @{
+	@try {
+		@if (props.pair) {
+			<BatchedPairReader first={props.first} label={props.label} second={props.second} />
+		} @else {
+			<BatchedSourceReader source={props.first} />
+		}
+	} @pending {
+		<p>{'pending'}</p>
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -433,4 +481,67 @@ export function CommittedThenNewSibling(props) @{
 			<li class="fallback">{'loading'}</li>
 		}
 	</ul>
+}
+
+// A use() behind a condition shifts the call order of every use() after it.
+// When the condition flips in the same task that resolves the suspension, the
+// replay's first use() call is a different call than the stored first entry.
+function ConditionalUseBody(props) @{
+	const on = useSyncExternalStore(props.toggle.subscribe, props.toggle.read);
+	const first = on ? use(props.first) : 'off';
+	const second = use(props.second);
+	<i>{(first + '/' + second) as string}</i>
+}
+
+function ConditionalUseChild(props) @{
+	const first = props.on ? use(props.first) : 'off';
+	const second = use(props.second);
+	<i>{(first + '/' + second) as string}</i>
+}
+
+// The store lives in the parent, so the child's condition arrives as a prop.
+function ConditionalUseParent(props) @{
+	const on = useSyncExternalStore(props.toggle.subscribe, props.toggle.read);
+	<ConditionalUseChild on={on} first={props.first} second={props.second} />
+}
+
+export function ConditionalUseResume(props) @{
+	@try {
+		<section>
+			@if (props.viaProps) {
+				<ConditionalUseParent first={props.first} second={props.second} toggle={props.toggle} />
+			} @else {
+				<ConditionalUseBody first={props.first} second={props.second} toggle={props.toggle} />
+			}
+		</section>
+	} @pending {
+		<p>{'pending'}</p>
+	}
+}
+
+function StoreLabel(props) @{
+	const on = useSyncExternalStore(props.toggle.subscribe, props.toggle.read);
+	<i>{(on ? 'on' : 'off') as string}</i>
+}
+
+// `source.promise` may mint a fresh promise on every read. Reading it in a
+// custom hook keeps the compiler from memoizing or batching that read.
+function useSourceValue(source) {
+	return use(source.promise);
+}
+
+function FreshPromiseReader(props) @{
+	const value = useSourceValue(props.source);
+	<b>{value as string}</b>
+}
+
+export function UpdatedSiblingResume(props) @{
+	@try {
+		<section>
+			<StoreLabel toggle={props.toggle} />
+			<FreshPromiseReader source={props.source} />
+		</section>
+	} @pending {
+		<p>{'pending'}</p>
+	}
 }

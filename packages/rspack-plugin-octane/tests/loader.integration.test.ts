@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -416,12 +418,57 @@ describe('loader with the neutral compiler', () => {
 		const source =
 			"import { createRoot } from 'octane';\n" +
 			"import Main from './Main.tsrx';\n" +
-			'createRoot(document.body).render(Main);\n';
+			'export function mount(container) {\n' +
+			'\tconst root = createRoot(container);\n' +
+			'\troot.render(Main);\n' +
+			'\treturn () => root.unmount();\n' +
+			'}\n';
 		const resourcePath = write(root, 'src/main.js', source);
 		const result = transform({ root, resourcePath, source, mode: 'production' });
 
-		expect(result.content).toBe(source);
 		expect(result.dependencies).not.toContain(join(root, 'src/Main.tsrx'));
+		// A later loader can replace the disk component with one that returns a value.
+		const generated = evaluateCompiledFixtureCode<{
+			mount(container: HTMLElement): () => void;
+		}>(String(result.content), resourcePath, 'client', {
+			'./Main.tsrx': { default: () => 'replacement value' },
+		});
+		const container = document.createElement('div');
+		const unmount = generated.mount(container);
+		try {
+			expect(container.textContent).toBe('replacement value');
+		} finally {
+			unmount();
+		}
+		expect(container.childNodes).toHaveLength(0);
+	});
+
+	it('keeps unstored production roots off the void contract when the loader cannot prove resolved module output', () => {
+		write(
+			root,
+			'src/Main.tsrx',
+			'export default function Main() @{ <main>disk component</main> }\n',
+		);
+		const source =
+			"import { createRoot } from 'octane';\n" +
+			"import Main from './Main.tsrx';\n" +
+			'export function mount(container) {\n' +
+			'\tcreateRoot(container).render(Main);\n' +
+			'}\n';
+		const resourcePath = write(root, 'src/main.js', source);
+		const result = transform({ root, resourcePath, source, mode: 'production' });
+
+		expect(result.dependencies).not.toContain(join(root, 'src/Main.tsrx'));
+		// A later loader can replace the disk component with one that returns a value.
+		const generated = evaluateCompiledFixtureCode<{ mount(container: HTMLElement): void }>(
+			String(result.content),
+			resourcePath,
+			'client',
+			{ './Main.tsrx': { default: () => 'replacement value' } },
+		);
+		const container = document.createElement('div');
+		generated.mount(container);
+		expect(container.textContent).toBe('replacement value');
 	});
 
 	it('keeps production watch builds syntax-only and out of the persistent module cache', () => {

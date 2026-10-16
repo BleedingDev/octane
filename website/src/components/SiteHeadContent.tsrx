@@ -1,6 +1,14 @@
-import { createElement, useEffect, useId } from 'octane';
-import { Asset, DEV_STYLES_ATTR, useHydrated, useTags } from '@octanejs/tanstack-router';
-import type { AssetProps, RouterManagedTag } from '@octanejs/tanstack-router';
+'use strong';
+
+import { useEffect, useId } from 'octane';
+import {
+	Asset,
+	DEV_STYLES_ATTR,
+	getAssetKeys,
+	useHydrated,
+	useTags,
+} from '@octanejs/tanstack-router/compiled';
+import type { RouterManagedTag } from '@octanejs/tanstack-router/compiled';
 
 // The router's <HeadContent />, minus the manifest's `modulepreload` hints.
 //
@@ -17,20 +25,21 @@ function isModulePreload(tag: RouterManagedTag) {
 	return tag.tag === 'link' && tag.attrs?.rel === 'modulepreload';
 }
 
-function assetIdentity(tag: RouterManagedTag, index: number) {
-	const identity = JSON.stringify({ tag: tag.tag, attrs: tag.attrs, children: tag.children });
-	return `head:${index}:${identity}`;
-}
-
 export function SiteHeadContent() @{
 	const owner = useId();
 	const hydrated = useHydrated();
 	const tags = useTags().filter(
 		(tag) =>
 			!isModulePreload(tag) &&
-				!(process.env.NODE_ENV !== 'production' && hydrated && tag.tag === 'link' &&
-					tag.attrs?.[DEV_STYLES_ATTR] === true),
+			!(
+				process.env.NODE_ENV !== 'production' &&
+				hydrated &&
+				tag.tag === 'link' &&
+				tag.attrs?.[DEV_STYLES_ATTR] === true
+			),
 	);
+	const keys = getAssetKeys('head', owner, tags);
+	const assets = tags.map((tag, index) => ({ ...tag, ...keys[index]! }));
 
 	// Dev-only: drop the dev stylesheet links once hydrated, as <HeadContent />
 	// does.
@@ -39,18 +48,11 @@ export function SiteHeadContent() @{
 			return;
 		}
 		document.querySelectorAll(`link[${DEV_STYLES_ATTR}]`).forEach((element) => element.remove());
-	}, [hydrated]);
+	});
 
 	<>
-		{tags.map(
-			(tag, index) => createElement<AssetProps & { key?: string }>(Asset, {
-				...tag,
-				// A short, position-scoped key keeps the rendered
-				// data-tsr-managed-key attribute small; `key` carries identity.
-				assetKey: `head:${owner}:${index.toString(36)}`,
-				target: 'head',
-				key: assetIdentity(tag, index),
-			}),
-		)}
+		@for (const asset of assets; key asset.assetKey) {
+			<Asset {...asset} target="head" />
+		}
 	</>
 }

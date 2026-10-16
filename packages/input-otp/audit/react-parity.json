@@ -37,9 +37,9 @@
       "node": ">=22",
       "platform": "any",
       "arch": "any",
-      "packageManager": "pnpm@11.15.1",
+      "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "91136aca7e454123147ee81e429398d60a872288b7ce288a72b4cfbf3c038dc2"
+      "lockfileSha256": "6df573d6aa854c122b0cea3e8c3be46fb67e3debe9ce0f329a773850bbd87706"
     }
   },
   "lanes": [
@@ -282,7 +282,7 @@
         {
           "path": "packages/input-otp/typetests/tsconfig.json",
           "role": "support",
-          "sha256": "8576907e90b92f96e9714a27549ec16e3161e04fdd66907de6446b3709f20d32"
+          "sha256": "fd45b07fd3eb2c4c4a915b59540c6d7b4988f090edebf86847f5615be2739952"
         }
       ]
     }

@@ -2,10 +2,12 @@
 // state provenance; this policy owns the questions it asks about effect setup:
 // which platform calls run their callback before the next paint, whether an
 // asynchronous state update is cancelled or ignored by the returned cleanup,
-// whether a platform resource acquired in setup is released, and which refs are
-// plain values rather than attached instances. Identity comes from the shared
-// lexical analysis, never from spelling. Nothing here annotates the parser tree
-// or changes emitted code.
+// whether a platform resource acquired in setup is released, and which refs hold
+// an element attached by an intrinsic element's `ref`. Identity comes from the
+// shared lexical analysis, never from spelling. Nothing here annotates the
+// parser tree or changes emitted code.
+
+import { REF_HOOKS } from './hook-names.js';
 
 export const STRONG_EFFECT_DATA_FETCH = 'OCTANE_STRONG_EFFECT_DATA_FETCH';
 export const STRONG_EFFECT_HIDDEN_DEPENDENCY = 'OCTANE_STRONG_EFFECT_HIDDEN_DEPENDENCY';
@@ -52,23 +54,10 @@ const OBSERVERS = new Set([
 	'PerformanceObserver',
 ]);
 const CLOSABLES = new Set(['WebSocket', 'EventSource', 'BroadcastChannel']);
-const DEPENDENCY_ARGUMENTS = new Map([
-	['useEffect', 1],
-	['useLayoutEffect', 1],
-	['useInsertionEffect', 1],
-	['useMemo', 1],
-	['useCallback', 1],
-	['useImperativeHandle', 2],
-]);
 const UNKNOWN = Symbol('unknown');
 
-const HIDDEN_MESSAGES = {
-	getter:
-		'Strong mode does not allow effect setup to call a state getter. The getter hides the state from dependency inference, so the effect does not re-run when it changes. Read the render snapshot instead, or move the non-reactive read into a useEffectEvent callback.',
-	ref: "Strong mode does not allow effect setup to read a value ref's current property. The ref hides the value from dependency inference, so the effect does not re-run when it changes. Read the render snapshot instead, or move the non-reactive read into a useEffectEvent callback. Octane never double-invokes effects, and an effect without reactive inputs runs once per mount, so first-run and didInit guards are unnecessary.",
-	module:
-		'Strong mode does not allow effect setup to read a reassigned module variable. The variable hides the value from dependency inference and is shared by every instance. Keep the value in state, a prop, or context and read its snapshot, or move the non-reactive read into a useEffectEvent callback. Octane never double-invokes effects, so didInit guards are unnecessary.',
-};
+const HIDDEN_MESSAGE =
+	'Strong mode does not allow effect setup to read a reassigned module variable. The variable hides the value from dependency inference and is shared by every instance. Keep the value in state, a prop, or context and read its snapshot, or move the non-reactive read into a useEffectEvent callback. Octane never double-invokes effects, so didInit guards are unnecessary.';
 const FETCH_MESSAGES = {
 	missing:
 		'Strong mode requires cleanup for a state update that runs after an await or promise callback in an effect. Read asynchronous render data with use() or a query binding. For external synchronization, pass an AbortController signal to the request and abort it in the returned cleanup, or set a flag in the cleanup and check it before this update.',
@@ -76,6 +65,13 @@ const FETCH_MESSAGES = {
 		'Strong mode requires cleanup for a state update that runs after an await in an effect, but an async effect callback returns a promise instead of cleanup. Read asynchronous render data with use() or a query binding, or start the async work inside a synchronous effect whose returned cleanup aborts it or sets a flag checked before this update.',
 	ineffective:
 		'Strong mode requires the effect cleanup to cancel or ignore this asynchronous state update, but the returned cleanup does neither. Abort an AbortController whose signal is passed to the request, or set a flag in the cleanup and check it before this update, after the last await.',
+};
+// A useLayoutSnapshot measurement is checked like effect setup, but its return
+// value is the snapshot, so the cleanup advice above does not apply to it.
+const SNAPSHOT_MESSAGES = {
+	fetch:
+		'Strong mode does not allow a useLayoutSnapshot measurement to update state after an await or promise callback. Its return value is the snapshot, so it cannot return cleanup that cancels the update. Read asynchronous render data with use() or a query binding, or start the request in an effect whose returned cleanup aborts it.',
+	leak: "Strong mode does not allow a useLayoutSnapshot measurement to acquire this platform resource. Its return value is the snapshot, not cleanup, so nothing can release it. Acquire the resource in an effect and release it in that effect's returned cleanup.",
 };
 const LEAK_MESSAGES = {
 	listener:
@@ -1061,9 +1057,8 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 	}
 
 	// One module walk classifies every useRef binding: refs attached through a
-	// `ref` attribute of an intrinsic element are host refs, and any use other
-	// than a property access or a stable alias makes a ref an escaped instance.
-	// It also records which declaration or assignment target owns a call result.
+	// `ref` attribute of an intrinsic element are host refs. It also records
+	// which declaration or assignment target owns a call result.
 	function refs() {
 		if (references !== null) return references;
 		// Ownership keys must not depend on the call being visited.
@@ -1080,13 +1075,16 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 		references = {
 			roots: new Set(),
 			aliases: new Map(),
-			declarations: new Map(),
-			escaped: new Set(),
 			host: new Set(),
 			owners: new WeakMap(),
 		};
-		const { roots, aliases, declarations, owners } = references;
+		const { roots, aliases, owners } = references;
 		const names = new Set();
+		const callbackAssignments = new WeakMap();
+		const callbackCandidates = new Map();
+		const refAttributes = [];
+		const attachedHosts = new Set();
+		const invalidAttachments = new Set();
 		// A stored value may come from either arm of a conditional or logical
 		// expression, as in `const id = enabled ? setInterval(tick, ms) : null`.
 		const own = (value, key) => {
@@ -1107,9 +1105,8 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 			const init = unwrap(decl.init);
 			const binding = bindings[0]?.binding;
 			if (decl.id?.type === 'Identifier' && binding && !binding.reassigned) {
-				if (init?.type === 'CallExpression' && callNames.get(init) === 'useRef') {
+				if (init?.type === 'CallExpression' && REF_HOOKS.has(callNames.get(init))) {
 					roots.add(binding);
-					declarations.set(decl.id, binding);
 					names.add(binding.name);
 				}
 			}
@@ -1137,7 +1134,6 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 				const root = target && (aliases.get(target) ?? (roots.has(target) ? target : null));
 				if (root) {
 					aliases.set(binding, root);
-					declarations.set(decl.id, root);
 					names.add(binding.name);
 					changed = true;
 				}
@@ -1154,6 +1150,17 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 				const key = keyOf(node.left);
 				if (key !== null) own(node.right, key);
 			}
+			if (
+				roots.size !== 0 &&
+				node.type === 'JSXAttribute' &&
+				node.name?.name === 'ref' &&
+				node.value?.type === 'JSXExpressionContainer'
+			) {
+				const opening = parents.at(-1);
+				const name = opening?.type === 'JSXOpeningElement' ? opening.name : null;
+				const host = name?.type === 'JSXIdentifier' && /^[a-z]/.test(name.name);
+				refAttributes.push({ expression: node.value.expression, host });
+			}
 			if (node.type === 'Identifier' && names.has(node.name)) classify(node, parents);
 			parents.push(node);
 			for (const key in node) {
@@ -1162,7 +1169,254 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 			parents.pop();
 		};
 		visit(ast);
+		for (const { expression, host } of refAttributes) {
+			attachCallbacks(expression, host);
+		}
+		checkCallbackUses();
+		for (const root of attachedHosts) {
+			if (!invalidAttachments.has(root)) references.host.add(root);
+		}
 		return references;
+
+		// Follow only actual ref values; a callback supplied to another prop is
+		// not evidence that its captured refs receive an attached instance.
+		function attachCallbacks(expression, host) {
+			const value = unwrap(expression);
+			if (value == null) return;
+			if (value.type === 'ArrayExpression') {
+				for (const entry of value.elements) attachCallbacks(entry, host);
+				return;
+			}
+			if (value.type === 'ConditionalExpression') {
+				const only = selected(value);
+				if (only !== null) return attachCallbacks(only, host);
+				attachCallbacks(value.consequent, host);
+				attachCallbacks(value.alternate, host);
+				return;
+			}
+			if (value.type === 'LogicalExpression') {
+				const only = selected(value);
+				if (only !== null) return attachCallbacks(only, host);
+				if (value.operator !== '&&') attachCallbacks(value.left, host);
+				attachCallbacks(value.right, host);
+				return;
+			}
+			if (value.type === 'SequenceExpression') {
+				attachCallbacks(value.expressions?.at(-1), host);
+				return;
+			}
+			const callback = functionOf(value);
+			if (callback === null || callback.async || callback.generator) return;
+			const assignments = callbackRefs(callback);
+			for (const root of assignments.good) {
+				if (host) attachedHosts.add(root);
+				let candidate = callbackCandidates.get(callback);
+				if (!candidate) callbackCandidates.set(callback, (candidate = new Set()));
+				candidate.add(root);
+			}
+			for (const root of assignments.bad) {
+				invalidAttachments.add(root);
+			}
+		}
+
+		function callbackRefs(callback) {
+			const cached = callbackAssignments.get(callback);
+			if (cached) return cached;
+			const result = { good: new Set(), bad: new Set() };
+			callbackAssignments.set(callback, result);
+			const parameter = parametersOf(callback)[0];
+			if (!parameter || parameter.reassigned) return result;
+			const fromParameter = (expression) => {
+				let value = unwrap(expression);
+				for (let depth = 0; value?.type === 'Identifier' && depth < 16; depth++) {
+					const binding = bindingOf(value);
+					if (!binding || binding.reassigned) return false;
+					if (binding === parameter) return true;
+					value = stableInit(binding);
+				}
+				return false;
+			};
+			const write = (target, value, direct, cleanup) => {
+				target = unwrap(target);
+				if (target?.type === 'MemberExpression') {
+					const object = unwrap(target.object);
+					const binding = object?.type === 'Identifier' ? bindingOf(object) : null;
+					const root = binding && (aliases.get(binding) ?? (roots.has(binding) ? binding : null));
+					if (!root) return;
+					const property = memberName(target);
+					if (property !== 'current' && property !== null) return;
+					if (property === 'current' && direct && fromParameter(value)) result.good.add(root);
+					else if (
+						property === 'current' &&
+						(direct || cleanup) &&
+						value &&
+						staticValue(value) == null
+					) {
+						// A callback or its returned cleanup may clear the instance.
+					} else result.bad.add(root);
+				} else if (target?.type === 'ArrayPattern') {
+					for (const element of target.elements) write(element, null, false, false);
+				} else if (target?.type === 'ObjectPattern') {
+					for (const property of target.properties) {
+						write(
+							property.type === 'RestElement' ? property.argument : property.value,
+							null,
+							false,
+							false,
+						);
+					}
+				} else if (target?.type === 'AssignmentPattern') {
+					write(target.left, null, false, false);
+				} else if (target?.type === 'RestElement') {
+					write(target.argument, null, false, false);
+				}
+			};
+			const scan = (node, nested = false, cleanup = false, loop = false) => {
+				if (node == null || typeof node !== 'object') return;
+				if (Array.isArray(node)) {
+					for (const child of node) {
+						scan(child, nested, cleanup, loop);
+						if (child?.type === 'ReturnStatement' || child?.type === 'ThrowStatement') break;
+					}
+					return;
+				}
+				if (FUNCTIONS.has(node.type)) {
+					nested = true;
+					cleanup = false;
+				}
+				if (node.type === 'ForOfStatement' || node.type === 'ForInStatement') {
+					write(node.left, null, false, false);
+				}
+				loop ||= [
+					'ForStatement',
+					'ForOfStatement',
+					'ForInStatement',
+					'WhileStatement',
+					'DoWhileStatement',
+					'SwitchStatement',
+				].includes(node.type);
+				if (node.type === 'AssignmentExpression')
+					write(
+						node.left,
+						node.right,
+						node.operator === '=' && !nested && !loop,
+						node.operator === '=' && cleanup && !loop,
+					);
+				if (
+					node.type === 'UpdateExpression' ||
+					(node.type === 'UnaryExpression' && node.operator === 'delete')
+				) {
+					write(node.argument, null, false, false);
+				}
+				const returned = node.type === 'ReturnStatement' && !nested ? unwrap(node.argument) : null;
+				if (FUNCTIONS.has(returned?.type) && !returned.async && !returned.generator) {
+					scan(returned.body, true, true, loop);
+				} else if (node.type === 'IfStatement' && staticValue(node.test) !== UNKNOWN) {
+					scan(node.test, nested, cleanup, loop);
+					scan(staticValue(node.test) ? node.consequent : node.alternate, nested, cleanup, loop);
+				} else if (
+					(node.type === 'ConditionalExpression' || node.type === 'LogicalExpression') &&
+					selected(node) !== null
+				) {
+					scan(selected(node), nested, cleanup, loop);
+				} else {
+					for (const key in node) {
+						if (!SKIP_KEYS.has(key) && !key.startsWith('_octane'))
+							scan(node[key], nested, cleanup, loop);
+					}
+				}
+			};
+			scan(callback.body);
+			return result;
+		}
+
+		// A callback used for anything other than a ref may receive a different
+		// argument (for example an event). Do not infer an attached ref from it.
+		function checkCallbackUses() {
+			if (callbackCandidates.size === 0) return;
+			const bindings = new Map();
+			const aliasDeclarations = new WeakMap();
+			for (const record of functions) {
+				if (record.binding && !record.binding.reassigned && callbackCandidates.has(record.node)) {
+					bindings.set(record.binding, record.node);
+				}
+			}
+			for (const { decl, bindings: declared } of declarators) {
+				const binding = declared[0]?.binding;
+				if (decl.id?.type !== 'Identifier' || !binding || binding.reassigned) continue;
+				const callback = functionOf(decl.init);
+				if (callbackCandidates.has(callback)) {
+					bindings.set(binding, callback);
+					aliasDeclarations.set(decl, callback);
+				}
+			}
+			if (bindings.size === 0) return;
+			const path = [];
+			const walk = (node) => {
+				if (node == null || typeof node !== 'object') return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (node.type === 'Identifier') {
+					const callback = bindings.get(bindingOf(node));
+					if (callback && !safeCallbackUse(node, path, callback, aliasDeclarations)) {
+						for (const root of callbackCandidates.get(callback)) invalidAttachments.add(root);
+					}
+				}
+				path.push(node);
+				for (const key in node) {
+					if (!SKIP_KEYS.has(key) && !key.startsWith('_octane')) walk(node[key]);
+				}
+				path.pop();
+			};
+			walk(ast);
+		}
+
+		function safeCallbackUse(identifier, path, callback, aliasDeclarations) {
+			let current = identifier;
+			let index = path.length - 1;
+			let parent = path[index];
+			if (
+				(parent?.type === 'FunctionDeclaration' && parent.id === current) ||
+				(parent?.type === 'VariableDeclarator' && parent.id === current) ||
+				(parent?.type === 'MemberExpression' && parent.property === current && !parent.computed) ||
+				((parent?.type === 'Property' || parent?.type === 'MethodDefinition') &&
+					parent.key === current &&
+					!parent.computed &&
+					!parent.shorthand)
+			)
+				return true;
+			while (index >= 0 && TRANSPARENT.has(path[index].type)) current = path[index--];
+			parent = path[index];
+			if (
+				parent?.type === 'VariableDeclarator' &&
+				parent.init === current &&
+				aliasDeclarations.get(parent) === callback
+			)
+				return true;
+			while (index >= 0) {
+				parent = path[index];
+				if (
+					TRANSPARENT.has(parent.type) ||
+					parent.type === 'ArrayExpression' ||
+					(parent.type === 'LogicalExpression' &&
+						(parent.operator !== '&&' || parent.right === current)) ||
+					(parent.type === 'ConditionalExpression' && parent.test !== current) ||
+					(parent.type === 'SequenceExpression' && parent.expressions?.at(-1) === current)
+				) {
+					current = parent;
+					index--;
+					continue;
+				}
+				break;
+			}
+			return (
+				path[index]?.type === 'JSXExpressionContainer' &&
+				path[index - 1]?.type === 'JSXAttribute' &&
+				path[index - 1].name?.name === 'ref'
+			);
+		}
 	}
 
 	function classify(identifier, parents) {
@@ -1174,55 +1428,7 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 		let child = identifier;
 		let index = parents.length - 1;
 		while (index >= 0 && TRANSPARENT.has(parents[index].type)) child = parents[index--];
-		const parent = parents[index];
-		if (parent === undefined) return;
-		switch (parent.type) {
-			case 'MemberExpression':
-				// Reading or writing a property does not share the ref object.
-				if (parent.object === child || (parent.property === child && !parent.computed)) return;
-				break;
-			case 'Property':
-			case 'MethodDefinition':
-			case 'PropertyDefinition':
-				if (parent.key === child && !parent.computed && parent.shorthand !== true) return;
-				break;
-			case 'VariableDeclarator':
-				// A stable alias is classified with its root; destructuring reads properties.
-				if (parent.id === child || parent.id?.type === 'ObjectPattern') return;
-				if (references.declarations.has(parent.id)) return;
-				break;
-			case 'AssignmentExpression': {
-				// `({ current } = ref);` reads properties too, when its value is unused.
-				let at = index - 1;
-				while (at >= 0 && TRANSPARENT.has(parents[at].type)) at--;
-				if (
-					parent.right === child &&
-					parent.operator === '=' &&
-					parent.left?.type === 'ObjectPattern' &&
-					parents[at]?.type === 'ExpressionStatement'
-				) {
-					return;
-				}
-				break;
-			}
-			case 'LabeledStatement':
-			case 'BreakStatement':
-			case 'ContinueStatement':
-				return;
-			case 'ArrayExpression': {
-				// A dependency list is not a use of the ref's identity, even when it
-				// is parenthesized or cast.
-				let list = parent;
-				let at = index - 1;
-				while (at >= 0 && TRANSPARENT.has(parents[at].type)) list = parents[at--];
-				const call = parents[at];
-				const position = DEPENDENCY_ARGUMENTS.get(callNames.get(call));
-				if (position !== undefined && call.arguments?.[position] === list) return;
-				break;
-			}
-		}
 		if (hostRefPosition(parents, index, child)) references.host.add(root);
-		references.escaped.add(root);
 	}
 
 	// A ref given to an intrinsic element's `ref`: directly, in an array, as
@@ -1348,12 +1554,18 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 				report(
 					STRONG_EFFECT_DATA_FETCH,
 					write.origin,
-					FETCH_MESSAGES[asyncCallback ? 'async' : hasCleanup ? 'ineffective' : 'missing'],
+					record.snapshot
+						? SNAPSHOT_MESSAGES.fetch
+						: FETCH_MESSAGES[asyncCallback ? 'async' : hasCleanup ? 'ineffective' : 'missing'],
 				);
 			}
 			for (const acquisition of record.acquisitions) {
 				if (released(acquisition, cleanup, record)) continue;
-				report(STRONG_EFFECT_RESOURCE_LEAK, acquisition.node, LEAK_MESSAGES[acquisition.kind]);
+				report(
+					STRONG_EFFECT_RESOURCE_LEAK,
+					acquisition.node,
+					record.snapshot ? SNAPSHOT_MESSAGES.leak : LEAK_MESSAGES[acquisition.kind],
+				);
 			}
 		},
 		// Callbacks of these calls run before the browser paints, so an update
@@ -1384,15 +1596,8 @@ export function createStrongEffectPolicy({ ast, analysis, callNames, report }) {
 		zeroDelayAwait(argument) {
 			return maySettle(argument);
 		},
-		// A useRef whose identity never leaves property accesses and stable
-		// aliases holds a plain value, not an attached element or instance.
-		isValueRef(declaration) {
-			const info = refs();
-			const root = info.declarations.get(declaration);
-			return root !== undefined && !info.escaped.has(root);
-		},
-		hiddenDependency(node, kind) {
-			report(STRONG_EFFECT_HIDDEN_DEPENDENCY, node, HIDDEN_MESSAGES[kind]);
+		hiddenDependency(node) {
+			report(STRONG_EFFECT_HIDDEN_DEPENDENCY, node, HIDDEN_MESSAGE);
 		},
 		// The stable initializer of a binding declared in the function that reads
 		// it, once that initializer has run on every path to the read: a `const`

@@ -1,11 +1,21 @@
 import { formatClientError } from '../error-codes.client.generated.js';
 import type { AdoptionFrame, ConnectionState, ScopeSeed, SignalHandle } from './types.js';
 import type { SignalCandidateFrame } from './transition-candidate.js';
-import type { ScopedNode } from './graph.js';
+import type { ScopedNode, SignalReadMode } from './graph.js';
 
 /** Explicit async reads own an observer edge instead of a synchronous graph edge. */
 export const SIGNAL_DEPENDENT_NODE: unique symbol = Symbol('octane.signalDependent');
 export type SignalDependencyNotify = (() => void) & { [SIGNAL_DEPENDENT_NODE]?: ScopedNode };
+
+/**
+ * Implemented by handles a compiled declaration can capture: whether a closure
+ * that reads this handle in `owner` reads the same cell as one that captured
+ * `committed`, so the committed definition still applies (see redeclaration).
+ */
+export const SIGNAL_SAME_CAPTURE: unique symbol = Symbol('octane.signalSameCapture');
+export interface SignalCapture {
+	[SIGNAL_SAME_CAPTURE](committed: unknown, owner: object): boolean;
+}
 
 /** Only presentation subscriptions participate; public subscribers are never replayed. */
 export const NATIVE_TRANSITION_CONSUMER: unique symbol = Symbol('octane.transitionConsumer');
@@ -45,17 +55,41 @@ export interface SignalDeclarationStage {
 	settle(callback: (discarded: boolean) => void): void;
 }
 
-let declarationStageResolver: (() => SignalDeclarationStage | undefined) | undefined;
+let declarationStageResolver:
+	((declaring?: number) => SignalDeclarationStage | undefined) | undefined;
 
-/** A renderer reports its speculative render; no resolver means declarations apply at once. */
+/**
+ * A renderer reports its speculative render; no resolver means declarations
+ * apply at once. `declaring` names the invocation that evaluated the
+ * declaration; while that invocation is still rendering, its stage applies.
+ */
 export function registerSignalDeclarationStage(
-	resolver: () => SignalDeclarationStage | undefined,
+	resolver: (declaring?: number) => SignalDeclarationStage | undefined,
 ): void {
 	declarationStageResolver = resolver;
 }
 
-export function currentSignalDeclarationStage(): SignalDeclarationStage | undefined {
-	return declarationStageResolver?.();
+export function currentSignalDeclarationStage(
+	declaring?: number,
+): SignalDeclarationStage | undefined {
+	return declarationStageResolver?.(declaring);
+}
+
+let declarationInvocation = 0;
+
+/**
+ * A number unique to the render invocation evaluating declarations, or 0
+ * outside one. Unlike its stage, reading it allocates nothing.
+ */
+export function currentSignalDeclarationInvocation(): number {
+	return declarationInvocation;
+}
+
+/** The renderer enters an invocation, or restores the one it returns to. */
+export function setSignalDeclarationInvocation(invocation: number): number {
+	const previous = declarationInvocation;
+	declarationInvocation = invocation;
+	return previous;
 }
 
 let nativeActionResolver: (() => SignalCandidateFrame | undefined) | undefined;
@@ -147,7 +181,7 @@ export function readNativeDomStyle(value: any): any {
 }
 
 export function readNativeDomProps(props: Record<string, unknown>): Record<string, unknown> {
-	return 'style' in props ? { ...props, style: readNativeDomStyle(props.style) } : props;
+	return 'style' in props ? { ...props, style: readNativeDomStyle(props['style']) } : props;
 }
 
 /** A renderer supplies historical data only for a data scope actually read. */
@@ -162,22 +196,105 @@ export interface NativeSerializedScope {
 	readonly seed: ScopeSeed;
 }
 
+/**
+ * Serializes a graph source's observed subgraph (seed-serialization.ts). Only
+ * the server read driver serializes sources, and it supplies this first, so a
+ * client bundle keeps no serializer although every graph source names it.
+ */
+export let nativeReadSerializer:
+	| ((node: ScopedNode, read: SignalReadMode) => readonly NativeSerializedScope[] | undefined)
+	| undefined;
+
+export function supplyNativeReadSerializer(
+	serializer: NonNullable<typeof nativeReadSerializer>,
+): void {
+	nativeReadSerializer = serializer;
+}
+
 export type NativeAdoptionResolver = (owner: NativeAdoptionOwner) => AdoptionFrame | undefined;
 let nativeAdoptionResolver: NativeAdoptionResolver | null = null;
 
+// Hydration and signals can load in either order. Record only availability
+// here: the signal engine must not make renderer seed decoding reachable.
+export let nativeSignalHydration = false;
+let signalDeclarationsEnabled = false;
+let earlySignalHydrationStarter: (() => void) | null = null;
+
+export function registerNativeSignalHydration(): void {
+	nativeSignalHydration = true;
+}
+
+/** Only declarations can consume pre-module edits when their cells are created. */
+export function registerEarlySignalHydration(): void {
+	signalDeclarationsEnabled = true;
+	// A subsequently loaded declaration module claims already queued native edits.
+	if (earlySignalHydrationStarter) earlySignalHydrationStarter();
+}
+
+/** Only a hydration entry can supply the control-capture bridge. */
+export function startEarlySignalHydration(start: () => void): void {
+	earlySignalHydrationStarter = start;
+	if (signalDeclarationsEnabled) start();
+}
+
+/**
+ * Brands hydration control-flow errors, this one and the renderer's refused
+ * early presentation, so that a boundary can pass one through without naming
+ * either class, which a bundle that never hydrates would then retain.
+ */
+export const ADOPTION_CONTROL: unique symbol = /* @__PURE__ */ Symbol('octane.adoptionControl');
+/** Brands NativeAdoptionMiss alone, for signal state that must recognize it. */
+const NATIVE_ADOPTION_MISS: unique symbol = /* @__PURE__ */ Symbol('octane.nativeAdoptionMiss');
+
 /** Internal hydration control flow, never an application error-boundary value. */
 export class NativeAdoptionMiss extends Error {
+	// Assigned in the constructor: a computed class field would keep the class in
+	// every bundle, since a bundler cannot drop a class whose keys it must evaluate.
+	declare readonly [ADOPTION_CONTROL]: true;
+	declare readonly [NATIVE_ADOPTION_MISS]: true;
 	readonly scopeKey: string;
 	readonly nodeKey: string;
 	readonly read: 'value' | 'latest' | 'snapshot';
 
 	constructor(scopeKey: string, nodeKey: string, read: 'value' | 'latest' | 'snapshot' = 'value') {
 		super(formatClientError(194, read, scopeKey, nodeKey));
+		this[ADOPTION_CONTROL] = this[NATIVE_ADOPTION_MISS] = true;
 		this.name = 'NativeAdoptionMiss';
 		this.scopeKey = scopeKey;
 		this.nodeKey = nodeKey;
 		this.read = read;
 	}
+}
+
+/**
+ * Whether `error` is a NativeAdoptionMiss (or a subclass). Signal state tests
+ * the brand, so a bundle that never hydrates keeps no class.
+ */
+export function isNativeAdoptionMiss(error: unknown): boolean {
+	return (
+		(error as { [NATIVE_ADOPTION_MISS]?: true } | null | undefined)?.[NATIVE_ADOPTION_MISS] === true
+	);
+}
+
+let nativeAdoptionMissClass: typeof NativeAdoptionMiss | undefined;
+
+/**
+ * The miss a signal read throws while an installed resolver cannot serve it.
+ * Only a hydration pass installs a resolver, and hydration first calls
+ * supplyNativeAdoptionMiss, so the class stays out of bundles that never
+ * hydrate, although every signal read can reach this function.
+ */
+export function nativeAdoptionMiss(
+	scopeKey: string,
+	nodeKey: string,
+	read: 'value' | 'latest' | 'snapshot',
+): NativeAdoptionMiss {
+	return new nativeAdoptionMissClass!(scopeKey, nodeKey, read);
+}
+
+/** Hydration only, before it installs any resolver. */
+export function supplyNativeAdoptionMiss(): void {
+	nativeAdoptionMissClass = NativeAdoptionMiss;
 }
 
 export function getNativeAdoptionResolver(): NativeAdoptionResolver | null {
@@ -191,6 +308,33 @@ export function setNativeAdoptionResolver(
 	const previous = nativeAdoptionResolver;
 	nativeAdoptionResolver = resolver;
 	return previous;
+}
+
+/** A historical read whose adoption lease just ended. */
+export interface NativeReadRelease {
+	readonly historical: NativeReadSource;
+	/** A targeted binding holds its own live subscription, so its read is dropped, not moved. */
+	readonly binding: boolean;
+	/**
+	 * When a live read would now present what the historical read did, the live
+	 * source and revision that read would report; otherwise undefined. This may
+	 * evaluate the live node, so only a subscriber that can move its read asks.
+	 */
+	successor(): { readonly live: NativeReadSource; readonly version: number } | undefined;
+}
+
+/**
+ * Moves a renderer consumer's committed historical read to its unchanged live
+ * successor and returns true, so adopting unchanged data renders nothing
+ * again. Release notifies every subscriber this returns false for.
+ */
+export type NativeReadRebase = (notify: () => void, release: NativeReadRelease) => boolean;
+
+/** Installed by hydration that adopts native reads; null keeps every release a notification. */
+export let nativeReadRebase: NativeReadRebase | null = null;
+
+export function registerNativeReadRebase(rebase: NativeReadRebase): void {
+	nativeReadRebase = rebase;
 }
 
 export interface NativeBatchHooks {
@@ -222,6 +366,20 @@ export function runNativeBatch<T>(callback: () => T): T {
 		return callback();
 	} finally {
 		endNativeBatch(hooks);
+	}
+}
+
+/** Only DOM admission coalesces; graph publication remains synchronous. */
+export let nativeProducerPublication = false;
+
+/** Keep the context active through the graph batch's subscriber notifications. */
+export function publishNativeProducer<T>(callback: () => T): T {
+	const previous = nativeProducerPublication;
+	nativeProducerPublication = true;
+	try {
+		return runNativeBatch(callback);
+	} finally {
+		nativeProducerPublication = previous;
 	}
 }
 

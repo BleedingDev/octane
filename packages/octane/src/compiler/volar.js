@@ -1,4 +1,4 @@
-import { parseModule } from './parser.browser.js';
+import { parseEditorModule } from './parser.browser.js';
 /**
  * Volar (IDE language-service) mappings for octane .tsrx files.
  *
@@ -28,6 +28,7 @@ import {
 	analyzeTsrx,
 	builders as b,
 	clone_ast_node as cloneAstNode,
+	contains_component_jsx as containsComponentJsx,
 	createJsxTransform,
 	createVolarMappingsResult,
 	dedupeMappings,
@@ -35,7 +36,7 @@ import {
 } from '@tsrx/core';
 import { buildFatSegments, decodeSourceMappings } from './fat-segments.js';
 import { analyzeNativeChangeDiagnostics } from './native-change-diagnostics.js';
-import { analyzeStrongMode } from './strong-mode.js';
+import { analyzeStrongMode, withStrongDocs } from './strong-mode.js';
 import { analyzeNativeReadDiagnostics, nativeReadOptions } from './native-read-diagnostics.js';
 import { jsxImportSourcePragmaModule } from './pragma.js';
 import { inheritHookMemoOrigin } from './inline-hook-memo.js';
@@ -72,22 +73,32 @@ import {
  *     typecheck (TS1147 in-block import, TS2307 boundary import). The
  *     runtime compiler (`compile.js`) owns the dialect's real semantics
  *     (isolation validation, SSR namespace, RPC stubs) and is unaffected.
+ *   - `hooks.canHoistStaticNode` keeps component elements where they were
+ *     written, as the Vue and Solid targets do. The shared transform moves a
+ *     fully static element (literal attributes and children) to a
+ *     module-level `const`. A component tag is the only binding such an
+ *     element can name, and at module scope it is checked against the wrong
+ *     binding: a named function expression's own name resolves to an outer
+ *     binding or to nothing, and `@if` narrowing is lost. Host-only statics
+ *     name no binding, so they still hoist.
  *
  * `imports.suspense` and `imports.fragment` aren't real components in
  * octane (we lower `@try`/`@pending` to `tryBlock` and fragments to
  * concrete templates), but the descriptor still needs a value because the
  * shared transform emits TSX-level `<Fragment>` / `<Suspense>` wrappers
- * when running in TSX mode. We point them at `octane` so editors at
- * least don't fail to resolve the imports; users won't actually see those
- * names in source. (Volar TSX is virtual — its imports never run.)
+ * when running in TSX mode. `@try`'s boundaries come from
+ * `octane/tsrx-boundary`, whose type-only stand-ins are valid components under
+ * every renderer's JSX; the fragment points at `octane` so editors at least
+ * don't fail to resolve the import. Users won't actually see those names in
+ * source. (Volar TSX is virtual — its imports never run.)
  */
 const OCTANE_PLATFORM = {
 	name: 'octane',
 	imports: {
 		fragment: 'octane',
-		suspense: 'octane',
+		suspense: 'octane/tsrx-boundary',
 		dynamic: 'octane',
-		errorBoundary: 'octane',
+		errorBoundary: 'octane/tsrx-boundary',
 		forOfIterableHelper: 'octane/tsrx-iterable',
 		// Host-element spreads in the virtual TSX lower to
 		// `__normalize_spread_props(...)`; the shared transform imports the
@@ -105,6 +116,18 @@ const OCTANE_PLATFORM = {
 	serverModule: {
 		blockName: 'server',
 		importSpecifier: 'server',
+	},
+	hooks: {
+		canHoistStaticNode: (node) => !containsComponentJsx(node),
+		transformElementAttributes(attributes, _context, element) {
+			// Router's execution capability is compiler metadata, not a public DOM prop.
+			if (
+				element.openingElement?.name?.name !== 'script' ||
+				!attributes.some((attribute) => attribute.name?.name === '__executeOnMount')
+			)
+				return attributes;
+			return attributes.filter((attribute) => attribute.name?.name !== '__executeOnMount');
+		},
 	},
 };
 
@@ -333,6 +356,7 @@ function projectServerContextCalls(ast, filename) {
 const octaneTransformWithAuthoredSuspense = createJsxTransform({
 	...OCTANE_PLATFORM,
 	hooks: {
+		...OCTANE_PLATFORM.hooks,
 		createPendingBoundary(_content, _fallback, context) {
 			// Reuse the authored value binding without replacing its mapped import.
 			// Returning null keeps the shared boundary lowering; only its redundant
@@ -349,7 +373,7 @@ function selectOctaneTransform(ast) {
 		(statement) =>
 			statement.type === 'ImportDeclaration' &&
 			statement.importKind !== 'type' &&
-			statement.source.value === OCTANE_PLATFORM.imports.suspense &&
+			statement.source.value === DOM_RENDERER_MODULE &&
 			statement.specifiers.some(
 				(specifier) =>
 					specifier.type === 'ImportSpecifier' &&
@@ -379,7 +403,7 @@ function authoredLeadingPragma(ast, comments) {
 	);
 }
 
-function createRendererTypePragma(renderer, ast, strong = false) {
+function createRendererTypePragma(renderer, ast, strong = false, typeIntrinsics = undefined) {
 	// A `.tsrx` file's JSX is octane's dialect BY DEFINITION, so the built-in
 	// DOM renderer pins the virtual TSX to octane's jsx-runtime types even when
 	// the registry entry declares no `intrinsics`. Without the pragma the host
@@ -388,8 +412,10 @@ function createRendererTypePragma(renderer, ast, strong = false) {
 	// React shell hosting islands through `octane/react`, tsrx-tsc over a
 	// `react-jsx` tsconfig) every island would be typed against REACT's JSX and
 	// reject octane's real contract (`class`, native event payloads, …).
-	// An authored leading pragma still wins (checked by the caller).
+	// An authored leading pragma wins unless tooling explicitly selects a
+	// separate type-only surface (checked by the caller).
 	const intrinsics =
+		typeIntrinsics ??
 		renderer.intrinsics ??
 		(renderer.module === DOM_RENDERER_MODULE && renderer.target === 'dom'
 			? DOM_RENDERER_MODULE
@@ -400,7 +426,7 @@ function createRendererTypePragma(renderer, ast, strong = false) {
 		type: 'Block',
 		// @tsrx/core's semantic-comment formatter turns this into the canonical
 		// `/** @jsxImportSource … */` spelling during the one type-only print.
-		value: `*@jsxImportSource ${strong && intrinsics === DOM_RENDERER_MODULE ? 'octane/strong' : intrinsics}`,
+		value: `*@jsxImportSource ${typeIntrinsics === undefined && strong && intrinsics === DOM_RENDERER_MODULE ? 'octane/strong' : intrinsics}`,
 		start: ast.start ?? 0,
 		end: ast.start ?? 0,
 		loc: { start: { ...start }, end: { ...start } },
@@ -457,7 +483,9 @@ function markNativeTemplateBodies(root) {
  * `intrinsics`; when present, the virtual TSX gets a file-local pragma so host
  * element types cannot leak into files owned by another renderer.
  *
- * @param {{ loose?: boolean, renderers?: unknown, strong?: boolean, knownAttributeSpreads?: readonly import('./index.js').KnownAttributeSpread[] }} [options]
+ * The optional `intrinsics` selects the virtual TSX's JSX type namespace
+ * independently of the runtime renderer and any authored pragma.
+ * @param {{ loose?: boolean, renderers?: unknown, intrinsics?: string, strong?: boolean, knownAttributeSpreads?: readonly import('./index.js').KnownAttributeSpread[] }} [options]
  * @returns {import('./index.js').VolarCompileResult}
  */
 export function compileToVolarMappings(source, filename, options) {
@@ -465,7 +493,7 @@ export function compileToVolarMappings(source, filename, options) {
 	const errors = [];
 	/** @type {import('@tsrx/core/types').AST.CommentWithLocation[]} */
 	const comments = [];
-	const ast = parseModule(source, filename, {
+	const ast = parseEditorModule(source, filename, {
 		collect: true,
 		loose: !!options?.loose,
 		preserveParens: true,
@@ -519,24 +547,30 @@ export function compileToVolarMappings(source, filename, options) {
 	// coordinate system instead of prepending text and shifting every mapping.
 	const authoredPragma = authoredLeadingPragma(ast, comments);
 	const strongDOM = strongAnalysis?.enabled === true && renderer.target === 'dom';
-	const rendererPragma = authoredPragma ? null : createRendererTypePragma(renderer, ast, strongDOM);
+	const rendererPragma = authoredPragma
+		? null
+		: createRendererTypePragma(renderer, ast, strongDOM, options?.intrinsics);
 	const replacePragma =
 		authoredPragma &&
-		strongDOM &&
-		jsxImportSourcePragmaModule(authoredPragma.value) === DOM_RENDERER_MODULE;
-	// Keep the authored comment form: a line pragma prints as `// …`, so the
-	// block-comment body would leave TypeScript with no readable pragma.
-	const strongPragma = replacePragma
+		(options?.intrinsics !== undefined ||
+			(strongDOM && jsxImportSourcePragmaModule(authoredPragma.value) === DOM_RENDERER_MODULE));
+	// A type-only override needs a block pragma: TypeScript does not recognize
+	// @jsxImportSource in line comments. Preserve existing strong-mode behavior
+	// when tooling has not opted in.
+	const typePragma = replacePragma
 		? {
 				...authoredPragma,
+				type: options?.intrinsics !== undefined ? 'Block' : authoredPragma.type,
 				value:
-					authoredPragma.type === 'Line'
-						? ' @jsxImportSource octane/strong'
-						: '*@jsxImportSource octane/strong',
+					options?.intrinsics !== undefined
+						? `*@jsxImportSource ${options.intrinsics}`
+						: authoredPragma.type === 'Line'
+							? ' @jsxImportSource octane/strong'
+							: '*@jsxImportSource octane/strong',
 			}
 		: null;
-	const printComments = strongPragma
-		? comments.map((comment) => (comment === authoredPragma ? strongPragma : comment))
+	const printComments = typePragma
+		? comments.map((comment) => (comment === authoredPragma ? typePragma : comment))
 		: rendererPragma === null
 			? comments
 			: [rendererPragma, ...comments];
@@ -544,11 +578,11 @@ export function compileToVolarMappings(source, filename, options) {
 	// attached copy on a cloned statement so the printer cannot retain a second,
 	// compatibility pragma. The parsed source tree and source positions stay intact.
 	let transformAst = ast;
-	if (strongPragma && ast.body.length > 0) {
+	if (typePragma && ast.body.length > 0) {
 		const first = cloneAstNode(ast.body[0]);
 		first.leadingComments = first.leadingComments?.map((comment) =>
 			comment.start === authoredPragma.start && comment.end === authoredPragma.end
-				? strongPragma
+				? typePragma
 				: comment,
 		);
 		transformAst = { ...ast, body: [first, ...ast.body.slice(1)] };
@@ -585,7 +619,7 @@ export function compileToVolarMappings(source, filename, options) {
 		for (const diagnostic of [...(strongDiagnostics ?? []), ...nativeReadDiagnostics]) {
 			if (diagnostic.severity !== 'error') continue;
 			collectCompileError(
-				diagnostic.message,
+				withStrongDocs(diagnostic.code, diagnostic.message),
 				diagnostic.filename ?? null,
 				{
 					start: diagnostic.start.offset,
@@ -797,7 +831,7 @@ export function compileTypesInspection(source, filename, options) {
 	const errors = [];
 	/** @type {import('@tsrx/core/types').AST.CommentWithLocation[]} */
 	const comments = [];
-	const ast = parseModule(source, filename, {
+	const ast = parseEditorModule(source, filename, {
 		collect: true,
 		loose: true,
 		preserveParens: true,

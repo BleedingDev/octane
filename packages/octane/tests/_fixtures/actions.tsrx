@@ -6,7 +6,9 @@ export function ActionForm(props) @{
 	const [state, formAction, isPending] = useActionState(props.action, props.initial);
 	<form action={formAction}>
 		<input id="field" name="name" />
-		<button id="submit" type="submit">{'submit'}</button>
+		<button id="submit" type="submit">
+			{'submit'}
+		</button>
 		<span id="state">{String(state) as string}</span>
 		<span id="pending">{(isPending ? 'pending' : 'idle') as string}</span>
 	</form>
@@ -19,7 +21,9 @@ export function SubmitterActionForm(props: {
 	const [state, formAction, isPending] = useActionState(props.action, props.initial);
 	<form>
 		<input id="field" name="name" />
-		<button id="submit" type="submit" formAction={formAction}>{'submit'}</button>
+		<button id="submit" type="submit" formAction={formAction}>
+			{'submit'}
+		</button>
 		<span id="state">{String(state) as string}</span>
 		<span id="pending">{(isPending ? 'pending' : 'idle') as string}</span>
 	</form>
@@ -36,7 +40,9 @@ export function FormWithStatus(props) @{
 	<form action={formAction}>
 		<input name="q" />
 		<StatusReader />
-		<button id="submit" type="submit">{'go'}</button>
+		<button id="submit" type="submit">
+			{'go'}
+		</button>
 	</form>
 }
 
@@ -45,7 +51,9 @@ export function FormWithStatus(props) @{
 export function RawFormWithStatus(props) @{
 	<form action={props.action}>
 		<StatusReader />
-		<button id="submit" type="submit">{'go'}</button>
+		<button id="submit" type="submit">
+			{'go'}
+		</button>
 	</form>
 }
 
@@ -72,8 +80,18 @@ export function SelfFormStatus(props) @{
 	props.expose(status);
 	<form action={props.action}>
 		<span id="self">{(status.pending ? 'pending' : 'idle') as string}</span>
-		<button id="submit" type="submit">{'go'}</button>
+		<button id="submit" type="submit">
+			{'go'}
+		</button>
 	</form>
+}
+
+// The same component rendered as a child, where its single <form> root is
+// the start of its own range.
+export function NestedSelfFormStatus(props) @{
+	<section>
+		<SelfFormStatus action={props.action} expose={props.expose} />
+	</section>
 }
 
 // useOptimistic: optimisticState shows the pending value during the action, then
@@ -91,7 +109,9 @@ export function OptimisticForm(props) @{
 	<form action={formAction}>
 		<input id="field" name="item" />
 		<span id="list">{optimistic.join(',') as string}</span>
-		<button id="add" type="submit">{'add'}</button>
+		<button id="add" type="submit">
+			{'add'}
+		</button>
 	</form>
 }
 
@@ -102,7 +122,9 @@ export function BareOptimistic(props) @{
 	const [optimistic, addOptimistic] = useOptimistic(items, (cur, v) => [...cur, v]);
 	<div>
 		<span id="list">{optimistic.join(',') as string}</span>
-		<button id="add" onClick={() => addOptimistic('x')}>{'add'}</button>
+		<button id="add" onClick={() => addOptimistic('x')}>
+			{'add'}
+		</button>
 	</div>
 }
 
@@ -121,7 +143,9 @@ export function OptimisticCounter(props: {
 export function DirectAction(props) @{
 	const [state, formAction, isPending] = useActionState(props.action, props.initial);
 	<div>
-		<button id="run" onClick={() => formAction(props.payload)}>{'run'}</button>
+		<button id="run" onClick={() => formAction(props.payload)}>
+			{'run'}
+		</button>
 		<span id="state">{String(state) as string}</span>
 		<span id="pending">{(isPending ? 'pending' : 'idle') as string}</span>
 	</div>
@@ -147,6 +171,8 @@ export function ExposedDispatch<P>(props: {
 export function RawForm(props) @{
 	<form action={props.action}>
 		<input id="field" name="field" />
-		<button id="submit" type="submit">{'go'}</button>
+		<button id="submit" type="submit">
+			{'go'}
+		</button>
 	</form>
 }

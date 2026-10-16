@@ -139,7 +139,7 @@ const withSceneBoundary = (source, output) =>
 	source.replace(output, `<><Canvas><mesh /></Canvas>${output}</>`);
 const scenario = (id) => BUNDLE_CASES.find((entry) => entry.id === id);
 const source = (name) => ({ path: `packages/octane/src/${name}` });
-const alien = (version = '3.2.0') => ({
+const alien = (version = '3.2.1') => ({
 	path: 'node_modules/alien-signals/esm/system.mjs',
 	package: { name: 'alien-signals', version },
 });
@@ -155,10 +155,12 @@ function List(props) @{
 }
 export function render(items, produce) { return renderToString(List, {items, produce}); }
 import {renderToString} from 'octane/server';`;
+	// Rows receive real handles through an opaque prop, so the module opts in.
 	const contents = compile(app, path.join(directory, 'KeyedServerOutput.tsrx'), {
 		mode: 'server',
 		dev: false,
 		hmr: false,
+		opaqueSignalHandles: true,
 	}).code;
 	const bundle = await build({
 		stdin: {
@@ -308,6 +310,7 @@ test('ordinary client roots tree-shake native transitions and require emitted-by
 		'signals/transition-candidate.ts',
 		'signals/transition-action.ts',
 		'signals/transition-coordinator.ts',
+		'signals/candidate-producers.ts',
 	]) {
 		verifyTransitionBoundary(scenario('ordinary-client'), [
 			...ordinary,
@@ -459,6 +462,173 @@ export function mount(parent) { const root = createRoot(parent); root.render(Vie
 	verifyTransitionBoundary(scenario('ordinary-client'), ordinary.inputs);
 });
 
+// Only the renderer consumes the signal Action frame and transition coordinator,
+// but no import edge loads code only when both renderer and graph are present.
+// package.json places it with the graph by default and with the renderer under
+// `octane-islands`, which documents that load signals without the renderer use.
+// The frame's candidate producers for resources and derived cells follow it:
+// by default the binding modules that create those cells carry them.
+test('the octane-islands condition moves signal Actions from signal bundles into the renderer', async (t) => {
+	const directory = path.resolve('packages/octane');
+	const bundle = async (contents, conditions) => {
+		const result = await build({
+			stdin: { contents, resolveDir: directory },
+			bundle: true,
+			write: false,
+			minify: true,
+			metafile: true,
+			format: 'esm',
+			platform: 'browser',
+			target: 'es2022',
+			legalComments: 'none',
+			tsconfigRaw: { compilerOptions: {} },
+			define: { 'process.env.NODE_ENV': '"production"', __OCTANE_PROFILE_ENABLED__: 'false' },
+			...(conditions ? { conditions } : null),
+		});
+		const output = Object.values(result.metafile.outputs)[0];
+		const bytes = (name) =>
+			Object.entries(output.inputs)
+				.filter(([input]) => input.endsWith(`/src/signals/${name}.ts`))
+				.reduce((total, [, input]) => total + input.bytesInOutput, 0);
+		return {
+			code: result.outputFiles[0].text,
+			action: bytes('transition-action'),
+			coordinator: bytes('transition-coordinator'),
+			producers: bytes('candidate-producers'),
+		};
+	};
+	const signalBundles = BUNDLE_CASES.filter(
+		(entry) =>
+			(entry.id === 'engine' || entry.rendererFree) &&
+			!entry.graphFree &&
+			!entry.compilePlain &&
+			entry.platform === 'browser',
+	);
+	assert.ok(
+		['engine', 'streamed-signals-bootstrap'].every((id) =>
+			signalBundles.some((entry) => entry.id === id),
+		),
+	);
+	for (const entry of signalBundles) {
+		const graphPlaced = await bundle(entrySource(entry));
+		assert.ok(
+			graphPlaced.action > 0 && graphPlaced.coordinator > 0,
+			`${entry.id}: the default build keeps signal Actions with the graph.`,
+		);
+		// The engine entry imports the module that creates resources but creates none.
+		if (entry.id === 'engine')
+			assert.equal(graphPlaced.producers, 0, 'engine: kept a producer for cells it never creates.');
+		const islands = await bundle(entrySource(entry), ['octane-islands']);
+		assert.equal(islands.action, 0, `${entry.id}: an islands signal bundle kept the Action frame.`);
+		assert.equal(
+			islands.coordinator,
+			0,
+			`${entry.id}: an islands signal bundle kept the transition coordinator.`,
+		);
+		assert.equal(
+			islands.producers,
+			0,
+			`${entry.id}: an islands signal bundle kept the candidate producers.`,
+		);
+	}
+	const cells = `export { createScope, createResource, derived$, query } from 'octane/signals';`;
+	assert.ok(
+		(await bundle(cells)).producers > 0,
+		'A default bundle that creates resources and derived cells must carry their producers.',
+	);
+	assert.equal((await bundle(cells, ['octane-islands'])).producers, 0);
+	const ordinary = entrySource(scenario('ordinary-client'));
+	const rendererOnly = await bundle(ordinary);
+	assert.deepEqual(
+		[rendererOnly.action, rendererOnly.coordinator, rendererOnly.producers],
+		[0, 0, 0],
+	);
+	// A renderer that reaches no transition runs no Action, so neither placement
+	// carries the frame. The transition engine carries it in an islands build.
+	const islandsRendererOnly = await bundle(ordinary, ['octane-islands']);
+	assert.deepEqual(
+		[islandsRendererOnly.action, islandsRendererOnly.coordinator, islandsRendererOnly.producers],
+		[0, 0, 0],
+	);
+	const transitions = `export { createRoot, startTransition } from 'octane';`;
+	const islandsRenderer = await bundle(transitions, ['octane-islands']);
+	assert.ok(
+		islandsRenderer.action > 0 && islandsRenderer.coordinator > 0 && islandsRenderer.producers > 0,
+		'An islands build must carry signal Actions and their candidate producers with the renderer.',
+	);
+
+	// Both placements stay complete. The renderer is loaded first, and its Action
+	// imports signals only after it awaited. No component reads them natively. A
+	// declared derived cell and a query resource stage through their own producers.
+	const lateSignals = `import { startTransition } from 'octane';
+export function lateSignalAction() {
+ let release;
+ const released = new Promise((resolve) => { release = resolve; });
+ let ready;
+ let action;
+ const state = new Promise((resolve, reject) => { ready = { resolve, reject }; });
+ startTransition(() => {
+  action = (async () => {
+   const { createResource, createScope, derived$, query, runWithSignalOwner } = await import('octane/signals');
+   const scope = createScope({ scopeKey: 'late-islands-action' });
+   const count = scope.signal$('count', 0);
+   const doubled = scope.derived$('doubled', () => count.get() * 2);
+   const tripled$ = derived$(() => count.get() * 3, { key: 'tripled' });
+   const tripled = () => runWithSignalOwner(scope, () => tripled$.get());
+   const lookup = query('late-islands-lookup', (value) => value * 10);
+   const looked = createResource(scope, 'looked', () => lookup(count.get()));
+   try { looked.get(); } catch (pending) { await pending; }
+   const notifications = [];
+   const stop = count.subscribe(() => notifications.push(count.get()));
+   let staged;
+   startTransition(() => {
+    count.set(2);
+    staged = [count.get(), doubled.get(), tripled()];
+    try { looked.get(); } catch (pending) { if (typeof pending?.then !== 'function') throw pending; }
+   });
+   ready.resolve({ scope, count, tripled, looked, notifications, staged, stop });
+   await released;
+  })();
+  action.catch((error) => ready.reject(error));
+  return action;
+ });
+ return { state, release: () => { release(); return action; } };
+}`;
+	for (const conditions of [undefined, ['octane-islands']]) {
+		const label = conditions ? 'renderer placement' : 'graph placement';
+		const { code } = await bundle(lateSignals, conditions);
+		const api = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'));
+		const pending = api.lateSignalAction();
+		const state = await pending.state;
+		try {
+			assert.deepEqual(state.staged, [2, 4, 6], `${label}: the transition scope reads its writes.`);
+			assert.deepEqual(
+				[state.count.get(), state.tripled(), state.looked.get()],
+				[0, 0, 0],
+				`${label}: the write published before the Action settled.`,
+			);
+			assert.deepEqual(state.notifications, [], label);
+			await pending.release();
+			const deadline = performance.now() + 2_000;
+			while (
+				(state.notifications.length === 0 || state.looked.latest() !== 20) &&
+				performance.now() < deadline
+			)
+				await new Promise((resolve) => setTimeout(resolve, 1));
+			assert.deepEqual(
+				[state.count.get(), state.tripled(), state.looked.latest()],
+				[2, 6, 20],
+				label,
+			);
+			assert.deepEqual(state.notifications, [2], label);
+		} finally {
+			state.stop();
+			state.scope.dispose();
+		}
+		t.diagnostic(`${label}: late signals staged and published once`);
+	}
+});
+
 for (const id of ['ordinary-client', 'ordinary-server']) {
 	test(`${id} tree-shakes concrete native adapters and requires emitted-byte evidence`, () => {
 		const ordinary = [source(id === 'ordinary-client' ? 'runtime.ts' : 'runtime.server.ts')];
@@ -502,7 +672,20 @@ for (const id of ['ordinary-client', 'ordinary-server']) {
 }
 
 test('independent engine rejects rendering, compiler, DevTools, and the old Alien version', () => {
-	const independent = [source('signals/index.ts'), source('signals/graph.ts'), alien()];
+	const independent = [source('signals/index.ts'), source('signals/graph.ts')];
+	verifyBundleInputs(scenario('engine'), [...independent, alien()], 'external');
+	assert.throws(
+		() => verifyBundleInputs(scenario('engine'), [...independent, alien()]),
+		/vendored engine reached/,
+	);
+	assert.throws(
+		() => verifyBundleInputs(scenario('engine'), independent, 'external'),
+		/dependency is missing/,
+	);
+	assert.throws(
+		() => verifyBundleInputs(scenario('engine'), [alien()], 'external'),
+		/graph source is missing/,
+	);
 	verifyBundleInputs(scenario('engine'), independent);
 	for (const entry of BUNDLE_CASES.filter((entry) => entry.id === 'engine' || entry.rendererFree)) {
 		verifyTransitionBoundary(entry, [source('signals/transition-state.ts')]);
@@ -531,8 +714,11 @@ test('independent engine rejects rendering, compiler, DevTools, and the old Alie
 		() => verifyBundleInputs(scenario('engine'), [...independent, source('compiler/compile.js')]),
 		/compiler reached/,
 	);
-	assert.throws(() => verifyBundleInputs(scenario('engine'), [alien('1.0.4')]), /wrong Alien/);
-	assert.throws(() => verifyBundleInputs(scenario('engine'), []), /dependency is missing/);
+	assert.throws(
+		() => verifyBundleInputs(scenario('engine'), [...independent, alien('1.0.4')], 'external'),
+		/wrong Alien/,
+	);
+	assert.throws(() => verifyBundleInputs(scenario('engine'), []), /graph source is missing/);
 	verifyBundleInputs(scenario('engine'), [
 		...independent,
 		{ ...source('signals/scope-streams.ts'), bytesInOutput: 0 },
@@ -548,15 +734,18 @@ test('independent engine rejects rendering, compiler, DevTools, and the old Alie
 });
 
 test('native entries require their actual runtime and pinned engine', () => {
-	verifyBundleInputs(scenario('native-client'), [source('runtime.ts'), alien()]);
-	verifyBundleInputs(scenario('native-server'), [source('runtime.server.ts'), alien()]);
+	verifyBundleInputs(scenario('native-client'), [source('runtime.ts'), source('signals/graph.ts')]);
+	verifyBundleInputs(scenario('native-server'), [
+		source('runtime.server.ts'),
+		source('signals/graph.ts'),
+	]);
 	assert.throws(
-		() => verifyBundleInputs(scenario('native-client'), [alien()]),
+		() => verifyBundleInputs(scenario('native-client'), [source('signals/graph.ts')]),
 		/native runtime missing/,
 	);
 	assert.throws(
 		() => verifyBundleInputs(scenario('native-server'), [source('runtime.server.ts')]),
-		/dependency is missing/,
+		/graph source is missing/,
 	);
 });
 
@@ -594,7 +783,7 @@ test('scalar and result-only entries do not retain their optional implementation
 			);
 		}
 	}
-	const inputs = [source('signals/engine.ts'), source('signals/graph.ts'), alien()];
+	const inputs = [source('signals/engine.ts'), source('signals/graph.ts')];
 	verifyBundleInputs(scenario('compiled-plain-signals'), inputs);
 	verifyBundleInputs(scenario('compiled-plain-signals'), [
 		...inputs,
@@ -781,6 +970,156 @@ export function mount(parent) { const root = createRoot(parent); root.render(Rea
 		root.unmount();
 		host.remove();
 	}
+});
+
+// Owner scopes the runtime creates serve compiled declarations. Only a scope an
+// application creates exposes serialization, inspection and the imperative
+// read/write methods, so createScope alone installs them.
+test('compiled signal declarations omit the public Scope surface until createScope', async () => {
+	const directory = path.resolve('packages/octane');
+	const state = `import { signal$, derived$ } from 'octane/signals';
+export const count$ = signal$(1);
+export const double$ = derived$(() => count$.get() * 2);`;
+	const bundle = async (entry) => {
+		const result = await build({
+			stdin: { contents: entry, resolveDir: directory },
+			bundle: true,
+			write: false,
+			minify: true,
+			format: 'esm',
+			platform: 'browser',
+			target: 'es2022',
+			legalComments: 'none',
+			tsconfigRaw: { compilerOptions: {} },
+			define: { 'process.env.NODE_ENV': '"production"', __OCTANE_PROFILE_ENABLED__: 'false' },
+			plugins: [
+				{
+					name: 'tsrx-scope-state',
+					setup(plugin) {
+						plugin.onResolve({ filter: /^\.\/state\.tsrx$/ }, () => ({
+							path: 'state.tsrx',
+							namespace: 'tsrx-scope-state',
+						}));
+						plugin.onLoad({ filter: /.*/, namespace: 'tsrx-scope-state' }, () => ({
+							contents: compile(state, path.join(directory, 'state.tsrx'), {
+								mode: 'client',
+								dev: false,
+								hmr: false,
+							}).code,
+							loader: 'js',
+							resolveDir: directory,
+						}));
+					},
+				},
+			],
+		});
+		const text = result.outputFiles[0].text;
+		return {
+			text,
+			api: await import('data:text/javascript;base64,' + Buffer.from(text).toString('base64')),
+		};
+	};
+	const owned = `import { count$, double$ } from './state.tsrx';
+import { runWithSignalOwner, retireSignalOwnerIdentity } from 'octane/signals';
+export function exercise() {
+  const owner = { scopeKey: 'owner-scope-surface' };
+  const read = (callback) => runWithSignalOwner(owner, callback);
+  try {
+    const initial = read(() => double$.get());
+    read(() => count$.set(4));
+    return [initial, read(() => double$.get())];
+  } finally { retireSignalOwnerIdentity(owner); }
+}`;
+	// Inspection field names survive minification, so their absence shows the
+	// public-only implementations were not retained.
+	const publicSurface = /adoptionLeases|activeRequests/;
+
+	const ownerOnly = await bundle(owned);
+	assert.deepEqual(ownerOnly.api.exercise(), [2, 8]);
+	assert.doesNotMatch(
+		ownerOnly.text,
+		publicSurface,
+		'A program without createScope retained the public Scope surface.',
+	);
+
+	// Runtime-created owners reach application code through currentSignalOwner
+	// and the public owner carrier. Each route, in its own program without
+	// createScope, still hands out the whole Scope.
+	const current =
+		await bundle(`import { currentSignalOwner, derived$, runWithSignalOwner } from 'octane/signals';
+export function probe() {
+  const owner = { scopeKey: 'probe' };
+  const selected$ = derived$(() => {
+    const active = currentSignalOwner();
+    return active && 'signal$' in active ? active.inspect().scopeKey : active?.scopeKey;
+  }, { key: 'selection' });
+  return runWithSignalOwner(owner, () => selected$.get());
+}`);
+	assert.equal(current.api.probe(), 'probe');
+	const carried =
+		await bundle(`import { derived$, installSignalOwnerEnvironment, runWithSignalOwner } from 'octane/signals';
+export function probe() {
+  const seen = [];
+  let active = null;
+  const enter = (owner, callback) => {
+    const previous = active;
+    active = owner;
+    try { return callback(); } finally { active = previous; }
+  };
+  const restore = installSignalOwnerEnvironment({
+    current: () => active,
+    run(owner, callback) {
+      if ('signal$' in owner) seen.push(owner.inspect().scopeKey);
+      return enter(owner, callback);
+    },
+    capture: (owner) => (callback) => enter(owner, callback),
+  });
+  try {
+    const value$ = derived$(() => 1, { key: 'carried-value' });
+    runWithSignalOwner({ scopeKey: 'carried' }, () => value$.get());
+    return seen;
+  } finally { restore(); }
+}`);
+	assert.deepEqual(carried.api.probe(), ['carried']);
+
+	// Control: one createScope call installs the whole surface, and the owner
+	// scopes the runtime creates keep working before and after it does.
+	const withScope = await bundle(`${owned}
+import { createScope } from 'octane/signals';
+export function publicScope() {
+  const scope = createScope({ scopeKey: 'public-scope-surface', debug: { traceLimit: 4 } });
+  try {
+    const value$ = scope.signal$('value', 2);
+    const doubled$ = scope.derived$('doubled', () => scope.get(value$) * 2);
+    scope.action(() => scope.set(value$, (value) => value + 1))();
+    scope.batch(() => scope.set(value$, (value) => value + 1));
+    return {
+      doubled: scope.get(doubled$),
+      pending: scope.isPending(() => scope.get(doubled$)),
+      seed: scope.serialize(),
+      inspection: scope.inspect(),
+    };
+  } finally { scope.dispose(); }
+}`);
+	assert.match(withScope.text, publicSurface);
+	assert.deepEqual(withScope.api.exercise(), [2, 8]);
+	const result = withScope.api.publicScope();
+	assert.equal(result.doubled, 8);
+	assert.equal(result.pending, false);
+	assert.equal(result.seed.scopeKey, 'public-scope-surface');
+	assert.deepEqual(
+		result.seed.entries.map((entry) => entry.key),
+		['value', 'doubled'],
+	);
+	assert.deepEqual(
+		result.inspection.nodes.map((node) => [node.key, node.status]),
+		[
+			['value', 'ready'],
+			['doubled', 'ready'],
+		],
+	);
+	assert.ok(result.inspection.trace.length > 0 && result.inspection.trace.length <= 4);
+	assert.deepEqual(withScope.api.exercise(), [2, 8]);
 });
 
 test('compiled structural adoption costs only its selected implementation', async (t) => {
@@ -2581,10 +2920,12 @@ test('extracted primitive values omit signal binding work without trusting casts
 export function App(props) {
 					return <span title={${expression}}>{${expression} as string}</span>;
 				}`;
+				// Opaque results can carry handles only where opaque handles are admitted.
 				const { code } = compile(source, `/project/primitive-binding.${extension}`, {
 					mode: 'client',
 					dev,
 					hmr: false,
+					opaqueSignalHandles: true,
 				});
 				// This is a compiler-cost guard: behavior is covered by public hydration
 				// and late writable-prop tests. Count the emitted runtime capabilities,
@@ -2802,8 +3143,23 @@ test('local void root specialization needs every lexical use and the loaded expo
 			false,
 		],
 		[
+			'retained render and unmount callbacks',
+			'export function run(el) { const root=createRoot(el); root.render(View); return {replace() { root.render(View); }, dispose: () => root.unmount()}; }',
+			true,
+		],
+		[
 			'callback escape',
-			'export function run(el) { const root=createRoot(el); root.render(View); return () => root.render(View); }',
+			'export function run(el) { const root=createRoot(el); root.render(View); return () => root; }',
+			false,
+		],
+		[
+			'callback unknown render target',
+			'export function run(el) { const root=createRoot(el); root.render(View); return () => root.render(Other); }',
+			false,
+		],
+		[
+			'callback component shadow',
+			'export function run(el) { const root=createRoot(el); root.render(View); return (View) => root.render(View); }',
 			false,
 		],
 		[
@@ -3049,12 +3405,25 @@ test('same-file void roots remove returned-value machinery while preserving stoc
 });
 
 test('same-file root optimization proves complete lifetimes across bindings and modes', (t) => {
+	const { parseModule } = createRequire(
+		new URL('../../packages/octane/package.json', import.meta.url),
+	)('@tsrx/core');
 	const previous = process.env.OCTANE_COMPILE_FROZEN_AST;
 	process.env.OCTANE_COMPILE_FROZEN_AST = '1';
 	let checked = 0;
 	const check = (source, helper, selected, options = {}) => {
 		const code = compile(source, 'root-proof.tsrx', { hmr: false, dev: false, ...options }).code;
-		assert.equal(code.includes(helper + ' as'), selected, source + JSON.stringify(options));
+		const imports = new Set(
+			parseModule(code, 'root-proof.js').body.flatMap((node) =>
+				node.type === 'ImportDeclaration'
+					? node.specifiers.map((specifier) => specifier.imported?.name)
+					: [],
+			),
+		);
+		const specialized =
+			imports.has(helper) ||
+			(helper === '__createVoidRoot' && imports.has('__createVoidRootDefaultOptions'));
+		assert.equal(specialized, selected, source + JSON.stringify(options));
 		checked++;
 	};
 	const createPrefix =
@@ -3080,12 +3449,28 @@ test('same-file root optimization proves complete lifetimes across bindings and 
 			'__hydrateVoidRoot',
 			true,
 		);
+		// Direct calls in closures that outlive the creator keep a closed set of
+		// render targets.
+		check(
+			createPrefix +
+				'export function mount(el) { const root=createRoot(el); root.render(View); return () => root.unmount(); }',
+			'__createVoidRoot',
+			true,
+		);
+		check(
+			hydratePrefix +
+				'export function mount(el){const root=hydrateRoot(el,View);return {replace(){root.render(View);},dispose:()=>root.unmount()};}',
+			'__hydrateVoidRoot',
+			true,
+		);
 		for (const body of [
 			'namespace N { export const root=createRoot(el); root.render(View); root.unmount(); }',
 			'class C { static { const root=createRoot(el); root.render(View); root.unmount(); } }',
 			'export function mount(el) { const root=createRoot(el); root.render(View); return root; }',
 			'export function mount(el, unknown) { const root=createRoot(el); root.render(View); root.render(unknown); }',
-			'export function mount(el) { const root=createRoot(el); root.render(View); return () => root.unmount(); }',
+			'export function mount(el) { const root=createRoot(el); root.render(View); return () => root; }',
+			'export function mount(el, unknown) { const root=createRoot(el); root.render(View); return () => root.render(unknown); }',
+			'export function mount(el) { const root=createRoot(el); root.render(View); return (View) => root.render(View); }',
 			'export function mount(el) { const root=createRoot(el); root["render"](View); root.unmount(); }',
 			'export function mount(el) { const root=createRoot(el); root.render(View); eval("root.render(1)"); }',
 			'function Outer() { function mount(el) { const root=createRoot(el); root.render(View); root.unmount(); } return <section/>; }',
@@ -3126,7 +3511,8 @@ test('same-file root optimization proves complete lifetimes across bindings and 
 		for (const body of [
 			'const root=hydrateRoot(el,View);root.render(unknown);root.unmount();',
 			'const root=hydrateRoot(el,View);return root;',
-			'const root=hydrateRoot(el,View);return()=>root.unmount();',
+			'const root=hydrateRoot(el,View);return()=>root;',
+			'const root=hydrateRoot(el,View);return()=>root.render(unknown);',
 			'const root=hydrateRoot(el,View);root["render"](View);',
 			'const root=hydrateRoot(el,View);root.render?.(View);',
 			'const root=hydrateRoot(el,View);const alias=root;alias.render(View);',

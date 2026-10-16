@@ -1,12 +1,13 @@
+import { useState } from 'octane';
 import { Canvas } from '@octanejs/three';
 import { Scene } from './Scene.three.tsrx';
 
 export function App() @{
+	const [selection, setSelection] = useState('idle');
 	const onPointerMissed = (event) => {
-		const proof = globalThis as
-			typeof globalThis & {
-				__octaneThreeEventLog?: Array<Record<string, unknown>>;
-			};
+		const proof = globalThis as typeof globalThis & {
+			__octaneThreeEventLog?: Array<Record<string, unknown>>;
+		};
 		(proof.__octaneThreeEventLog ??= []).push({
 			type: 'root-miss',
 			nativeType: event.type,
@@ -15,6 +16,7 @@ export function App() @{
 
 	<main
 		data-octane-three-app="ready"
+		data-selection={selection}
 		style={{ width: '64px', height: '64px', marginLeft: '24px', marginTop: '16px' }}
 	>
 		<Canvas
@@ -23,7 +25,7 @@ export function App() @{
 			camera={{ position: [0, 0, 5] }}
 			onPointerMissed={onPointerMissed}
 		>
-			<Scene />
+			<Scene onSelect={() => setSelection('selected')} />
 		</Canvas>
 	</main>
 }

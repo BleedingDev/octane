@@ -14,7 +14,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // Verifies the Strong repair task family:
 // - each starter fails Strong compilation with the exact error its prompt quotes,
-//   and each reference compiles;
+//   and each reference compiles (without --check, a stale quote of the same
+//   diagnostic code is rewritten to the current message);
 // - each recorded workaround (`tasks/<id>/negatives/<name>/src/App.tsrx`), the
 //   rewrites agents reach for when a Strong error blocks them, fails its grader;
 // - each recorded alternative answer (`tasks/<id>/alternatives/<name>/src/App.tsrx`)
@@ -31,13 +32,15 @@ const corpusRoot = join(packageRoot, 'datasets', 'train', 'user-apps-v1');
 const tasksRoot = join(corpusRoot, 'tasks');
 const ledgerPath = join(corpusRoot, 'strong-repair-negatives.json');
 const catalog = JSON.parse(readFileSync(join(corpusRoot, 'catalog.json'), 'utf8'));
-const slotTimeoutMs = 90_000;
 const { compile } = await import(
 	pathToFileURL(join(repositoryRoot, 'packages', 'octane', 'src', 'compiler', 'compile.js')).href
 );
 
+const check = process.argv.includes('--check');
 const tasks = catalog.tasks.filter((task) => task.familyId === STRONG_REPAIR_FAMILY);
 const problems = [];
+const refreshedPrompts = [];
+const diagnosticCode = (message) => /\[(OCTANE_[A-Z_]+)\]/.exec(message)?.[1];
 for (const task of tasks) {
 	const taskRoot = join(tasksRoot, task.taskId);
 	const strongError = (kind) => {
@@ -52,11 +55,25 @@ for (const task of tasks) {
 	};
 	const starterError = strongError('starter');
 	const referenceError = strongError('reference');
+	const promptPath = join(taskRoot, 'prompt.md');
+	const prompt = readFileSync(promptPath, 'utf8');
+	const quoted = /```text\n([^\n]*)\n```/.exec(prompt);
 	if (starterError === null) {
 		problems.push(`${task.taskId}: the starter compiles in Strong mode.`);
-	} else if (!readFileSync(join(taskRoot, 'prompt.md'), 'utf8').includes(starterError)) {
+	} else if (
+		!prompt.includes(starterError) &&
+		!check &&
+		quoted !== null &&
+		diagnosticCode(quoted[1]) === diagnosticCode(starterError)
+	) {
+		writeFileSync(
+			promptPath,
+			prompt.replace(quoted[0], () => `\`\`\`text\n${starterError}\n\`\`\``),
+		);
+		refreshedPrompts.push(task.taskId);
+	} else if (!prompt.includes(starterError)) {
 		problems.push(
-			`${task.taskId}: prompt.md does not quote the starter's current error:\n${starterError}`,
+			`${task.taskId}: prompt.md does not quote the starter's current error${check ? ' (pnpm --filter @octanejs/evals strong-repair:verify refreshes a quote of the same diagnostic)' : ''}:\n${starterError}`,
 		);
 	}
 	if (referenceError !== null)
@@ -78,7 +95,24 @@ for (const task of tasks) {
 }
 
 // A submission alias is keyed by task ID, so one Vitest run can grade at most one
-// negative per task. Independent slots run concurrently.
+// negative per task. Each run already spreads its graders across the CPUs, so a
+// second concurrent run only has to cover another run's startup. Starting every
+// slot at once oversubscribed a 4-vCPU CI runner about eightfold, until each slot
+// took as long as the whole corpus. Slots never grow, so the largest start first.
+// All runs share one deadline, which keeps this script's worst case below the
+// timeout in tests/user-app-corpus.test.ts. Grading time on the 4-vCPU CI runner
+// follows the runner's speed, which varies about twofold. The deadline is about
+// twice the slowest grading seen on main, which was about 95 seconds.
+const slotConcurrency = 2;
+const gradingTimeoutMs = 180_000;
+const runningSlots = new Map();
+let gradingFailure;
+
+function stopGrading(error) {
+	gradingFailure ??= error;
+	for (const child of runningSlots.keys()) child.kill('SIGKILL');
+}
+
 function gradeSlot(entries) {
 	const aliasRoot = mkdtempSync(join(tmpdir(), 'octane-eval-strong-repair-'));
 	const reportPath = join(aliasRoot, 'report.json');
@@ -101,10 +135,10 @@ function gradeSlot(entries) {
 				stdio: 'ignore',
 			},
 		);
-		const timer = setTimeout(() => child.kill('SIGKILL'), slotTimeoutMs);
+		runningSlots.set(child, entries);
 		child.on('error', reject);
 		child.on('close', (_code, signal) => {
-			clearTimeout(timer);
+			runningSlots.delete(child);
 			try {
 				if (signal !== null) throw new Error(`Negative grading terminated by ${signal}.`);
 				const report = JSON.parse(readFileSync(reportPath, 'utf8'));
@@ -121,7 +155,33 @@ function gradeSlot(entries) {
 	});
 }
 
-const graded = (await Promise.all(slots.map(gradeSlot))).flat();
+const gradedSlots = [];
+let nextSlot = 0;
+const deadline = setTimeout(() => {
+	const unfinished = [...runningSlots.values()].map((entries) =>
+		entries.map(({ taskId, name }) => `${taskId}/${name}`).join(', '),
+	);
+	stopGrading(
+		new Error(
+			`Strong repair grading exceeded ${gradingTimeoutMs / 1000} seconds. Still grading:\n${unfinished.join('\n')}`,
+		),
+	);
+}, gradingTimeoutMs);
+await Promise.all(
+	Array.from({ length: Math.min(slotConcurrency, slots.length) }, async () => {
+		while (gradingFailure === undefined && nextSlot < slots.length) {
+			const index = nextSlot++;
+			try {
+				gradedSlots[index] = await gradeSlot(slots[index]);
+			} catch (error) {
+				stopGrading(error);
+			}
+		}
+	}),
+);
+clearTimeout(deadline);
+if (gradingFailure !== undefined) throw gradingFailure;
+const graded = gradedSlots.flat();
 const ledger = {};
 for (const { taskId, kind, name, directory, result } of graded) {
 	const key = `${taskId}/${name}`;
@@ -159,7 +219,7 @@ const content = `${JSON.stringify(sorted, null, 2)}\n`;
 const gaps = Object.values(sorted).filter((status) => status === 'compiles-keeps-bug').length;
 const workarounds = Object.keys(sorted).length;
 const alternatives = graded.length - workarounds;
-if (process.argv.includes('--check')) {
+if (check) {
 	if (!existsSync(ledgerPath) || readFileSync(ledgerPath, 'utf8') !== content) {
 		console.error(
 			`${relative(repositoryRoot, ledgerPath)} is stale; run pnpm --filter @octanejs/evals strong-repair:verify`,
@@ -174,4 +234,9 @@ if (process.argv.includes('--check')) {
 	console.log(
 		`wrote ${relative(repositoryRoot, ledgerPath)}: ${workarounds} workarounds, ${gaps} compile and keep the bug (${alternatives} alternative answers pass)`,
 	);
+	if (refreshedPrompts.length > 0) {
+		console.log(
+			`refreshed the quoted error in ${refreshedPrompts.join(', ')}; run pnpm --filter @octanejs/evals corpus:generate`,
+		);
+	}
 }

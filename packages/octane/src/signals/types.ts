@@ -7,6 +7,9 @@ export const SIGNAL_BINDING_SUBSCRIBE: unique symbol = Symbol.for(
 export const SIGNAL_BINDING_IDENTITY: unique symbol = Symbol.for(
 	'octane.signal-binding-identity',
 ) as any;
+export const SIGNAL_BINDING_RETIRED: unique symbol = Symbol.for(
+	'octane.signal-binding-retired',
+) as any;
 export const QUERY_REQUEST: unique symbol = Symbol.for('octane.query-request') as any;
 export const SIGNAL_OWNER_RESOLVE: unique symbol = Symbol.for('octane.signal-owner-resolve') as any;
 
@@ -35,6 +38,8 @@ export interface SignalHandle<T> {
 	readonly [SIGNAL_BINDING_READ]: () => T;
 	/** @internal Observe invalidation; optional teardown replaces the owning scope's final invalidation. */
 	readonly [SIGNAL_BINDING_SUBSCRIBE]: (notify: () => void, onRetire?: () => void) => () => void;
+	/** @internal Whether the handle's own owner retired, as `onRetire` would report. Failure paths only. */
+	readonly [SIGNAL_BINDING_RETIRED]?: () => boolean;
 	readonly [SIGNAL_BINDING_IDENTITY]: () => SignalBindingIdentity;
 	readonly key: string;
 	readonly kind: 'signal' | 'derived' | 'async';
@@ -214,14 +219,32 @@ export interface Scope {
 	dispose(): void;
 }
 
+/**
+ * @internal A scope the runtime creates. It lacks the members only
+ * createScope installs (installPublicScope), so internal code that reaches for
+ * one fails to typecheck instead of failing in applications that never call
+ * createScope.
+ */
+export type OwnerScope = Omit<
+	Scope,
+	'derived$' | 'get' | 'set' | 'isPending' | 'batch' | 'action' | 'serialize' | 'inspect'
+>;
+
 export interface OwnerBoundSignal<T> extends SignalHandle<T> {
-	readonly [SIGNAL_OWNER_RESOLVE]: (owner: Scope) => SignalHandle<T>;
+	readonly [SIGNAL_OWNER_RESOLVE]: (owner: OwnerScope) => SignalHandle<T>;
 }
 
+/**
+ * A host carrier for the active owner, such as AsyncLocalStorage on a server.
+ * It carries owners as identities and never calls them: an owner the runtime
+ * created for compiled declarations has no public Scope methods until the
+ * program calls createScope, currentSignalOwner or this package's
+ * installSignalOwnerEnvironment.
+ */
 export interface SignalOwnerEnvironment {
-	current(): SignalOwner | null;
-	run<T>(owner: SignalOwner, callback: () => T): T;
-	capture(owner: SignalOwner): <T>(callback: () => T) => T;
+	current(): SignalOwnerIdentity | null;
+	run<T>(owner: SignalOwnerIdentity, callback: () => T): T;
+	capture(owner: SignalOwnerIdentity): <T>(callback: () => T) => T;
 }
 
 /** A renderer identity is mapped lazily to a Scope only when signals are used. */
@@ -234,7 +257,7 @@ export interface SignalRendererOwnerIdentity extends SignalOwnerIdentity {
 	readonly instanceOwner: object;
 	readonly instanceKey: string;
 	/** A directive arm's or inline row's enclosing owner. Component instances have none. */
-	readonly enclosingOwner?: SignalRendererOwnerIdentity;
+	readonly enclosingOwner?: SignalRendererOwnerIdentity | undefined;
 }
 
 export type SignalOwner = Scope | SignalOwnerIdentity | SignalRendererOwnerIdentity;

@@ -16,8 +16,9 @@ variants use client production compilation with HMR, development metadata, and
 automatic region memoization disabled. The latter ensures an unrelated `tick`
 prop reaches every fixture body rather than being absorbed by another cache.
 Plain TypeScript hooks go through the real `slotHooks` entry point with the same
-explicit on/off setting. A separate manual-slot module uses `manualSlots: true`,
-matching bindings whose slots must not be automatically rewritten.
+explicit on/off setting. Separate ordinary and Strong manual-slot modules use
+`manualSlots: true`, matching bindings whose slots must not be automatically
+rewritten. Both must retain the same allocation-free memo hits.
 
 ## Scenarios and semantic controls
 
@@ -74,8 +75,10 @@ and that update has work of its own. Since root render transactions landed
 closures and opens a transaction whose undo log and offscreen capture (eight
 arrays) are allocated even when empty, which is 2 functions and 10 arrays per
 render in both compiler variants. A hook-free `Driver` control runs the identical
-phase sequence, and every scenario's ops are reported net of the driver's
-same-phase counts. A scenario that would fall below the driver fails the run.
+phase sequence, and each render phase's ops are reported net of the driver's
+same-phase counts. A render phase that would fall below the driver fails the run.
+Unmount reports absolute counts: component cleanup need not match the driver's,
+so those rows are not comparable to historical net teardown rows.
 The raw per-phase counters stay in the JSON metadata. The driver keeps its own
 `driver_*` ops, and two guards pin its hit-phase functions and arrays at the
 current root-update cost, so that path cannot grow silently either. Without the
@@ -106,6 +109,55 @@ measured target's metadata, which the unified runner preserves).
 dependency tree. Keep those dependencies, hashes, and runner options identical
 for a before/after comparison. A nonstandard parser loader must be disclosed
 with the result.
+
+## Direct render values
+
+```sh
+node benchmarks/bench.mjs render-values --quick --ratios
+node benchmarks/hook-memo/run.mjs --render-values
+```
+
+`render-values.tsrx` compares a direct `content={@{ ... }}` component prop with
+the handwritten `content={() => @{ ... }}` form under Strong production
+compilation. A surrounding component displays a changing tick and forwards fresh
+props to each value-producing child. The captured label stays equal for 32
+updates and then changes for 32 updates. The same span and uncontrolled
+input survive, typed input and focus remain intact, and teardown empties the
+container. Clean and observed bundles must produce the same values.
+
+The existing post-tree-shaking observer counts application function expressions.
+Ratio guards require no new function on an unchanged captured label, at most
+one on a changed label, and callable render values at the receiving component.
+The wrapper is reported as a same-run control, with no requirement that it stay
+less efficient. These are source creation events, not measured heap allocations
+or a CPU improvement. In particular, they do not count native property-descriptor
+allocations from the guarded capture probes. Automatic memoization operates on
+template regions: putting the changing tick and the content prop in one region can invalidate both. This
+guard preserves narrow captures in the value-producing child; it does not promise
+independent caching of every prop expression. Complete consumer bundle and timing
+comparisons remain separate measurements; this scenario does not impose a byte
+threshold.
+
+`keyed-render-values.tsrx` adds five Strong controls: a keyed Fragment, a keyed
+Fragment with local scoped setup, a keyed Fragment enclosing a try/pending/catch
+boundary, and an imported component with its key before or after spread props.
+Each performs 32 changing-label updates under one key and then 32 key changes.
+Same-key updates preserve the input, typed value, focus, and label node; a changed
+key replaces both nodes and restores the default input value. Clean and observed
+bundles must agree, and every root empties on teardown. Pending and catch
+transitions, spread precedence, and effect ownership have separate runtime tests;
+this benchmark exercises the successful update/remount paths.
+
+The client and server production output is parsed in both compatibility and
+native-signal modes to count descriptor-construction calls through their imported
+bindings. Ratio guards require zero calls across these five scenarios. The live
+controls use native-signal compilation. Extended observation records application/runtime object,
+constructor, function, and array creation events by scenario and update phase.
+These are source events, not heap bytes; native allocations and DOM-emulator work
+are outside the observer. The combined clean bundle bytes include all render-value
+scenarios and the runtime; they do not substitute for a complete consumer build.
+`BENCH_RENDER_VALUES_ARTIFACT=/absolute/path.mjs` retains the clean production
+bundle for an independent same-input timing or heap probe.
 
 ## Compiler cache shapes
 

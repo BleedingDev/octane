@@ -134,3 +134,76 @@ package's `status.json`).
 - **Native DOM events** — link callbacks receive browser events rather than React
   synthetic events.
 - Router devtools are distributed separately and are not part of this binding.
+
+## Compiled route trees
+
+Use `@octanejs/tanstack-router/compiled` for a tree whose selected route, shell,
+pending, error and not-found components are compiled Octane `@{ ... }` bodies.
+The entry exports `RouterProvider`, `Outlet`, and `lazyRouteComponent`; the
+existing `CompiledRouterProvider`, `CompiledOutlet`, and
+`lazyCompiledRouteComponent` names remain aliases. TanStack owns matching,
+loading, navigation, history and render acknowledgements.
+
+`PreconfiguredRouterProvider` accepts only `{ router }` and owns the provider and
+match projection in Strong mode; route lifecycle boundaries may still require
+compatibility mode. Configure the router before rendering it. Use `RouterProvider`
+when provider option props need to reconfigure the router synchronously.
+
+```tsx
+import {
+  createRootRoute, createRoute, createRouter, createBrowserHistory,
+  RouterProvider, Outlet, lazyRouteComponent,
+} from '@octanejs/tanstack-router/compiled';
+
+const root = createRootRoute({ component: Layout });
+const item = createRoute({
+  getParentRoute: () => root,
+  path: 'items/$id',
+  component: lazyRouteComponent(() => import('./Item')),
+});
+const router = createRouter({
+  routeTree: root.addChildren([item]),
+  history: createBrowserHistory(),
+});
+
+function Layout() @{
+  <main><Outlet /></main>
+}
+function App() @{
+  <RouterProvider router={router} />
+}
+```
+
+Import read/navigation hooks (`useMatch`, `useParams`, `useSearch`,
+`useLoaderData`, `useLoaderDeps`, `useRouteContext`, `useLocation`,
+`useMatches`, `useParentMatches`, `useChildMatches`, `useNavigate`,
+`useCanGoBack`, `useRouter`, and `useRouterState`) from the same `/compiled`
+entry. It owns separate non-callable contexts. Its `createRoute`,
+`createRootRoute`, `createRootRouteWithContext`, `getRouteApi`, `createFileRoute`,
+`createLazyRoute`, and `createLazyFileRoute` attach accessors to those contexts.
+Route-bound hooks and `Route.Link` work alongside the exported `Link`,
+`useLinkProps`, and `createLink`. Factories construct router-core base instances;
+they do not promise `instanceof Route` from the ordinary entry.
+
+The compiled entry also exports `Html`, `Head`, `Body`, `HeadContent`, `Scripts`,
+`Asset`, `useTags`, `getAssetKeys`, `ClientOnly`, and `useHydrated` for document
+shells. Root shells can read their root match and context. SSR and client builds
+must select the same entry for a tree. Start applications select this entry with
+`compiled: true` in their Start plugin options, including generated route and
+split-module imports.
+
+Compiled selection removes descriptor creation from route selection, bound
+links and document shells, but does not make the entire binding Strong or
+remove the generic renderer. Link retains synchronous `flushSync` so its
+transition cue is already visible in `onBeforeNavigate` callbacks. Both entries
+share a Strong keyed script template. Newly mounted route scripts execute once;
+hydration adopts existing scripts without replaying them, and self-removing
+transport scripts leave no item markers behind. Managed keys, nonces and route
+ownership are retained. Scroll-restoration scripts use a server-owned static
+hydration range, which is removed after hydration and omitted on client-only
+mounts. Error propagation and lifecycle dependencies retain their existing
+contracts.
+
+`Wrap` and `InnerWrap` remain unsupported and produce an explicit diagnostic.
+For returned JSX, host strings, renderable wrappers or mixed route trees, retain
+the ordinary entry. Its public APIs and contexts remain available unchanged.

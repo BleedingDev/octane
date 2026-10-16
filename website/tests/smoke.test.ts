@@ -3,7 +3,7 @@
 // boundaries; detailed copy and visual behavior belong to focused tests.
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, waitFor, cleanup } from '@octanejs/testing-library';
-import { RouterProvider, createMemoryHistory } from '@octanejs/tanstack-router';
+import { RouterProvider, createMemoryHistory } from '@octanejs/tanstack-router/compiled';
 import bundleSizeBaseline from '../../benchmarks/baselines/local/bundle-size.json';
 import threeRendererBaseline from '../../benchmarks/baselines/local/three-renderer.json';
 import weatherAppLighthouseBaseline from '../../benchmarks/baselines/local/weather-app-lighthouse.json';
@@ -75,16 +75,22 @@ function expectedBarCount(card: BenchCard): number {
 }
 
 function atStableChartPrecision(card: BenchCard) {
+	const stable = (value: unknown) =>
+		typeof value === 'number' ? Number(value.toPrecision(15)) : value;
 	return {
 		...card,
 		rows: card.rows.map((row) =>
+			Object.fromEntries(Object.entries(row).map(([key, value]) => [key, stable(value)])),
+		),
+		// Range ends are geometric means too, so they carry the same libc ULP noise.
+		ceilings:
+			card.ceilings &&
 			Object.fromEntries(
-				Object.entries(row).map(([key, value]) => [
-					key,
-					typeof value === 'number' ? Number(value.toPrecision(15)) : value,
+				Object.entries(card.ceilings).map(([op, ends]) => [
+					op,
+					Object.fromEntries(Object.entries(ends).map(([key, value]) => [key, stable(value)])),
 				]),
 			),
-		),
 	};
 }
 

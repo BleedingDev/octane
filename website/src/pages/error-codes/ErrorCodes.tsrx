@@ -1,5 +1,5 @@
 import { useState } from 'octane';
-import { Link, Outlet, useParams, useSearch } from '@octanejs/tanstack-router';
+import { Link, Outlet, useParams, useSearch } from '@octanejs/tanstack-router/compiled';
 import {
 	decodeErrorMessage,
 	errorArguments,
@@ -132,6 +132,11 @@ export function ErrorCodesLayout() @{
 				white-space: pre-wrap;
 				overflow-wrap: anywhere;
 			}
+			.errors-layout :global(.error-note) {
+				margin: 0 0 1.5rem;
+				color: var(--text-body);
+				line-height: 1.7;
+			}
 			.errors-layout :global(.error-argument-note) {
 				margin: 0 0 1.5rem;
 				color: var(--text-secondary);
@@ -165,14 +170,13 @@ export function ErrorCodesLayout() @{
 export function ErrorCodesIndex() @{
 	const [query, setQuery] = useState('');
 	const normalizedQuery = query.trim().toLowerCase();
-	const visibleCodes =
-		normalizedQuery
-			? errorCodes.filter(
-					(entry) =>
-						entry.code.includes(normalizedQuery) ||
-							entry.message.toLowerCase().includes(normalizedQuery),
-				)
-			: errorCodes;
+	const visibleCodes = normalizedQuery
+		? errorCodes.filter(
+				(entry) =>
+					entry.code.includes(normalizedQuery) ||
+					entry.message.toLowerCase().includes(normalizedQuery),
+			)
+		: errorCodes;
 	useTitle('Octane — Error decoder');
 
 	<section class="errors-index">
@@ -183,7 +187,9 @@ export function ErrorCodesIndex() @{
 			read its full message, or open the link included in the production error to fill in its values
 			automatically.
 		</p>
-		<label for="error-code-search" class="sr-only">Search error codes</label>
+		<label for="error-code-search" class="sr-only">
+			Search error codes
+		</label>
 		<input
 			id="error-code-search"
 			class="errors-search"
@@ -198,7 +204,7 @@ export function ErrorCodesIndex() @{
 					<li>
 						<Link to="/errors/$code" params={{ code: entry.code }} class="error-card">
 							<span class="error-card-code">
-								{'#' + entry.code as string}
+								{('#' + entry.code) as string}
 								@if (entry.status === 'retired') {
 									<span class="error-card-status">Retired</span>
 								}
@@ -222,27 +228,31 @@ export function ErrorCodeDecoder() @{
 	const message = decodeErrorMessage(entry.message, args);
 	const missingCount = Math.max(0, entry.argumentCount - args.length);
 	const extraArgs = args.slice(entry.argumentCount);
-	const extraEntries = extraArgs.map(
-		(argument, index) => ({
-			argument,
-			key: String(index),
-		}),
-	);
+	const extraEntries = extraArgs.map((argument, index) => ({
+		argument,
+		key: String(index),
+	}));
 	useTitle('Octane — Error #' + entry.code);
 
 	<article class="error-decoder">
 		<p class="error-decoder-code">
-			{'Octane error #' + entry.code as string}
+			{('Octane error #' + entry.code) as string}
 			@if (entry.status === 'retired') {
 				<span class="error-card-status">Retired</span>
 			}
 		</p>
 		<h1 class="errors-title">Full error message</h1>
 		<pre class="error-message">{message}</pre>
+		@if (entry.note) {
+			<p class="error-note">{entry.note as string}</p>
+		}
 		@if (missingCount > 0) {
 			<p class="error-argument-note">
-				{'This link is missing ' + missingCount +
-					(missingCount === 1 ? ' argument.' : ' arguments.') as string}
+				{
+					('This link is missing ' +
+						missingCount +
+						(missingCount === 1 ? ' argument.' : ' arguments.')) as string
+				}
 				{' Unfilled %s placeholders remain visible above.'}
 			</p>
 		}
@@ -262,6 +272,8 @@ export function ErrorCodeDecoder() @{
 			Use a development build while debugging to see full framework diagnostics at the original
 			failure site.
 		</p>
-		<Link to="/errors" class="errors-back">← Browse all error codes</Link>
+		<Link to="/errors" class="errors-back">
+			← Browse all error codes
+		</Link>
 	</article>
 }

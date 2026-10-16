@@ -35,9 +35,9 @@
       "node": ">=22",
       "platform": "any",
       "arch": "any",
-      "packageManager": "pnpm@11.15.1",
+      "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "91136aca7e454123147ee81e429398d60a872288b7ce288a72b4cfbf3c038dc2"
+      "lockfileSha256": "6df573d6aa854c122b0cea3e8c3be46fb67e3debe9ce0f329a773850bbd87706"
     }
   },
   "lanes": [
@@ -85,7 +85,7 @@
         {
           "path": "packages/tanstack-router/tests/_fixtures/router-diff.tsrx",
           "role": "support",
-          "sha256": "1ea73e640f57317ccdede12dcddac2abaf76010dc20d6889183e1ee39436a937"
+          "sha256": "630eba2115e7c374d904be7366649eec3ea9cdf748a6df9aaeba89659e3c27bf"
         }
       ]
     },
@@ -118,12 +118,12 @@
         {
           "path": "packages/tanstack-router/typetests/public-api.test-d.ts",
           "role": "support",
-          "sha256": "33a073f206813e20b1f896de48bd3e5ff21717bb8bf1b209eff072105896a03b"
+          "sha256": "4b4bc9bb3498ec7f5eba9f281ba564705af3b4344a2581383da7f80a81bb808b"
         },
         {
           "path": "packages/tanstack-router/typetests/tsconfig.json",
           "role": "support",
-          "sha256": "1010237b70446c6adb91d55911a81d9037fde7e4dce533eb7652bbac205bb9eb"
+          "sha256": "22373d341ff7d7c31cd03429ed31d941375519a8511a5dad30dc6e3670fda455"
         }
       ]
     }

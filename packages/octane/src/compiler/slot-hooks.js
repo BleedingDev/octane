@@ -16,10 +16,24 @@
 
 import { parseModule, builders as b } from '@tsrx/core';
 import { parseModule as parseFallbackModule } from '#octane/compiler-parser';
-import { findRootFactoryImports, proveVoidRoots } from './void-roots.js';
-import { HOOK_NAMES, collectNestedBindingNames, hookSlotHash } from './compile.js';
-import { NATIVE_SIGNAL_HOOK_NAMES } from './hook-names.js';
-import { METHOD_DEP_IMPORT, annotateHookCalls, analyzeStrongMemoCandidates } from './hook-deps.js';
+import {
+	findRootFactoryImports,
+	findDefaultOptionsRootCalls,
+	proveVoidRoots,
+} from './void-roots.js';
+import { HOOK_NAMES, collectDepPaths, collectNestedBindingNames, hookSlotHash } from './compile.js';
+import { createLexicalAnalysis } from './compile-universal.js';
+import {
+	INITIAL_VALUE_HOOKS,
+	NATIVE_SIGNAL_HOOK_NAMES,
+	SPREAD_PATH_SLOT_HOOKS,
+} from './hook-names.js';
+import {
+	METHOD_DEP_IMPORT,
+	annotateHookCalls,
+	analyzeStrongMemoCandidates,
+	methodDepFlags,
+} from './hook-deps.js';
 import { inlinePlainHookMemos } from './plain-hook-memo.js';
 import { assertStrongMode } from './strong-mode.js';
 import { unsupportedStrongAutomaticMemo } from './strong-auto-memo.js';
@@ -137,9 +151,11 @@ function declaresHook(ast) {
 // A disposable expression or nonescaping local const root can omit return-value
 // reconciliation only when every render calls an imported compiled void body.
 // The adapter resolves each export's actual ABI; lexical binding identity keeps
-// shadows, aliases, closure captures and unknown future renders on the generic
-// path. Each candidate is one root and lists every relative import it renders.
-function collectVoidRootCandidates(ast) {
+// shadows, aliases, escaping captures and unknown future renders on the generic
+// path, while a closure that only calls render/unmount stays proven. Each
+// candidate is one root and lists every relative import it renders.
+// An exact one-argument call can omit options independently of that return ABI.
+function collectVoidRootCandidates(ast, defaultOptionsRoot = false) {
 	const factories = findRootFactoryImports(ast);
 	if (factories.size === 0) return [];
 	const componentImports = new Map();
@@ -166,6 +182,7 @@ function collectVoidRootCandidates(ast) {
 	if (componentImports.size === 0) return [];
 	return proveVoidRoots(ast, {
 		factories,
+		defaultOptionsRoot,
 		component: (name) => componentImports.get(name),
 	}).map(({ callee, helper, components }) => ({
 		helper,
@@ -277,22 +294,26 @@ export function findVoidComponentImports(source, id) {
 	return [...unique.values()];
 }
 
-function collectVoidRootEdits(candidates, st, isVoidComponentImport) {
-	if (typeof isVoidComponentImport !== 'function') return;
-	for (const candidate of candidates) {
-		if (
-			!candidate.components.every(({ request, imported }) =>
-				isVoidComponentImport(request, imported),
+function collectRootEdits(candidates, defaultOptionsCalls, st, isVoidComponentImport) {
+	const roots = new Map(
+		defaultOptionsCalls.map((callee) => [
+			callee.start,
+			{ start: callee.start, end: callee.end, helper: '__createRootDefaultOptions' },
+		]),
+	);
+	if (typeof isVoidComponentImport === 'function')
+		for (const candidate of candidates)
+			if (
+				candidate.components.every(({ request, imported }) =>
+					isVoidComponentImport(request, imported),
+				)
 			)
-		)
-			continue;
-		let local = st.voidRootNames.get(candidate.helper);
+				roots.set(candidate.start, candidate);
+	for (const { start, end, helper } of roots.values()) {
+		let local = st.voidRootNames.get(helper);
 		if (local === undefined)
-			st.voidRootNames.set(
-				candidate.helper,
-				(local = allocSlotName(st, '_$' + candidate.helper.slice(2))),
-			);
-		st.edits.push({ pos: candidate.start, end: candidate.end, text: local });
+			st.voidRootNames.set(helper, (local = allocSlotName(st, '_$' + helper.slice(2))));
+		st.edits.push({ pos: start, end, text: local });
 	}
 }
 
@@ -301,24 +322,6 @@ const STATE_GETTER_HELPERS = {
 	useLinkedState: '__useLinkedStateWithGetter',
 	useReducer: '__useReducerWithGetter',
 };
-
-function collectIdentifierNames(root) {
-	const names = new Set();
-	const walk = (node) => {
-		if (node == null || typeof node !== 'object') return;
-		if (Array.isArray(node)) {
-			for (const child of node) walk(child);
-			return;
-		}
-		if (node.type === 'Identifier' && typeof node.name === 'string') names.add(node.name);
-		for (const key in node) {
-			if (key === 'type' || key === 'loc' || key === 'start' || key === 'end') continue;
-			walk(node[key]);
-		}
-	};
-	walk(root);
-	return names;
-}
 
 function allocSlotName(st, preferred) {
 	let name = preferred;
@@ -455,268 +458,71 @@ function canRewriteParallelUseArg(root) {
 	return safe;
 }
 
-// Dependency paths mirror the full compiler's one-level member policy. The
-// returned nodes retain their original byte offsets so arbitrary TS remains
-// printable without asking the full-module printer to understand it.
-function collectParallelUseDependencies(root, source) {
-	const dependencies = [];
-	const seen = new Set();
+// Memoized use() arguments share the full compiler's dependency policy
+// (`collectDepPaths`). Dependency arrays evaluate on every render, so they may
+// only perform reads the authored argument performs: reads it defers
+// (callbacks, unreplayable guards, `??`/`||`/`&&` right sides) keep `root?.prop`
+// for bound roots and drop ambient globals, and reads it skips after an
+// optional link and one-level method calls use the guarded `__methodDep`
+// probe. Each free name resolves through the argument's enclosing scopes,
+// analyzed once per module.
+function collectParallelUseDependencies(arg, st) {
+	const lexical = (st.moduleLexical ??= createLexicalAnalysis(st.moduleAst));
+	const scope = lexical.nodeScopes.get(arg);
+	const roots = new Set();
+	const texts = collectDepPaths(
+		arg,
+		null,
+		scope === undefined ? null : (name) => lexical.isBound(scope, name),
+		() => requireParallelHelper(st, METHOD_DEP_IMPORT),
+	).map((dependency) => printParallelUseDependency(dependency, roots));
+	return { texts, roots };
+}
 
-	function add(node, rootName) {
-		const text = source.slice(node.start, node.end);
-		const key = `${rootName}\0${text}`;
-		if (seen.has(key)) return;
-		seen.add(key);
-		dependencies.push({ node, root: rootName, text });
+// `collectDepPaths` returns synthesized identifiers, one-level members,
+// `typeof` witnesses, `__methodDep` probes, and conditionals that replay an
+// authored typeof guard. Print that closed set directly; `roots` collects every
+// name a dependency reads, which decides whether its use() may join a batch.
+function printParallelUseDependency(node, roots) {
+	node = unwrapParallelUseValue(node);
+	const group = (child) => {
+		const text = printParallelUseDependency(child, roots);
+		const type = unwrapParallelUseValue(child).type;
+		return type === 'BinaryExpression' ||
+			type === 'LogicalExpression' ||
+			type === 'ConditionalExpression'
+			? `(${text})`
+			: text;
+	};
+	switch (node.type) {
+		case 'Identifier':
+			roots.add(node.name);
+			return node.name;
+		case 'Literal':
+			return node.raw ?? JSON.stringify(node.value);
+		case 'MemberExpression':
+			return `${group(node.object)}${node.optional ? '?.' : node.computed ? '' : '.'}${
+				node.computed ? `[${group(node.property)}]` : node.property.name
+			}`;
+		case 'CallExpression':
+			return `${group(node.callee)}(${node.arguments.map(group).join(', ')})`;
+		case 'UnaryExpression':
+			return `${node.operator}${/^[a-z]/.test(node.operator) ? ' ' : ''}${group(node.argument)}`;
+		case 'BinaryExpression':
+		case 'LogicalExpression':
+			return `${group(node.left)} ${node.operator} ${group(node.right)}`;
+		case 'ConditionalExpression':
+			return `${group(node.test)} ? ${group(node.consequent)} : ${group(node.alternate)}`;
 	}
+	throw new Error(`Unexpected use() dependency node: ${node.type}`);
+}
 
-	function createLocalScope(parent, kind) {
-		return { parent, kind, names: new Set() };
-	}
-
-	function isLocallyBound(scope, name) {
-		for (let current = scope; current !== null; current = current.parent) {
-			if (current.names.has(name)) return true;
-		}
-		return false;
-	}
-
-	function nearestFunctionScope(scope) {
-		let current = scope;
-		while (current?.parent !== null && current?.kind !== 'function') current = current.parent;
-		return current;
-	}
-
-	function predeclareStatements(statements, blockScope) {
-		for (const original of statements || []) {
-			const statement =
-				original.type === 'ExportNamedDeclaration' || original.type === 'ExportDefaultDeclaration'
-					? original.declaration
-					: original;
-			if (!statement) continue;
-			if (statement.type === 'VariableDeclaration') {
-				const target = statement.kind === 'var' ? nearestFunctionScope(blockScope) : blockScope;
-				for (const declaration of statement.declarations || []) {
-					collectPatternNames(declaration.id, target.names);
-				}
-			} else if (
-				(statement.type === 'FunctionDeclaration' || statement.type === 'ClassDeclaration') &&
-				statement.id
-			) {
-				collectPatternNames(statement.id, blockScope.names);
-			}
-		}
-	}
-
-	function collectHoistedVars(node, functionScope, isRoot = true) {
-		if (!node || typeof node !== 'object') return;
-		if (Array.isArray(node)) {
-			for (const child of node) collectHoistedVars(child, functionScope, false);
-			return;
-		}
-		if (
-			!isRoot &&
-			(isFunctionNode(node) || node.type === 'ClassDeclaration' || node.type === 'ClassExpression')
-		) {
-			return;
-		}
-		if (node.type === 'VariableDeclaration' && node.kind === 'var') {
-			for (const declaration of node.declarations || []) {
-				collectPatternNames(declaration.id, functionScope.names);
-			}
-		}
-		for (const key in node) {
-			if (
-				key === 'type' ||
-				key === 'start' ||
-				key === 'end' ||
-				key === 'loc' ||
-				key === 'typeAnnotation' ||
-				key === 'returnType' ||
-				key === 'typeParameters' ||
-				key.startsWith('_octane')
-			) {
-				continue;
-			}
-			collectHoistedVars(node[key], functionScope, false);
-		}
-	}
-
-	function visitPatternExpressions(pattern, scope) {
-		if (!pattern) return;
-		if (pattern.type === 'AssignmentPattern') {
-			visitPatternExpressions(pattern.left, scope);
-			visit(pattern.right, scope);
-		} else if (pattern.type === 'ObjectPattern') {
-			for (const property of pattern.properties || []) {
-				if (property.computed) visit(property.key, scope);
-				visitPatternExpressions(
-					property.type === 'RestElement' ? property.argument : property.value,
-					scope,
-				);
-			}
-		} else if (pattern.type === 'ArrayPattern') {
-			for (const element of pattern.elements || []) visitPatternExpressions(element, scope);
-		} else if (pattern.type === 'RestElement') {
-			visitPatternExpressions(pattern.argument, scope);
-		}
-	}
-
-	function visitBlock(node, parentScope) {
-		const blockScope = createLocalScope(parentScope, 'block');
-		predeclareStatements(node.body, blockScope);
-		for (const statement of node.body || []) visit(statement, blockScope);
-	}
-
-	function visitFunction(node, parentScope) {
-		const functionScope = createLocalScope(parentScope, 'function');
-		if (node.id) collectPatternNames(node.id, functionScope.names);
-		if (node.type !== 'ArrowFunctionExpression') functionScope.names.add('arguments');
-		for (const param of node.params || []) collectPatternNames(param, functionScope.names);
-		collectHoistedVars(node.body, functionScope);
-		for (const param of node.params || []) visitPatternExpressions(param, functionScope);
-		if (node.body?.type === 'BlockStatement') visitBlock(node.body, functionScope);
-		else visit(node.body, functionScope);
-	}
-
-	function visit(node, scope) {
-		if (!node || typeof node !== 'object') return;
-		if (Array.isArray(node)) {
-			for (const child of node) visit(child, scope);
-			return;
-		}
-		if (PARALLEL_USE_TS_WRAPPERS.has(node.type)) {
-			visit(node.expression, scope);
-			return;
-		}
-		if (node.type?.startsWith('TS')) return;
-		switch (node.type) {
-			case 'Identifier':
-				if (!isLocallyBound(scope, node.name)) add(node, node.name);
-				return;
-			case 'Literal':
-			case 'ThisExpression':
-			case 'Super':
-			case 'MetaProperty':
-			case 'PrivateIdentifier':
-				return;
-			case 'MemberExpression': {
-				const object = unwrapParallelUseValue(node.object);
-				if (
-					!node.computed &&
-					object?.type === 'Identifier' &&
-					!isLocallyBound(scope, object.name)
-				) {
-					add(node, object.name);
-					return;
-				}
-				visit(node.object, scope);
-				if (node.computed) visit(node.property, scope);
-				return;
-			}
-			case 'Property':
-				if (node.computed) visit(node.key, scope);
-				visit(node.value, scope);
-				return;
-			case 'VariableDeclarator':
-				visitPatternExpressions(node.id, scope);
-				visit(node.init, scope);
-				return;
-			case 'CatchClause': {
-				const catchScope = createLocalScope(scope, 'block');
-				collectPatternNames(node.param, catchScope.names);
-				visitPatternExpressions(node.param, catchScope);
-				visit(node.body, catchScope);
-				return;
-			}
-			case 'FunctionDeclaration':
-			case 'FunctionExpression':
-			case 'ArrowFunctionExpression':
-				visitFunction(node, scope);
-				return;
-			case 'BlockStatement':
-				visitBlock(node, scope);
-				return;
-			case 'StaticBlock': {
-				const staticScope = createLocalScope(scope, 'function');
-				collectHoistedVars(node, staticScope);
-				visitBlock(node, staticScope);
-				return;
-			}
-			case 'SwitchStatement': {
-				visit(node.discriminant, scope);
-				const switchScope = createLocalScope(scope, 'block');
-				const statements = [];
-				for (const switchCase of node.cases || []) {
-					statements.push(...(switchCase.consequent || []));
-				}
-				predeclareStatements(statements, switchScope);
-				for (const switchCase of node.cases || []) {
-					visit(switchCase.test, switchScope);
-					for (const statement of switchCase.consequent || []) visit(statement, switchScope);
-				}
-				return;
-			}
-			case 'ForStatement':
-			case 'ForInStatement':
-			case 'ForOfStatement': {
-				const loopScope = createLocalScope(scope, 'block');
-				const declaration = node.type === 'ForStatement' ? node.init : node.left;
-				if (declaration?.type === 'VariableDeclaration' && declaration.kind !== 'var') {
-					for (const item of declaration.declarations || []) {
-						collectPatternNames(item.id, loopScope.names);
-					}
-				}
-				if (node.type === 'ForStatement') {
-					visit(node.init, loopScope);
-					visit(node.test, loopScope);
-					visit(node.update, loopScope);
-				} else {
-					visit(node.left, loopScope);
-					visit(node.right, loopScope);
-				}
-				visit(node.body, loopScope);
-				return;
-			}
-			case 'LabeledStatement':
-				visit(node.body, scope);
-				return;
-			case 'BreakStatement':
-			case 'ContinueStatement':
-				return;
-			case 'ClassDeclaration':
-			case 'ClassExpression': {
-				visit(node.superClass, scope);
-				const classScope = createLocalScope(scope, 'block');
-				if (node.id) collectPatternNames(node.id, classScope.names);
-				visit(node.body, classScope);
-				return;
-			}
-			case 'PropertyDefinition':
-			case 'MethodDefinition':
-				if (node.computed) visit(node.key, scope);
-				visit(node.value, scope);
-				return;
-		}
-		for (const key in node) {
-			if (
-				key === 'type' ||
-				key === 'start' ||
-				key === 'end' ||
-				key === 'loc' ||
-				key === 'typeAnnotation' ||
-				key === 'returnType' ||
-				key === 'typeParameters' ||
-				key.startsWith('_octane')
-			) {
-				continue;
-			}
-			visit(node[key], scope);
-		}
-	}
-
-	visit(root, null);
-	return dependencies;
+// A trivial argument is passed through unmemoized; only its root binding can
+// order it after an earlier use() in the same batch.
+function trivialParallelUseRoots(arg) {
+	let node = unwrapParallelUseValue(arg);
+	while (node?.type === 'MemberExpression') node = unwrapParallelUseValue(node.object);
+	return new Set(node?.type === 'Identifier' ? [node.name] : []);
 }
 
 // Mark base-hook calls whose source tuple can observe index 2. The public base
@@ -906,11 +712,10 @@ function emitParallelUseRun(run, owner, st) {
 		const temp = allocSlotName(st, `__pu$${st.nextPuId++}`);
 		temps.push(temp);
 		let creation = st.source.slice(entry.arg.start, entry.arg.end);
-		if (!isTrivialParallelUseArg(entry.arg)) {
+		if (entry.dependencies !== null) {
 			const memoHelper = requireParallelHelper(st, memoName);
 			const slot = allocHookSymbol(st, owner, 'use() memo', 'useMemo', entry.call);
-			const deps = entry.dependencies.map((dependency) => dependency.text).join(', ');
-			creation = `${memoHelper}(() => (${creation}), [${deps}], ${slot})`;
+			creation = `${memoHelper}(() => (${creation}), [${entry.dependencies.join(', ')}], ${slot})`;
 		}
 		declarations.push(`const ${temp} = ${creation};`);
 		st.edits.push({ pos: entry.arg.start, end: entry.arg.end, text: temp });
@@ -930,10 +735,10 @@ function transformParallelUseStatementList(statements, owner, st) {
 		const call = parallelUseCallOfStatement(statement);
 		const arg = call?.arguments[0];
 		if (call !== null && canRewriteParallelUseArg(arg)) {
-			const dependencies = collectParallelUseDependencies(arg, st.source);
-			if (run !== null && dependencies.some((dependency) => run.names.has(dependency.root))) {
-				flush();
-			}
+			const { texts: dependencies, roots } = isTrivialParallelUseArg(arg)
+				? { texts: null, roots: trivialParallelUseRoots(arg) }
+				: collectParallelUseDependencies(arg, st);
+			if (run !== null && [...roots].some((name) => run.names.has(name))) flush();
 			if (run === null) run = { uses: [], names: new Set() };
 			run.uses.push({ statement, call, arg, dependencies });
 			if (statement.type === 'VariableDeclaration') {
@@ -1152,7 +957,7 @@ function emitInferredDependencies(dependencies, st) {
 	return dependencies
 		.map((dependency) =>
 			dependency.method
-				? `${requireParallelHelper(st, METHOD_DEP_IMPORT)}(${dependency.method.root.name}, ${JSON.stringify(dependency.method.name)}${dependency.method.guarded ? ', true' : ''})`
+				? `${requireParallelHelper(st, METHOD_DEP_IMPORT)}(${[dependency.method.root.name, JSON.stringify(dependency.method.name), ...methodDepFlags(dependency.method)].join(', ')})`
 				: st.source.slice(dependency.node.start, dependency.node.end),
 		)
 		.join(', ');
@@ -1260,7 +1065,7 @@ function walk(node, owner, st) {
 				});
 			}
 			if (
-				(imported === 'useState' || imported === 'useRef') &&
+				SPREAD_PATH_SLOT_HOOKS.has(imported) &&
 				node.arguments.some((arg) => arg.type === 'SpreadElement')
 			) {
 				const open = callOpenParen(node, st.source);
@@ -1276,24 +1081,29 @@ function walk(node, owner, st) {
 				// offsets, preserving arbitrary TS syntax byte-for-byte. Method-call
 				// dependencies are the one synthesized form: the helper call's root is
 				// a bare identifier and its name a JSON string, so no arbitrary TS
-				// syntax needs reprinting there either.
-				const deps = emitInferredDependencies(inferred.dependencies, st);
+				// syntax needs reprinting there either. A null inference runs the hook
+				// on every render.
+				const deps =
+					inferred.dependencies === null
+						? 'null'
+						: `[${emitInferredDependencies(inferred.dependencies, st)}]`;
 				if (inferred.replaceDependency) {
 					const argument = node.arguments[inferred.depsIndex];
-					st.edits.push({ pos: argument.start, end: argument.end, text: `[${deps}]` });
+					st.edits.push({ pos: argument.start, end: argument.end, text: deps });
 					st.edits.push({ pos: node.end - 1, text: `${strongCallSeparator(node, st)}${sym}` });
 				} else {
 					st.edits.push({
 						pos: st.strong ? node.end - 1 : node.arguments[node.arguments.length - 1].end,
-						text: `${st.strong ? strongCallSeparator(node, st) : ', '}[${deps}], ${sym}`,
+						text: `${st.strong ? strongCallSeparator(node, st) : ', '}${deps}, ${sym}`,
 					});
 				}
 			} else if (node.arguments.length === 0) {
-				// State/ref initializers may themselves be Symbols. Reserve their
-				// authored position even when empty; other hooks keep their ABI.
+				// State/ref initial values may themselves be Symbols, and a lazy ref's
+				// factory owns the same position. Reserve it even when empty; other
+				// hooks keep their ABI.
 				st.edits.push({
 					pos: node.end - 1,
-					text: imported === 'useState' || imported === 'useRef' ? `undefined, ${sym}` : sym,
+					text: INITIAL_VALUE_HOOKS.has(imported) ? `undefined, ${sym}` : sym,
 				});
 			} else {
 				// `useState(0)` → `useState(0, _h$N)` — insert AFTER the last arg's end so
@@ -1459,7 +1269,9 @@ export function slotHooks(source, id, options) {
 	// Native signal reads exist only for the DOM client and server renderers.
 	const signalHookSites =
 		(options?.renderer?.target ?? 'dom') === 'dom' && options?.universalRuntime == null;
-	const signalLowering = signalDeclarationSourceEdits(ast, id, source);
+	const signalLowering = signalDeclarationSourceEdits(ast, id, source, {
+		hmr: environment === 'client' && Boolean(options?.hmr),
+	});
 	const pureCalls = collectPureFactoryCalls(
 		ast,
 		source,
@@ -1470,6 +1282,17 @@ export function slotHooks(source, id, options) {
 				options?.universalRuntime == null,
 		}),
 	);
+	const defaultOptionsRoot =
+		!options?.manualSlots &&
+		!options?.hmr &&
+		!options?.dev &&
+		!options?.profile &&
+		environment === 'client' &&
+		(options?.renderer?.target ?? 'dom') === 'dom' &&
+		options?.universalRuntime == null;
+	const defaultOptionsCalls = defaultOptionsRoot
+		? findDefaultOptionsRootCalls(ast, { factories: findRootFactoryImports(ast) })
+		: [];
 	const canSpecializeRoot =
 		!options?.manualSlots &&
 		!options?.hmr &&
@@ -1479,6 +1302,7 @@ export function slotHooks(source, id, options) {
 	if (
 		!importInfo.importsHook &&
 		!canSpecializeRoot &&
+		defaultOptionsCalls.length === 0 &&
 		!nativeReadActivation &&
 		!signalLowering.usesSignals &&
 		!manualProviders.size &&
@@ -1491,7 +1315,7 @@ export function slotHooks(source, id, options) {
 	// preserved, so the text edits below stay valid), with the dependency
 	// inference keyed by the rebuilt calls.
 	// Annotation preserves offsets, so the authored tree's proof stays valid.
-	const voidRoots = canSpecializeRoot ? collectVoidRootCandidates(ast) : [];
+	const voidRoots = canSpecializeRoot ? collectVoidRootCandidates(ast, defaultOptionsRoot) : [];
 	let inferred = new Map();
 	if (importInfo.importsHook) {
 		const annotated = annotateHookCalls(ast, {
@@ -1509,7 +1333,9 @@ export function slotHooks(source, id, options) {
 	}
 	const getterCalls = importInfo.importsHook ? collectStateGetterCalls(ast) : new WeakSet();
 	if (
-		!strongAnalysis?.enabled &&
+		// Manual Strong modules already reject generated declaration caches above,
+		// so their authored memo calls can keep the existing production lowering.
+		(!strongAnalysis?.enabled || options?.manualSlots === true) &&
 		// The whole-AST memo path does not apply declaration identity edits.
 		!signalLowering.usesSignals &&
 		canPrint &&
@@ -1537,6 +1363,8 @@ export function slotHooks(source, id, options) {
 			stateGetterHelpers: STATE_GETTER_HELPERS,
 			pureCalls,
 		});
+		// Preserve existing memo lowering; its whole-AST result takes precedence
+		// over the optional call-only root rewrite below.
 		if (inlined !== null) return { ...inlined, ...strongHints };
 	}
 	const st = {
@@ -1567,7 +1395,12 @@ export function slotHooks(source, id, options) {
 		decls: [],
 		parallelHelpers: new Map(),
 		provenContextBindings: collectProvenContextBindings(ast),
-		usedNames: collectIdentifierNames(ast),
+		// Scope analysis for memoized use() dependencies, built on first need.
+		moduleAst: ast,
+		moduleLexical: null,
+		// Signal lowering has already reserved its generated locals as well as
+		// authored names, so subsequent helpers must allocate from the same set.
+		usedNames: signalLowering.usedNames,
 		slotBaseName: null,
 		hookSlotsName: null,
 		voidRootNames: new Map(),
@@ -1580,9 +1413,7 @@ export function slotHooks(source, id, options) {
 	if (manualProviders.size) {
 		collectManualHookEdits(ast, findManualHookProviders(ast), st);
 	}
-	if (canSpecializeRoot) {
-		collectVoidRootEdits(voidRoots, st, options.isVoidComponentImport);
-	}
+	collectRootEdits(voidRoots, defaultOptionsCalls, st, options?.isVoidComponentImport);
 	if (pureCalls.size) {
 		// A replacement covering the call's start owns that text, so its own
 		// output decides the annotation. Otherwise the mark goes first in the
@@ -1609,7 +1440,14 @@ export function slotHooks(source, id, options) {
 	const helperSpecifiers = [...st.getterHelpers].map(
 		([hook, local]) => `${STATE_GETTER_HELPERS[hook]} as ${local}`,
 	);
-	for (const [helper, local] of st.voidRootNames) helperSpecifiers.push(`${helper} as ${local}`);
+	const otherHelpers = new Map();
+	for (const [helper, local] of st.voidRootNames) {
+		if (helper === '__createRootDefaultOptions' || helper === '__createVoidRootDefaultOptions') {
+			let specifiers = otherHelpers.get('octane/internal/client');
+			if (specifiers === undefined) otherHelpers.set('octane/internal/client', (specifiers = []));
+			specifiers.push(`${helper} as ${local}`);
+		} else helperSpecifiers.push(`${helper} as ${local}`);
+	}
 	for (const helper of st.parallelHelpers.values()) {
 		if (helper.request === 'octane') {
 			helperSpecifiers.push(`${helper.imported} as ${helper.local}`);
@@ -1623,7 +1461,6 @@ export function slotHooks(source, id, options) {
 		helperSpecifiers.length === 0
 			? ''
 			: `import { ${helperSpecifiers.join(', ')} } from 'octane';\n`;
-	const otherHelpers = new Map();
 	for (const helper of st.parallelHelpers.values()) {
 		if (helper.request === 'octane') continue;
 		let specifiers = otherHelpers.get(helper.request);
@@ -1678,7 +1515,8 @@ export function slotHooks(source, id, options) {
 		slotBase +
 		st.decls.join('\n') +
 		'\n' +
-		signalActivation;
+		signalActivation +
+		signalLowering.prelude;
 	if (activation !== null || signalLowering.usesSignals) {
 		// Plain modules may read global signals or render during evaluation.
 		// Their document capability and any render slots must already exist.
@@ -1689,34 +1527,25 @@ export function slotHooks(source, id, options) {
 			text: `;${block.replace(/\n/g, ' ')}${activation === null ? '' : `${activation}(1); `}`,
 		});
 	}
-	// Assemble disjoint edits once instead of copying the growing module for
-	// every insertion. Descending, stable order retains the existing rule that
-	// later insertions at the same offset appear before earlier insertions.
-	st.edits.sort((a, b) => b.pos - a.pos);
-	const chunks = [];
-	let cursor = source.length;
-	let overlaps = false;
-	for (const edit of st.edits) {
-		const end = edit.end ?? edit.pos;
-		if (end > cursor) {
-			overlaps = true;
-			break;
-		}
-		chunks.push(source.slice(end, cursor), edit.text);
-		cursor = edit.pos;
+	// Producer twins receive every ordinary lowering within the declaration
+	// (nested signal sites and hook slots included), but not lexical-owner reads.
+	// Materialize inner copies first if a producer contains another producer.
+	for (const { declaration, fn, name, rename } of signalLowering.producerCopies.sort(
+		(a, b) => a.fn.end - a.fn.start - (b.fn.end - b.fn.start),
+	)) {
+		const edits = st.edits.filter(
+			(edit) =>
+				!signalLowering.lexicalEdits.has(edit) &&
+				edit.pos >= fn.start &&
+				(edit.end ?? edit.pos) <= fn.end,
+		);
+		const copy = applySourceEdits(source, [...edits, ...rename], fn.start, fn.end);
+		st.edits.push({
+			pos: declaration.end,
+			text: declaration.type === 'FunctionDeclaration' ? `;${copy}` : `, ${name} = ${copy}`,
+		});
 	}
-	let code;
-	if (overlaps) {
-		// Overlapping replacements refer to the already edited text. Preserve
-		// that sequential behavior, including insertion/replacement ties.
-		code = source;
-		for (const edit of st.edits) {
-			code = code.slice(0, edit.pos) + edit.text + code.slice(edit.end ?? edit.pos);
-		}
-	} else {
-		chunks.push(source.slice(0, cursor));
-		code = chunks.reverse().join('');
-	}
+	let code = applySourceEdits(source, st.edits);
 	if (activation === null && !signalLowering.usesSignals)
 		code = code.endsWith('\n') ? code + block : code + '\n' + block;
 	return {
@@ -1725,4 +1554,35 @@ export function slotHooks(source, id, options) {
 		...(signalLowering.usesSignals || nativeReadActivation ? { streamedSignals: true } : null),
 		...strongHints,
 	};
+}
+
+function applySourceEdits(source, edits, start = 0, end = source.length) {
+	// Assemble disjoint edits once instead of copying the growing module for
+	// every insertion. Descending, stable order retains the existing rule that
+	// later insertions at the same offset appear before earlier insertions.
+	edits.sort((a, b) => b.pos - a.pos);
+	const chunks = [];
+	let cursor = end;
+	let overlaps = false;
+	for (const edit of edits) {
+		const end = edit.end ?? edit.pos;
+		if (end > cursor) {
+			overlaps = true;
+			break;
+		}
+		chunks.push(source.slice(end, cursor), edit.text);
+		cursor = edit.pos;
+	}
+	if (overlaps) {
+		// Overlapping replacements refer to the already edited text. Preserve
+		// that sequential behavior, including insertion/replacement ties.
+		let code = source.slice(start, end);
+		for (const edit of edits) {
+			code =
+				code.slice(0, edit.pos - start) + edit.text + code.slice((edit.end ?? edit.pos) - start);
+		}
+		return code;
+	}
+	chunks.push(source.slice(start, cursor));
+	return chunks.reverse().join('');
 }

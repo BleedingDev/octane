@@ -35,9 +35,9 @@
       "node": ">=22",
       "platform": "any",
       "arch": "any",
-      "packageManager": "pnpm@11.15.1",
+      "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "91136aca7e454123147ee81e429398d60a872288b7ce288a72b4cfbf3c038dc2"
+      "lockfileSha256": "6df573d6aa854c122b0cea3e8c3be46fb67e3debe9ce0f329a773850bbd87706"
     }
   },
   "lanes": [
@@ -62,7 +62,7 @@
         {
           "path": "packages/base-ui/scripts/build-react-parity-manifest.mjs",
           "role": "support",
-          "sha256": "59821bb0b0688a560d05ccd433a291bcb137486c8d12869cdd8213842533207d"
+          "sha256": "79137825282aa2732e2689566267f8105c250150d89172168f546f985a475602"
         },
         {
           "path": "packages/base-ui/scripts/build-runtime-inventories.mjs",
@@ -134,7 +134,7 @@
         {
           "path": "packages/base-ui/tests/_fixtures/base-ui-diff.tsrx",
           "role": "support",
-          "sha256": "7260bf8da6f79bbb4bd12a654917f9551d933fe9b1c51c36218956241079a543"
+          "sha256": "8e0ff119a430397ab0d915b49a217e7647416471821ca0d7deb9526ee74cb4a6"
         }
       ]
     },
@@ -174,7 +174,7 @@
         {
           "path": "packages/base-ui/scripts/build-react-parity-manifest.mjs",
           "role": "support",
-          "sha256": "59821bb0b0688a560d05ccd433a291bcb137486c8d12869cdd8213842533207d"
+          "sha256": "79137825282aa2732e2689566267f8105c250150d89172168f546f985a475602"
         },
         {
           "path": "packages/base-ui/scripts/build-runtime-inventories.mjs",
@@ -244,7 +244,7 @@
         {
           "path": "packages/base-ui/scripts/build-react-parity-manifest.mjs",
           "role": "support",
-          "sha256": "59821bb0b0688a560d05ccd433a291bcb137486c8d12869cdd8213842533207d"
+          "sha256": "79137825282aa2732e2689566267f8105c250150d89172168f546f985a475602"
         },
         {
           "path": "packages/base-ui/scripts/build-runtime-inventories.mjs",
@@ -319,7 +319,7 @@
         {
           "path": "packages/base-ui/scripts/build-react-parity-manifest.mjs",
           "role": "support",
-          "sha256": "59821bb0b0688a560d05ccd433a291bcb137486c8d12869cdd8213842533207d"
+          "sha256": "79137825282aa2732e2689566267f8105c250150d89172168f546f985a475602"
         },
         {
           "path": "packages/base-ui/scripts/build-runtime-inventories.mjs",
@@ -355,6 +355,11 @@
           "path": "patches/@vitest__browser@4.1.10.patch",
           "role": "support",
           "sha256": "d32609637593fc211ed808df6fbea6cb1da80adb049c0b0752bda8e1586d0ae0"
+        },
+        {
+          "path": "patches/@vitest__browser-playwright@4.1.10.patch",
+          "role": "support",
+          "sha256": "1957634122dfa6f4790b66e73a42343637af36d3fb182eb25e07fa261dbc27dd"
         },
         {
           "path": "patches/@vitest__mocker@4.1.10.patch",
@@ -404,7 +409,7 @@
         {
           "path": "packages/base-ui/scripts/build-react-parity-manifest.mjs",
           "role": "support",
-          "sha256": "59821bb0b0688a560d05ccd433a291bcb137486c8d12869cdd8213842533207d"
+          "sha256": "79137825282aa2732e2689566267f8105c250150d89172168f546f985a475602"
         },
         {
           "path": "packages/base-ui/scripts/build-runtime-inventories.mjs",
@@ -442,6 +447,11 @@
           "sha256": "d32609637593fc211ed808df6fbea6cb1da80adb049c0b0752bda8e1586d0ae0"
         },
         {
+          "path": "patches/@vitest__browser-playwright@4.1.10.patch",
+          "role": "support",
+          "sha256": "1957634122dfa6f4790b66e73a42343637af36d3fb182eb25e07fa261dbc27dd"
+        },
+        {
           "path": "patches/@vitest__mocker@4.1.10.patch",
           "role": "support",
           "sha256": "538740e541a5a8ef50611b521995775cac3031548f696745eb4b90a7bd659ca4"
@@ -475,7 +485,7 @@
         "kind": "typescript",
         "compiler": "tsc",
         "project": "packages/base-ui/tsconfig.pristine-specs.json",
-        "compilerBins": ["packages/base-ui/node_modules/typescript-pristine-native/bin/tsc"]
+        "compilerBins": ["packages/base-ui/node_modules/typescript-native/bin/tsc"]
       },
       "files": [
         {
@@ -498,7 +508,7 @@
         {
           "path": "packages/base-ui/scripts/build-react-parity-manifest.mjs",
           "role": "support",
-          "sha256": "59821bb0b0688a560d05ccd433a291bcb137486c8d12869cdd8213842533207d"
+          "sha256": "79137825282aa2732e2689566267f8105c250150d89172168f546f985a475602"
         }
       ]
     },
@@ -519,7 +529,7 @@
         {
           "path": "packages/base-ui/tsconfig.adapted-specs.json",
           "role": "test",
-          "sha256": "f218a2e9d4d2e506956f3ad287c5341c08a4995a52c26f0c3bb5206b0d93cd4f",
+          "sha256": "0346425a1454afb8c06ec466c882ac9762a6ab566f04539c9510528014b368e4",
           "cases": [
             {
               "id": "types:base-ui-adapted-types",
@@ -536,7 +546,7 @@
         {
           "path": "packages/base-ui/scripts/build-react-parity-manifest.mjs",
           "role": "support",
-          "sha256": "59821bb0b0688a560d05ccd433a291bcb137486c8d12869cdd8213842533207d"
+          "sha256": "79137825282aa2732e2689566267f8105c250150d89172168f546f985a475602"
         }
       ]
     }

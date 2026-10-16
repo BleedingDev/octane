@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@octanejs/testing-library';
-import { RouterProvider, createMemoryHistory } from '@octanejs/tanstack-router';
+import { RouterProvider, createMemoryHistory } from '@octanejs/tanstack-router/compiled';
 import { decodeErrorMessage, errorCodes } from '../src/content/error-codes.ts';
 import { getRouter, parseWebsiteSearch, stringifyWebsiteSearch } from '../src/router.ts';
 
@@ -22,6 +22,20 @@ describe('error decoder', () => {
 		expect(container.querySelector('.error-message')?.textContent).toBe(
 			'Target container is not a DOM element.',
 		);
+	});
+
+	it('adds catalog guidance below the message only for codes that carry it', async () => {
+		const translated = await renderRoute('/errors/318');
+		expect(translated.container.querySelector('.error-message')?.textContent).toBe(
+			'DOM bindings cannot adopt a mismatched static element topology.',
+		);
+		expect(translated.container.querySelector('.error-note')?.textContent).toContain(
+			'translate="no"',
+		);
+		cleanup();
+
+		const plain = await renderRoute('/errors/28');
+		expect(plain.container.querySelector('.error-note')).toBeNull();
 	});
 
 	it('preserves opaque and repeated production-error arguments', () => {

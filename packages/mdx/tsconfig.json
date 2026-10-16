@@ -4,6 +4,9 @@
     "lib": ["esnext", "dom", "dom.iterable"],
     "target": "esnext",
     "noEmit": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "octane",
+    "allowImportingTsExtensions": true,
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "noEmitOnError": true,
@@ -11,7 +14,9 @@
     "allowSyntheticDefaultImports": true,
     "verbatimModuleSyntax": true,
     "types": ["node"],
-    "strict": true
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
   },
   "include": ["./src/", "./types/"],
   "exclude": ["node_modules", "dist", "tests"]

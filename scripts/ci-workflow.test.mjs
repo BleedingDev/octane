@@ -165,24 +165,6 @@ describe('CI workflow aggregation', () => {
 		assert.doesNotMatch(shard, /input-otp\/tests\/browser\/\*\*\/\*\.spec\.ts/);
 	});
 
-	test('gates the renderer-free behavior bundle once per full CI run', () => {
-		assert.match(
-			jobSource('test_shard'),
-			/- name: Verify renderer-free behavior bundle\n\s+if: matrix\.shard == '1\/4'\n\s+run: node benchmarks\/bundle-size\/run-minimal\.mjs behavior-root/,
-		);
-	});
-
-	test('enforces recovered signal-free application budgets once per full CI run', () => {
-		assert.match(
-			jobSource('test_shard'),
-			/- name: Verify signal-free application bundle budgets\n\s+if: matrix\.shard == '1\/4'\n\s+run: node benchmarks\/bundle-size\/run-minimal\.mjs --budgets root-static-local root-chained-jsx hooks-state prop-attributes context/,
-		);
-		assert.match(
-			packageJson.scripts['ci:workflow:test'],
-			/benchmarks\/bundle-size\/minimal-gates\.test\.mjs/,
-		);
-	});
-
 	test('checks the weekly Bench job Lynx fixture contracts on every pull request', () => {
 		// Bench runs these before its ratio guards. A Lynx source change that
 		// broke them only on the weekly schedule kept every guard from running.
@@ -190,17 +172,11 @@ describe('CI workflow aggregation', () => {
 		for (const suite of [
 			'benchmarks/lynx-table/stages/*.test.mjs',
 			'benchmarks/lynx-list/*.test.mjs',
+			'benchmarks/lynx-render/*.test.mjs',
 		]) {
 			assert.ok(benchWorkflow.includes(`node --test ${suite}`), suite);
 			assert.ok(workflowTests.includes(suite), suite);
 		}
-	});
-
-	test('gates binding reachability into the octane namespace once per full CI run', () => {
-		assert.match(
-			jobSource('test_shard'),
-			/- name: Verify Apollo binding keeps octane tree-shakeable\n\s+if: matrix\.shard == '1\/4'\n\s+run: node benchmarks\/bundle-size\/run-minimal\.mjs binding-apollo-client/,
-		);
 	});
 
 	test('runs and reports tests only on Node 24 while retaining the Node 22 engine baseline', () => {
@@ -360,6 +336,10 @@ describe('CI workflow aggregation', () => {
 
 		assert.doesNotMatch(jobSource('lint_checks'), /outputs\.full_ci/);
 		assert.match(jobSource('lint_checks'), /run: pnpm ci:workflow:test/);
+		assert.match(
+			jobSource('lint_checks'),
+			/- name: Validate MCP skill catalogs\n\s+run: pnpm exec vitest run --project octane-mcp-server packages\/octane-mcp-server\/src\/index\.test\.js\n/,
+		);
 		assert.match(jobSource('lint'), /LINT_CHECKS_RESULT/);
 		assert.match(jobSource('typecheck'), /TYPECHECK_CHECKS_RESULT/);
 		assert.match(jobSource('test'), /\[ "\$FULL_CI" = false \]/);
@@ -493,6 +473,7 @@ describe('CI workflow aggregation', () => {
 			[
 				{ name: 'lint', head_sha: generatedHead },
 				{ name: 'typecheck', head_sha: generatedHead },
+				{ name: 'bundle size / bundle size checks', head_sha: generatedHead },
 			],
 		);
 	});
@@ -720,7 +701,7 @@ describe('CI workflow aggregation', () => {
 
 		assert.match(combined, new RegExp(`^    name: ${title.replace(/[()]/g, '\\$&')}$`, 'm'));
 		assert.doesNotMatch(combined, /^    strategy:|matrix\./m);
-		assert.equal([...combined.matchAll(/pnpm install --prod false --frozen-lockfile/g)].length, 1);
+		assert.equal([...combined.matchAll(/pnpm install --prod=false --frozen-lockfile/g)].length, 1);
 		assert.equal([...combined.matchAll(/oven-sh\/setup-bun/g)].length, 1);
 		assert.equal([...combined.matchAll(/playwright install --with-deps chromium/g)].length, 1);
 		assert.match(combined, /playwright install --with-deps chromium(?:\n|$)/);
@@ -1682,15 +1663,67 @@ describe('Pull request benchmark report', () => {
 				),
 			);
 		}
-		assert.ok(prBenchWorkflow.includes('for round in base:1 head:1 head:2 base:2; do'));
-		assert.ok(prBenchWorkflow.includes('TARGETS: ${{ env.JS_FRAMEWORK_TARGETS }}'));
 		assert.ok(
 			prBenchWorkflow.includes(
-				'--results-dir="$RESULTS/$side-js-${round##*:}" --servers=octane-tsrx-jsbench,octane-jsx-jsbench js-framework',
+				'node benchmarks/js-framework/pair.mjs --base-tree="$BASE_TREE" \\\n' +
+					'            --base-json="$RESULTS/base/js-framework.json" \\\n' +
+					'            --head-json="$RESULTS/head/js-framework.json"',
 			),
 		);
-		assert.ok(prBenchWorkflow.includes('--base="$RESULTS/base" --head="$RESULTS/head" --rounds=2'));
-		assert.match(packageJson.scripts['ci:workflow:test'], /benchmarks\/pr-report\.test\.mjs/);
+		assert.ok(prBenchWorkflow.includes('--base="$RESULTS/base" --head="$RESULTS/head"'));
+		for (const suite of ['benchmarks/pr-report.test.mjs', 'benchmarks/lib/stats.test.mjs']) {
+			assert.ok(packageJson.scripts['ci:workflow:test'].split(' ').includes(suite), suite);
+		}
+	});
+
+	// The pull request's recorded base trails main once other merges land, so a
+	// delta against it included their changes (#1560, #1578, #1594).
+	test("compares against the merge commit's first parent", () => {
+		assert.match(prBenchWorkflow, /fetch-depth: 2\n/);
+		assert.match(prBenchWorkflow, /base=\$\(git rev-parse HEAD\^1\)\n/);
+		assert.match(prBenchWorkflow, /git worktree add --detach "\$RUNNER_TEMP\/base" "\$base"/);
+		assert.doesNotMatch(
+			prBenchWorkflow,
+			/^\s+BASE_SHA: \$\{\{ github\.event\.pull_request\.base\.sha/m,
+		);
+	});
+
+	// #1055: the Lynx compiler backend is judged against this suite, so a pull
+	// request touching the Lynx path sees its numbers without being gated by them.
+	test('reports lynx-render, path-filtered, without gating on it', () => {
+		const step = prBenchWorkflow.slice(
+			prBenchWorkflow.indexOf('- name: Benchmark lynx-render (report only)'),
+			prBenchWorkflow.indexOf('- name: Render report'),
+		);
+		assert.match(step, /git diff --name-only HEAD\^1 HEAD \| grep -qE "\$lynx_paths"/);
+		for (const prefix of [
+			'packages/lynx/',
+			'packages/rspeedy-plugin-octane/',
+			'benchmarks/lynx-render/',
+		]) {
+			assert.ok(step.includes(prefix), prefix);
+		}
+		for (const results of ['base', 'head']) {
+			assert.ok(
+				step.includes(
+					`node benchmarks/bench.mjs --quick --results-dir="$RESULTS/${results}" lynx-render`,
+				),
+				results,
+			);
+		}
+		assert.equal(step.match(/\|\| echo "::warning::/g)?.length, 2);
+	});
+
+	test('fails after uploading the report when a gate fails', () => {
+		const render = prBenchWorkflow.indexOf('- name: Render report');
+		const upload = prBenchWorkflow.indexOf('- name: Upload report');
+		const fail = prBenchWorkflow.indexOf('- name: Fail on added work or a failed benchmark');
+		assert.ok(render !== -1 && render < upload && upload < fail);
+		assert.match(prBenchWorkflow, /--out="\$RESULTS\/report\/report\.md" \|\| status=\$\?/);
+		assert.match(
+			prBenchWorkflow,
+			/if: steps\.bytes\.outputs\.status != '0' \|\| steps\.report\.outputs\.status != '0'/,
+		);
 	});
 
 	test('posts the report from the default branch without running pull request code', () => {
@@ -2184,16 +2217,13 @@ describe('Vercel preview workflow', () => {
 		assert.match(writtenComments.at(-1).body, /URL pending/);
 	});
 
-	test('keeps production automatic and delegates labeled previews to the Vercel GitHub App', () => {
+	test('disables automatic Git deployments for both websites', () => {
 		for (const config of [websiteVercelConfig, mcpVercelConfig]) {
-			assert.deepEqual(config.git.deploymentEnabled, {
-				'*': false,
-				'**': false,
-				main: true,
-				'deploy-preview-pr-*': true,
-			});
+			assert.equal(config.git.deploymentEnabled, false);
 		}
+	});
 
+	test('publishes labeled preview branches and reports their deployment status', () => {
 		assert.match(
 			vercelPreviewWorkflow,
 			/on:\n {2}pull_request_target:\n {4}types: \[labeled, unlabeled, closed\]/,

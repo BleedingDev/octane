@@ -24,6 +24,7 @@ export const KNOWN_BINDINGS = {
 	'@tanstack/react-form': '@octanejs/tanstack-form',
 	'@formisch/react': '@octanejs/formisch',
 	'@tanstack/react-query': '@octanejs/tanstack-query',
+	'@tanstack/react-query-devtools': '@octanejs/tanstack-query-devtools',
 	swr: '@octanejs/swr',
 	wagmi: '@octanejs/wagmi',
 	'@rainbow-me/rainbowkit': '@octanejs/rainbowkit',
@@ -33,9 +34,6 @@ export const KNOWN_BINDINGS = {
 	'@xstate/store-react': '@octanejs/xstate-store',
 	'@xyflow/react': '@octanejs/xyflow',
 	'@tanstack/react-router-ssr-query': '@octanejs/tanstack-router-ssr-query',
-	'@tanstack/react-hotkeys': '@octanejs/tanstack-hotkeys',
-	'@tanstack/react-pacer': '@octanejs/tanstack-pacer',
-	'@tanstack/react-table': '@octanejs/tanstack-table',
 	'@tanstack/react-virtual': '@octanejs/tanstack-virtual',
 	'react-waypoint': '@octanejs/waypoint',
 	'react-window': '@octanejs/window',
@@ -180,6 +178,14 @@ export const KNOWN_BINDINGS = {
 	wouter: '@octanejs/wouter',
 };
 
+// React package → Octane adapter published by the upstream library itself.
+// These live outside this workspace, so they stay out of KNOWN_BINDINGS.
+export const UPSTREAM_ADAPTERS = {
+	'@tanstack/react-hotkeys': '@tanstack/octane-hotkeys',
+	'@tanstack/react-pacer': '@tanstack/octane-pacer',
+	'@tanstack/react-table': '@tanstack/octane-table',
+};
+
 // Octane-specific ecosystem packages that have no React import to rewrite.
 // Keep these out of KNOWN_BINDINGS so the React bridge never invents a source
 // package mapping for native tooling.
@@ -240,11 +246,27 @@ export const REACT_API_MAP = {
 		note: 'Same reducer and lazy-init semantics; Octane additionally exposes a stable current-state getter at tuple index 2.',
 	},
 	useEffect: { status: 'same', note: 'Identical deps/cleanup semantics.' },
-	useLayoutEffect: { status: 'same', note: 'Identical: synchronous after DOM mutation.' },
+	useLayoutEffect: {
+		status: 'same',
+		note: 'Identical: synchronous after DOM mutation.',
+		strong:
+			'Strong mode rejects copying a DOM measurement into state from layout effect setup (OCTANE_STRONG_EFFECT_STATE_UPDATE). Render from useLayoutSnapshot(() => measure(), { initial }) instead.',
+	},
 	useInsertionEffect: { status: 'same', note: 'Supported.' },
-	useMemo: { status: 'same', note: 'Identical.' },
-	useCallback: { status: 'same', note: 'Identical.' },
-	useRef: { status: 'same', note: 'Identical.' },
+	useMemo: {
+		status: 'same',
+		note: 'Explicit dependencies are preserved. Omitted dependencies are inferred, including in Strong mode.',
+	},
+	useCallback: {
+		status: 'same',
+		note: 'Explicit dependencies are preserved. Omitted dependencies are inferred, including in Strong mode.',
+	},
+	useRef: {
+		status: 'same',
+		note: 'Identical.',
+		strong:
+			'Strong mode rejects reading or writing ref.current during render (OCTANE_STRONG_RENDER_REF_READ, OCTANE_STRONG_RENDER_REF_WRITE). Replace lazy initialization (if (ref.current === null) ref.current = create()) with useLazyRef(() => create()), and a latest-value ref with useEffectEvent.',
+	},
 	useContext: { status: 'same', note: 'Identical.' },
 	useId: { status: 'same', note: 'Identical, hydration-stable.' },
 	useImperativeHandle: {
@@ -571,6 +593,10 @@ export async function readPackageJson(dir) {
 	}
 }
 
+function existingBindingFor(packageName) {
+	return KNOWN_BINDINGS[packageName] ?? UPSTREAM_ADAPTERS[packageName] ?? null;
+}
+
 export function detectVanillaCore(packageName, packageJson) {
 	if (packageName in KNOWN_VANILLA_CORES) {
 		return KNOWN_VANILLA_CORES[packageName];
@@ -588,7 +614,7 @@ export function detectVanillaCore(packageName, packageJson) {
 export async function bridgeReport({ packageName, path, projectRoot }) {
 	const report = {
 		target: packageName ?? path,
-		existingBinding: packageName ? (KNOWN_BINDINGS[packageName] ?? null) : null,
+		existingBinding: packageName ? existingBindingFor(packageName) : null,
 	};
 
 	let scanRoot = path;
@@ -629,7 +655,7 @@ export async function bridgeReport({ packageName, path, projectRoot }) {
 export function bridgeReportFromSource(source, { packageName } = {}) {
 	const report = {
 		target: packageName ?? 'pasted-source',
-		existingBinding: packageName ? (KNOWN_BINDINGS[packageName] ?? null) : null,
+		existingBinding: packageName ? existingBindingFor(packageName) : null,
 	};
 	if (packageName) {
 		report.vanillaCore = detectVanillaCore(packageName, null);
@@ -678,6 +704,20 @@ function planFor(report) {
 	const unsupported = (report.apis ?? []).filter((row) => row.status === 'unsupported');
 	for (const row of unsupported) {
 		steps.push(`${row.name} (${row.count}x): ${row.note}`);
+	}
+	// Strong mode is opt-in, so its notes stay one conditional step rather than
+	// rewrites every bridge needs.
+	const strongNotes = (report.apis ?? [])
+		.filter((row) => row.strong)
+		.map((row) => `${row.name} (${row.count}x): ${row.strong}`);
+	if (strongNotes.length > 0) {
+		steps.push(
+			[
+				'If the ported modules compile in Strong mode ("use strong" or compiler.strong), rewrite the React idioms it rejects.',
+				...strongNotes,
+				'Look up any OCTANE_STRONG_* code with octane_strong_explain, and follow the migrate-to-strong skill.',
+			].join(' '),
+		);
 	}
 	steps.push(
 		'Re-author any JSX components shipped by the package in .tsrx: compiled React JSX output cannot run on Octane, and hooks called from non-compiled files need compiler slotting (see the bridge-react-package skill for the subSlot pattern).',

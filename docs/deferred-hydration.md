@@ -262,7 +262,13 @@ resumes an unfinished load activation when it becomes active again.
 non-default parameters (`timeout`, `rootMargin`, `threshold`, the media query) on
 the boundary, and the bootstrap installs the same idle callback, shared
 `IntersectionObserver`, or `matchMedia` listener that an ordinary boundary uses.
-The widget activates when that trigger fires. As with an ordinary boundary, a
+These strategies ship as a separate chunk. The bootstrap loads it the first time
+a registered widget needs one and installs the trigger once it arrives, so a
+page whose widgets use only `load()` and `interaction()` never downloads them.
+A custom host that passes `strategies: independentHydrationStrategies`, from
+`octane/hydration/independent-strategies`, to `bootstrapIndependentHydration` or
+`registerIndependentHydrationIsland` installs the trigger during registration
+instead. The widget activates when that trigger fires. As with an ordinary boundary, a
 click on an `idle`, `visible`, or `media` widget does not force it to activate.
 Pausing the document removes a pending trigger. Resuming re-installs it, or
 activates at once if the strategy already fired. `interaction()` activates on
@@ -277,6 +283,14 @@ resolves to either one at render time makes server rendering throw. Use
 Activation adopts the matching server DOM in template and JSX-returning
 components, preserving edits made to uncontrolled inputs before activation.
 
+A parent root that falls back for a hydration mismatch elsewhere keeps its
+independent widgets. Its client render takes each widget's server wrapper,
+matched by boundary ID, in place of an empty one, so the widget keeps its DOM
+and state, whether it already activated or activates later. The IDs match
+when the client render calls `useId` as often as the server did before the
+widget. A widget whose ID no longer matches is discarded with the rest of the
+server DOM, and the client render leaves its new wrapper empty.
+
 When an independent boundary's only child is a prop-less component imported
 from a project `.tsrx` module, and that component is a zero-argument
 `'use dom bindings'` view, the island activates through the view's binding
@@ -285,6 +299,24 @@ the view's own module, which forwards to the ordinary renderer activator for any
 other component. Captured interactions replay once the program has adopted the
 server DOM. Delegated handlers run without restoring a custom signal owner, so
 keep the view's state in module or document signals.
+
+#### Activation pacing
+
+Each activation hydrates its widget synchronously, so widgets that become ready
+together take turns. In each document, the first widget to become ready in a
+task activates at once. Every widget after it activates in a later task of its
+own, so the browser can handle input and paint between them. Widgets become
+ready together when repeated instances share one module, when one stylesheet
+`load`, `IntersectionObserver` callback, or strategies chunk releases several of
+them, and when a back/forward-cache restore resumes every unfinished widget.
+
+A widget holding captured interactions takes the next turn ahead of the others.
+A widget waiting for its turn is still loading: it keeps capturing input, and
+pausing or disposing it cancels the activation. Turns are tasks from
+`scheduler.postTask` where the browser provides it, otherwise from a
+`MessageChannel`, otherwise from `setTimeout`. A custom host that calls
+`registerIndependentHydrationIsland` directly gets the same pacing. Pacing
+separates widgets; it does not split one widget's hydration into smaller tasks.
 
 #### Replaceable selections versus commands
 
@@ -617,6 +649,33 @@ diagnostic, not a renderer fallback. Structural programs own
 only their declared regions; fixed programs update properties without replacing
 nodes.
 
+Child composition may recurse. A view can render itself, or same-module views
+can render each other, so a tree's depth comes from its data:
+
+```tsrx
+type Branch = { key: string; label: string; children: readonly Branch[] };
+
+export function Tree({ node }: { node: Branch }) @{
+	'use dom bindings';
+	<section>
+		<span>{node.label as string}</span>
+		@for (const child of node.children; key child.key) {
+			<Tree node={child} />
+		}
+	</section>
+}
+```
+
+The compiler emits one program for the recursive views and creates an instance
+for each level the data reaches. Recursion must be able to end on a branch or an
+empty list. The compiler rejects a view that renders itself on every path, such
+as a recursive call outside any `@if`, `@for` or `@try`, and names the cycle in
+the error. Each instance owns its own text, keyed items,
+handlers, effects and `@try` arms, and removing a branch retires the instances
+beneath it. A recursive call does not specialize fixed primitive props, so a
+`depth={depth + 1}` prop never unrolls the recursion at compile time. Recursion
+is supported among views declared in the same module.
+
 Declare scalar text explicitly when its type is not evident in the template: `<span>{message$ as string}</span>` keeps a string-valued signal directly bound, while `<span>{(status?.message ?? '') as string}</span>` marks an ordinary string projection. The type checker checks the signal's value for this text intent; it does not require an application-side read or a cast through `unknown`. Keep shared control labels in typed label props rather than opaque renderable child slots when the view needs primitive-text handoff.
 
 Binding views may use flat destructured props, including aliases, primitive literal defaults, and a final rest binding: `function Action({ label: text = 'Send', ...props }) @{ ... }`. Destructuring runs once for each prepared snapshot, so projections and event handlers share the same captured values and rest object. Defaults apply only to `undefined`, not `null`. Nested or computed patterns and nonliteral defaults fail extraction. A rendered `children` slot may be aliased or read through rest when it was not excluded; a non-null default for that slot is unsupported. A rest binding does not authorize an arbitrary native JSX spread: the existing spread restrictions still apply.
@@ -633,6 +692,35 @@ with their current owner. An application must stop previous manual writers for
 the channels it hands over. Template compatibility is not document or request
 authorization: retain the enclosing application's lifetime and stream fencing.
 
+Framework-owned text and closed child lists must retain their server topology.
+Additional Text nodes, including empty or whitespace-only nodes, comments, and
+unexpected elements fail topology validation. A browser translator replacing
+text with `<font>` wrappers is a mismatch: error #318 for a fixed view, #321 for
+an addressed view, and #286 for a structural program. Explicitly unbound or
+opaque content retains its existing ownership rules.
+
+External tools rewriting framework-owned DOM are unsupported both before
+adoption and after activation. Octane does not preserve translated wrappers or
+repair text nodes that an external tool displaces. Keep localization under
+application control and opt owned content out of browser translation in the
+initial server-rendered document, before tools can rewrite deferred or hidden
+views:
+
+```html
+<html translate="no">
+  <head>
+    <meta name="google" content="notranslate" />
+  </head>
+  <!-- Application document -->
+</html>
+```
+
+`translate="no"` can instead be applied to the relevant owned roots when other
+content should remain translatable. The Google meta tag opts the document out
+of Google page translation. These controls depend on the tool honoring them;
+they cannot prevent arbitrary extensions from mutating the DOM. The application
+adds these static attributes and metadata; the compiler does not add them.
+
 `unbound(value)` marks an explicitly external-owned attribute in an opted-in
 view. The ordinary component uses its value during SSR and normal rendering;
 the adopter neither evaluates nor writes that attribute. Above, the server can
@@ -645,10 +733,12 @@ adoption callback when discovery, externally streamed ranges, or automatic
 element-removal cleanup is needed; the small binding runtime does not require
 that machinery itself.
 
-For scalar views hydrated without an explicit lease, hydration retains values
-published by a live binding. After releasing that binding, the next normal
-render applies its props even when they equal the historical server props;
-hydration does not cache a skipped write as an applied value.
+For views hydrated without an explicit lease, hydration retains the attribute,
+class, text and style values that a live binding published, whether it owns
+single style declarations or the whole `style`. A value changed since its
+publication hydrates like any other server value. After releasing that binding,
+the next normal render applies its props even when they equal the historical
+server props; hydration does not cache a skipped write as an applied value.
 
 Each external range belongs to its declared `owner`. Strictly nested ranges are
 allowed, and the closest registered range determines ownership for behaviors
@@ -765,6 +855,15 @@ early layout live; accepted transfer preserves its current owned fields until
 the normal host bindings publish before refs. Nullable attributes are removed
 using their normal DOM semantics; `tabIndex` uses its canonical `tabindex`
 attribute without changing descendant control ownership.
+
+A host moved elsewhere inside the root while its boundary is pending is never
+adopted at its new position. When the boundary resumes, the host is missing from
+its site, which is a hydration mismatch: the boundary discards its server DOM
+and renders on the client. Committing that fallback ends the early binding of
+every host whose server site was in the discarded DOM, the moved one included:
+its cleanup runs once, the moved element keeps its last published values, and
+neither owner writes to it again. An attempt that is discarded before it
+commits leaves the early binding live.
 
 If retirement cleanup invalidates the host after acceptance, its successor
 writers and pending host refs are revoked. This does not roll back cleanup or
@@ -1012,6 +1111,18 @@ range active, retire only its receiver-owned outer anchors, and hydrate the
 original component HTML. Later placement is rejected for that active range;
 the renderer alone reconciles subsequent model updates.
 
+The optional response reader shares the host execution budget with direct
+streamed RPC readers. It checks before transport pulls, frame parsing, and receiver
+admission, so buffered frames or a released delivery backlog can return control
+to the host between units. Ordering and the bounded pending window are unchanged.
+Cancellation and transport timeout are rechecked after waits; the transport read
+deadline excludes budget admission, while delivery deadlines still include queue
+and style waits. Inline document frame delivery keeps its existing path.
+
+The approximately 5 ms budget cannot interrupt one frame parse or receiver call,
+or pace work that resumes inside a receiver after its own style/composition wait.
+Measure that work separately before attributing an entire frame's cost to parsing.
+
 The [conversation-history fixture](../packages/vite-plugin-octane/tests/_fixtures/app/src/conversation-history/)
 demonstrates this integration, cached/fresh responses, stable-key updates,
 completed-page cursors, and independent document-owned drafts. Custom fetches
@@ -1063,14 +1174,21 @@ When a mounted parent updates a dormant boundary, activation uses the latest
 captures for child state, events, refs, and effects. Octane never renders the
 child with its earlier captures, in development or production. If the captures
 or provided context values changed before activation, the server HTML predates
-the client's own state: activation repairs attributes, class, style, and text
-without a hydration warning or `onRecoverableError`. Content the newer
-captures add or swap in, such as another component, a new list row, or a
-hole's new value, mounts on the client beside the adopted server nodes. A
+the client's own state. When it differs from the client render, attributes,
+class, style, and text included, and values that `suppressHydrationWarning` or
+`dangerouslySetInnerHTML` would otherwise keep from the server, the boundary
+renders on the client without a hydration warning or `onRecoverableError`, as
+React reports nothing for an update that reaches a dehydrated boundary. A
 boundary nested inside such a boundary is treated the same way. When the
-captures are unchanged, for example after a parent re-render with equal values,
-a server/client mismatch is still reported as usual. A mismatch that a capture
-change corrects before activation is repaired without a report.
+captures are unchanged, for example after a parent re-render with equal
+values, a server/client mismatch is still reported as usual.
+
+A `<Hydrate>` boundary is a hydration fallback boundary, like Suspense. When
+its server HTML does not match the client render, it discards its server DOM
+and renders on the client, while the rest of the page keeps its server DOM.
+`onRecoverableError` reports it once, the `use()` values it read from the
+server's seeds are discarded so that it renders from client data, and
+interaction intent captured on the discarded DOM is not replayed.
 
 Treat `when` as boundary configuration rather than a strategy state machine. If
 the intended meaning of a boundary changes, give `Hydrate` a new `key` to start

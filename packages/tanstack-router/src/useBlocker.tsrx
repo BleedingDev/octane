@@ -9,7 +9,7 @@
 import { useState, useEffect, isChildrenBlock } from 'octane';
 import type { OctaneNode } from 'octane';
 import type { BlockerFnArgs, HistoryAction, HistoryLocation } from '@tanstack/history';
-import { useRouter } from './context.ts';
+import { useRouter } from './context';
 
 // Blocker types, ported from react-router's useBlocker.tsx. Upstream derives the
 // location shapes from the registered route tree's generics; the octane binding's
@@ -108,8 +108,12 @@ export function useBlocker(
 	opts?: UseBlockerOpts | LegacyBlockerOpts | LegacyBlockerFn,
 	condition?: boolean | any,
 ): BlockerResolver {
-	const { shouldBlockFn, enableBeforeUnload = true, disabled = false, withResolver = false } =
-		_resolveBlockerOpts(opts, condition);
+	const {
+		shouldBlockFn,
+		enableBeforeUnload = true,
+		disabled = false,
+		withResolver = false,
+	} = _resolveBlockerOpts(opts, condition);
 
 	const router = useRouter();
 	const { history } = router;
@@ -182,23 +186,19 @@ export function useBlocker(
 
 // Upstream's PromptProps: the blocker options plus optional children (a render
 // prop receiving the resolver, or plain renderables).
-export type PromptProps =
-	(UseBlockerOpts | LegacyBlockerOpts) & {
-		children?: OctaneNode | ((params: BlockerResolver) => OctaneNode);
-	};
+export type PromptProps = (UseBlockerOpts | LegacyBlockerOpts) & {
+	children?: OctaneNode | ((params: BlockerResolver) => OctaneNode);
+};
 
 // Declarative blocker: registers useBlocker and renders children (optionally a
 // render prop receiving the resolver).
 export function Block(props: PromptProps) @{
 	const { children, ...rest } = props;
 	const resolver = useBlocker(rest);
-	const out =
-		children
-			? typeof children === 'function' && !isChildrenBlock(children)
-				? children(resolver)
-				: children
-			: null;
-	<>
-		{out}
-	</>
+	const out = children
+		? typeof children === 'function' && !isChildrenBlock(children)
+			? children(resolver)
+			: children
+		: null;
+	<>{out}</>
 }

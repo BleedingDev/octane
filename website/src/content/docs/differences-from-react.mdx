@@ -106,25 +106,35 @@ valid.
 Strong mode opts into immutable render snapshots and helps catch detectable
 state, ref, and purity violations. Enable it for a single module with `"use strong"` before its
 imports, or across your application with `compiler: { strong: true }` in
-`octane.config.ts`.
+`octane.config.ts`. The [Strong mode guide](/docs/strong-mode) covers adoption,
+replacements for the React idioms it rejects, and every diagnostic. Strong
+compiles `.tsrx`, `.ts`, and `.js` modules; a `.tsx` or `.jsx` module it reaches
+is a compile error (`OCTANE_STRONG_TSX_MODULE`), because that JSX lowers to
+element descriptors instead of compiled templates.
 
 The compiler rejects state updates during render, synchronous state updates
-while an effect is being set up, and writes to `ref.current` during render. It
-follows provable calls through `useCallback`, `useEffectEvent`, and functions
-returned by analyzable `useMemo` factories. Calling a statically known Effect
-Event during render or including it in explicit hook dependencies is also an
-error. These hooks remain supported, and other explicit dependency lists retain
-their existing meaning.
+while an effect is being set up, and reads and writes of `ref.current` during
+render. It follows provable calls through local helpers and `useEffectEvent`.
+Calling a statically known Effect Event during render or including it in explicit
+hook dependencies is also an error. Strong caches eligible declarations.
+For effects and imperative handles, an explicit
+dependency list that differs from the inferred inputs is an error; an equivalent
+one is a hint. Use `useMemo` or `useCallback` for manual dependency control.
+Both accept explicit lists, omitted or `undefined` lists for inference, and
+`null` to recompute the memo or refresh the callback every render. Memo
+factories and callbacks called during render still follow the render-purity rules.
 
-Use `useLinkedState` when editable state should follow a changing prop. Event
-handlers, genuinely deferred callbacks, effect cleanup, effects that synchronize
-external systems, and normal DOM or timer refs remain supported. Installed
-dependencies keep their existing behavior unless they opt in themselves.
+Use `useLinkedState` when editable state should follow a changing prop,
+`useLazyRef` to create a ref's value once, and `useLayoutSnapshot` to render from a
+DOM measurement. Event handlers, genuinely deferred callbacks, effect cleanup,
+effects that synchronize external systems, and normal DOM or timer refs remain
+supported. Installed dependencies keep their existing behavior unless they opt in
+themselves.
 
 Strong also rejects render-time mutations of provable state snapshots and
 direct reads of known clocks or random sources, such as `Date.now()` and
-`Math.random()`. Events, effects, and lazy state initializers may obtain these
-values. The checks follow supported aliases and synchronous helpers, but cannot
+`Math.random()`. Events, effects, lazy state initializers, and `useLazyRef`
+factories may obtain these values. The checks follow supported aliases and synchronous helpers, but cannot
 prove arbitrary imported code pure.
 
 Default compatibility mode conservatively reevaluates method calls: a stable
@@ -267,20 +277,24 @@ server.
 
 <h2 id="async-work">Transitions without time slicing</h2>
 
-Octane batches updates in a microtask, then runs each render to completion. There are
-urgent and transition updates, but no lanes, yield points, CPU time slicing, or
-selective hydration.
+Octane batches urgent updates in a microtask and renders transition updates in a
+later task, then runs each render to completion. There are urgent and transition
+updates, but no lanes, yield points, CPU time slicing, or selective hydration.
 
-The useful transition behavior remains: when a slower replacement suspends, the
-current screen can stay visible and `isPending` can explain the wait. `flushSync`
-drains the full update queue, while passive effects still run after paint.
+The useful transition behavior remains. `isPending` commits first, with the previous
+state, so the browser can paint it before the transition renders, and it falls in
+the render that commits the transition, as in React. When a slower
+replacement suspends, the current screen can stay visible while `isPending` explains
+the wait. `flushSync` drains the full update queue, while passive effects still run
+after paint.
 
 For resize callbacks that update state or write DOM that can resize observed
 elements, use [createResizeObserver](/docs/core-apis#createResizeObserver) from
 `octane`. Native observer callbacks run inside the browser's resize delivery loop,
 where a microtask commit that changes an observed size can report
 `ResizeObserver loop completed with undelivered notifications`, even if the layout
-eventually settles. `startTransition` does not move that commit out of the loop.
+eventually settles. A transition-only update renders in a later task, outside the
+loop, but an urgent update still commits inside it.
 
 The helper returns a native observer and delivers coalesced measurements in a
 separate task. Use its instance methods for observation and cleanup so unobserve
@@ -305,7 +319,7 @@ declaration, keyed on its real inputs, and that includes local promise chains:
 ```tsrx
 const userPromise = fetchUser(id);
 const thumbnailPromise = userPromise.then((user) => user.thumbnail());
-<Avatar thumbnail={use(thumbnailPromise)} />
+<Avatar thumbnail={use(thumbnailPromise)} />;
 ```
 
 <h2 id="errors-and-server">Errors and server rendering</h2>

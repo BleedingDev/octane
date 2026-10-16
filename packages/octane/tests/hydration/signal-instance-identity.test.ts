@@ -25,6 +25,7 @@ import {
 // a module's first load waits on the shared Vite transform queue, which a
 // loaded run can stall for seconds inside the first scenario's test timeout.
 import '../_server-fixture.js';
+import type { CompiledFixtureModule } from '../_server-fixture.js';
 import '../_server-stream.js';
 import '../_fixtures/signals-async-controls.js';
 import '../../src/hydration/streamed-signals.js';
@@ -70,7 +71,7 @@ export function App(props) @{
 }`;
 			const options = {
 				id: '/src/keyed-row-signals.tsrx',
-				compileOptions: { dev, strong, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, strong, hmr: false },
 				runtimeModules: { 'octane/signals': signals },
 			};
 			const serverModule = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
@@ -178,7 +179,7 @@ export function App(props) @{
 			const { App } = loadCompiledFixtureSource(source, {
 				id: '/src/cold-inline-query.tsrx',
 				mode: 'server',
-				compileOptions: { dev, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
 			});
 			const items = [
 				{ id: 'a', label: 'first' },
@@ -221,7 +222,7 @@ export function App(props) @{
 }`;
 			const options = {
 				id: '/src/cold-inline-handle.tsrx',
-				compileOptions: { dev, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
 			};
 			const serverModule = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
 			const clientModule = loadCompiledFixtureSource(source, { ...options, mode: 'client' });
@@ -273,7 +274,7 @@ export function App(props) @{
 }`;
 		const options = {
 			id: '/src/late-child-row-handles.tsrx',
-			compileOptions: { dev: false, hmr: false },
+			compileOptions: { opaqueSignalHandles: true, dev: false, hmr: false },
 		};
 		const serverModule = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
 		const clientModule = loadCompiledFixtureSource(source, { ...options, mode: 'client' });
@@ -356,7 +357,7 @@ ${row}
 export function App(props) @{ <main>@try { <Row show={true} query={props.query}/> } @pending { <i>{'waiting'}</i> }</main> }`;
 			const options = {
 				id: '/src/returned-fragment-query.tsrx',
-				compileOptions: { dev, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
 			};
 			const serverModule = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
 			const clientModule = loadCompiledFixtureSource(source, { ...options, mode: 'client' });
@@ -424,7 +425,7 @@ export function App(props) @{
 		const { App } = loadCompiledFixtureSource(source, {
 			id: '/src/inline-selection-signals.tsrx',
 			mode: 'client',
-			compileOptions: { dev: false, strong: true, hmr: false },
+			compileOptions: { opaqueSignalHandles: true, dev: false, strong: true, hmr: false },
 			runtimeModules: { 'octane/signals': signals },
 		});
 		const items = [
@@ -481,7 +482,7 @@ export function App(props) @{
 }`;
 			const options = {
 				id: '/src/nested-inline-row-signals.tsrx',
-				compileOptions: { dev, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
 				runtimeModules: { 'octane/signals': signals },
 			};
 			const serverModule = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
@@ -597,7 +598,7 @@ export function App(props) @{
 			const { App } = loadCompiledFixtureSource(source, {
 				id: '/src/keyed-server-output.tsrx',
 				mode: 'server',
-				compileOptions: { dev, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
 			});
 			const items = ['first', 'second'].map((label) => ({
 				label,
@@ -679,7 +680,7 @@ export function App(props) @{
 }`;
 			const options = {
 				id: '/src/nested-keyed-server-output.tsrx',
-				compileOptions: { dev, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
 			};
 			const serverModule = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
 			const clientModule = loadCompiledFixtureSource(source, { ...options, mode: 'client' });
@@ -861,7 +862,11 @@ export function App(props) @{
   <section><output>{props.value as string}</output><input value={props.value}/><div style={{ color: props.value }}/></section>
 }
 export function App(props) @{ <main>@for (const item of props.items; key item) { <Row value={props.produce(item)}/> }</main> }`;
-		const options = { id: '/src/cold-server-handle.tsrx', mode: 'server' as const };
+		const options = {
+			id: '/src/cold-server-handle.tsrx',
+			mode: 'server' as const,
+			compileOptions: { opaqueSignalHandles: true },
+		};
 		const { App } = loadCompiledFixtureSource(source, options);
 		const items = ['red', 'blue'];
 		expect(server.renderToString(App, { items, produce: (item: string) => item }).html).toContain(
@@ -1002,6 +1007,87 @@ export function App(props) @{ <main>@for (const item of props.items; key item) {
 		root.unmount();
 	});
 
+	it.each([false, true])(
+		'resumes component signals from JSX values at distinct call sites (dev: %s)',
+		async (dev) => {
+			vi.resetModules();
+			const server = await import('../../src/runtime.server.js');
+			const client = await import('../../src/runtime.js');
+			const signals = await import('../../src/signals/index.js');
+			const { bootstrapStreamedSignalHydration } =
+				await import('../../src/hydration/streamed-signals.js');
+			const { loadCompiledFixtureSource } = await import('../_server-fixture.js');
+			const { activateStreamedMarkup, resetStreamRuntimeGlobals } =
+				await import('../_server-stream.js');
+			const { drainProducers } = await import('../_fixtures/signals-async-controls.js');
+			// Dynamic JSX values defer their whole element until they render. The
+			// two fields share every declaration, so only each element's call site
+			// keeps their signals apart and joins the client to the server's.
+			const source = `import { signal$ } from 'octane/signals';
+function Field(props) @{
+ const label$ = signal$(props.label);
+ <section><output>{props.query(props.label) as string}</output><input value={label$}/></section>
+}
+export function App(props) @{
+ const left = <Field label={props.left} query={props.query}/>;
+ const right = <Field label={props.right} query={props.query}/>;
+ <main>@try { <div>{left}{right}</div> } @pending { <i>{'waiting'}</i> }</main>
+}`;
+			const options = {
+				id: '/src/scoped-value-call-sites.tsrx',
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
+				runtimeModules: { 'octane/signals': signals },
+			};
+			const serverModule = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
+			const clientModule = loadCompiledFixtureSource(source, { ...options, mode: 'client' });
+			const serverLoad = vi.fn(async (key: string) => `server ${key}`);
+			const browserLoad = vi.fn(async (key: string) => `browser ${key}`);
+			const props = (load: (key: string) => Promise<string>) => ({
+				left: 'left',
+				right: 'right',
+				query: (key: string) => signals.__queryAt('i:scoped-value-call-sites', () => key, load),
+			});
+			const streamedSignals = { buildId: 'scoped-value-sites', documentId: 'scoped-value-sites' };
+			const container = document.createElement('div');
+			document.body.append(container);
+			let root: ReturnType<typeof client.hydrateRoot> | undefined;
+			let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
+			try {
+				const output = await server.prerender(serverModule.App, props(serverLoad), {
+					streamedSignals,
+				});
+				container.innerHTML = output.html;
+				activateStreamedMarkup(container);
+				const results = [...container.querySelectorAll('output')];
+				const controls = [...container.querySelectorAll('input')];
+				expect(results.map((node) => node.textContent)).toEqual(['server left', 'server right']);
+				expect(controls.map((node) => node.value)).toEqual(['left', 'right']);
+				const errors: unknown[] = [];
+				hydration = bootstrapStreamedSignalHydration(streamedSignals);
+				root = client.hydrateRoot(container, clientModule.App, props(browserLoad), {
+					signalOwner: hydration.signalOwner,
+					onRecoverableError: (error) => errors.push(error),
+					onUncaughtError: (error) => errors.push(error),
+				});
+				await drainProducers();
+				client.flushSync(() => {});
+				expect(browserLoad).not.toHaveBeenCalled();
+				expect([...container.querySelectorAll('output')]).toEqual(results);
+				expect([...container.querySelectorAll('input')]).toEqual(controls);
+				expect(results.map((node) => node.textContent)).toEqual(['server left', 'server right']);
+				expect(errors).toEqual([]);
+				controls[0]!.value = 'edited';
+				client.flushSync(() => controls[0]!.dispatchEvent(new Event('input', { bubbles: true })));
+				expect(controls.map((node) => node.value)).toEqual(['edited', 'right']);
+			} finally {
+				root?.unmount();
+				hydration?.dispose();
+				container.remove();
+				resetStreamRuntimeGlobals();
+			}
+		},
+	);
+
 	it('keeps repeated keyed call sites stable across opposite traversal order', () => {
 		const serverKeys: Record<string, string> = {};
 		const clientKeys: Record<string, string> = {};
@@ -1054,6 +1140,7 @@ export function App(props) @{ <main>@for (const item of props.items; key item) {
 				'function Row(props) { return <>@if (props.show) { <p>shown</p> }<Field load={props.load}/></>; }',
 				'function Row(props) { return <><p>shown</p><Field load={props.load}/></>; }',
 				'function Row(props) { return <div>@if (props.show) { <p>shown</p> }<Field load={props.load}/></div>; }',
+				'function Row(props) { return cloneElement(<div/>, null, <p>head</p>, [<Field key="a" load={props.load}/>]); }',
 			].map((row) => ({ dev, row })),
 		),
 	)(
@@ -1072,7 +1159,8 @@ export function App(props) @{ <main>@for (const item of props.items; key item) {
 			// Importing signals compiles a returning Row as a plain function whose
 			// JSX is a scoped value. Field's query must resolve to the same
 			// instance on both sides so the browser resumes the server result.
-			const source = `import { query$ } from 'octane/signals';
+			const source = `import { cloneElement } from 'octane';
+import { query$ } from 'octane/signals';
 function Field(props) @{
  const value$ = query$(() => 'field', props.load);
  <section><output>{value$}</output></section>
@@ -1081,7 +1169,7 @@ ${row}
 export function App(props) @{ <main>@try { <Row show={props.show} load={props.load}/> } @pending { <i>waiting</i> }</main> }`;
 			const options = {
 				id: '/src/returned-signal-query.tsrx',
-				compileOptions: { dev, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
 				runtimeModules: {
 					'octane/signals': signals,
 					'octane/signals/query': signals,
@@ -1176,7 +1264,7 @@ ${list}
 export function App(props) @{ <main>@try { <List ids={props.ids} load={props.load}/> } @pending { <i>waiting</i> }</main> }`;
 			const options = {
 				id: '/src/returned-keyed-query.tsrx',
-				compileOptions: { dev, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
 				runtimeModules: {
 					'octane/signals': signals,
 					'octane/signals/query': signals,
@@ -1331,7 +1419,7 @@ export function App(props) @{ <main>@for (const k of ['a', 'b']; key k) { <Row r
 import { Leaf } from './leaf';
 ${source}`;
 			const load = (mode: 'client' | 'server') => {
-				const compileOptions = { dev, hmr: false };
+				const compileOptions = { dev, hmr: false, opaqueSignalHandles: true };
 				const runtimeModules = { 'octane/signals': signals };
 				const leaf = loadCompiledFixtureSource(RETURNED_JSX_LEAF, {
 					id: '/src/leaf.tsx',
@@ -1438,7 +1526,7 @@ export function App(props) { return <main><Suspense fallback={<i>waiting</i>}>{[
 import { Field } from './field';
 ${source}`;
 			const load = (mode: 'client' | 'server') => {
-				const compileOptions = { dev, hmr: false };
+				const compileOptions = { dev, hmr: false, opaqueSignalHandles: true };
 				const runtimeModules = {
 					'octane/signals': signals,
 					'octane/signals/query': signals,
@@ -1547,7 +1635,7 @@ export function App(props) @{
 }`;
 			const options = {
 				id: '/src/deferred-opaque-keyed-signals.tsrx',
-				compileOptions: { dev, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
 				runtimeModules: { 'octane/signals': signals },
 			};
 			const serverModule = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
@@ -1628,7 +1716,7 @@ export function App(props) @{
 			const serverModule = loadCompiledFixtureSource(source, {
 				id: '/src/transient-opaque-keyed-query.tsrx',
 				mode: 'server',
-				compileOptions: { dev, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
 				runtimeModules: { 'octane/signals': signals },
 			});
 			const started: string[] = [];
@@ -1670,7 +1758,7 @@ export function App(props) @{
 }`;
 			const options = {
 				id: '/src/reverse-reveal-opaque-keyed-signals.tsrx',
-				compileOptions: { dev, hmr: false },
+				compileOptions: { opaqueSignalHandles: true, dev, hmr: false },
 			};
 			const serverModule = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
 			const clientModule = loadCompiledFixtureSource(source, { ...options, mode: 'client' });
@@ -1727,6 +1815,187 @@ export function App(props) @{
 				root.unmount();
 				container.remove();
 				resetStreamRuntimeGlobals();
+			}
+		},
+	);
+});
+
+// A component without hooks still owns one signal instance level, and its
+// arms, rows and value children resolve their owners below that level on both
+// sides. Development and production compile hookless calls differently.
+const HOOKLESS_LEAF = `import { signal$ } from 'octane/signals';
+export function Leaf(props) {
+	const value$ = signal$('leaf');
+	props.remember('leaf');
+	return <output>{String(value$.get())}</output>;
+}`;
+
+const HOOKLESS_LEAF_APPS: Record<string, string> = {
+	'value under @if': `import { Leaf } from './leaf';
+function Card(props) @{ <section>@if (props.on) { <div>{props.content}</div> }</section> }
+export function App(props) @{ <main><Card on={true} content={<Leaf remember={props.remember}/>}/></main> }`,
+	'host value under @if': `import { Leaf } from './leaf';
+function Card(props) @{ <section>@if (props.on) { <div>{props.content}</div> }</section> }
+export function App(props) @{ <main><Card on={true} content={<p><Leaf remember={props.remember}/></p>}/></main> }`,
+	'value under @for': `import { Leaf } from './leaf';
+function Card(props) @{ <section>@for (const id of props.ids; key id) { <div>{props.content}</div> }</section> }
+export function App(props) @{ <main><Card ids={['a']} content={<Leaf remember={props.remember}/>}/></main> }`,
+	'component under @if': `import { Leaf } from './leaf';
+function Card(props) @{ <section>@if (props.on) { <Leaf remember={props.remember}/> }</section> }
+export function App(props) @{ <main><Card on={true} remember={props.remember}/></main> }`,
+	'value under nested hookless arms': `import { Leaf } from './leaf';
+function Inner(props) @{ <span>@if (props.on) { <b>{props.content}</b> }</span> }
+function Card(props) @{ <section>@if (props.on) { <Inner on={true} content={props.content}/> }</section> }
+export function App(props) @{ <main><Card on={true} content={<Leaf remember={props.remember}/>}/></main> }`,
+	'array in cloneElement children': `import { cloneElement } from 'octane';
+import { Leaf } from './leaf';
+function Card(props) { return cloneElement(<div/>, null, [<Leaf key="a" remember={props.remember}/>, <b>b</b>], <p>c</p>); }
+export function App(props) @{ <main><Card remember={props.remember}/></main> }`,
+};
+
+// Hookless siblings retried after a browser-only suspension keep their own
+// owners, whatever the hookless component rendered before them contains.
+const HOOKLESS_RETRY_FIRSTS: Record<string, string> = {
+	'nested hookless child': `function Inner(props) @{ <b>inner</b> }
+function First(props) @{ <i><Inner/></i> }`,
+	'@if arm': `function First(props) @{ <i>@if (props.on) { <b>inner</b> }</i> }`,
+};
+
+const hooklessRetryApp = (first: string) => `import { use } from 'octane';
+${first}
+function Probe(props) @{ props.remember(props.name); <u>{props.name as string}</u> }
+function Gate(props) @{ const value = props.wait ? use(props.wait()) : 'done'; <s>{value as string}</s> }
+export function App(props) @{ <main>@try { <><First on={true}/><Probe name="b" remember={props.remember}/><Probe name="c" remember={props.remember}/><Gate wait={props.wait}/></> } @pending { <p>waiting</p> }</main> }`;
+
+async function loadHooklessScenario(source: string, dev: boolean, leaf: boolean) {
+	vi.resetModules();
+	const server = await import('../../src/runtime.server.js');
+	const client = await import('../../src/runtime.js');
+	const signals = await import('../../src/signals/index.js');
+	const { loadCompiledFixtureSource } = await import('../_server-fixture.js');
+	const compileOptions = { dev, hmr: false, opaqueSignalHandles: true };
+	const load = (mode: 'client' | 'server') => {
+		const runtimeModules: Record<string, CompiledFixtureModule> = { 'octane/signals': signals };
+		if (leaf) {
+			runtimeModules['./leaf'] = loadCompiledFixtureSource(HOOKLESS_LEAF, {
+				id: '/src/leaf.tsx',
+				mode,
+				compileOptions,
+				runtimeModules,
+			});
+		}
+		return loadCompiledFixtureSource(source, {
+			id: '/src/app.tsrx',
+			mode,
+			compileOptions,
+			runtimeModules,
+		});
+	};
+	const owners: Record<'server' | 'client', [string, string][]> = { server: [], client: [] };
+	const remember = (side: 'server' | 'client') => (name: string) =>
+		owners[side].push([
+			name,
+			(signals.currentSignalOwner() as { instanceKey?: string } | null)?.instanceKey ?? 'missing',
+		]);
+	// Every browser owner must be the server owner of the same component.
+	const expectServerOwners = (names: string[]) => {
+		const serverKeys = new Map(owners.server);
+		expect([...serverKeys.keys()]).toEqual(names);
+		expect(new Set(serverKeys.values()).size).toBe(names.length);
+		expect([...serverKeys.values()]).not.toContain('missing');
+		expect(new Set(owners.client.map(([name]) => name))).toEqual(new Set(names));
+		expect(owners.client).toEqual(owners.client.map(([name]) => [name, serverKeys.get(name)]));
+	};
+	return {
+		server,
+		client,
+		serverModule: load('server'),
+		clientModule: load('client'),
+		remember,
+		expectServerOwners,
+	};
+}
+
+describe('hookless component signal instance identity', () => {
+	it.each(
+		Object.keys(HOOKLESS_LEAF_APPS).flatMap((shape) =>
+			[false, true].map((dev) => ({ shape, dev })),
+		),
+	)(
+		'keeps the owner of a $shape inside a hookless component through hydration (dev: $dev)',
+		async ({ shape, dev }) => {
+			const { server, client, serverModule, clientModule, remember, expectServerOwners } =
+				await loadHooklessScenario(HOOKLESS_LEAF_APPS[shape]!, dev, true);
+			const signalOwner = { scopeKey: 'hookless-arm-owner' };
+			const output = server.renderToString(
+				serverModule.App,
+				{ remember: remember('server') },
+				{ signalOwner },
+			);
+			const container = document.createElement('div');
+			container.innerHTML = output.html;
+			document.body.append(container);
+			const result = container.querySelector('output');
+			const errors: unknown[] = [];
+			const root = client.hydrateRoot(
+				container,
+				clientModule.App,
+				{ remember: remember('client') },
+				{ signalOwner, onRecoverableError: (error) => errors.push(error) },
+			);
+			try {
+				expectServerOwners(['leaf']);
+				expect(container.querySelector('output')).toBe(result);
+				expect(result?.textContent).toBe('leaf');
+				expect(errors).toEqual([]);
+			} finally {
+				root.unmount();
+				container.remove();
+			}
+		},
+	);
+
+	it.each(
+		Object.keys(HOOKLESS_RETRY_FIRSTS).flatMap((first) =>
+			[false, true].map((dev) => ({ first, dev })),
+		),
+	)(
+		'keeps hookless sibling owners apart when hydration retries after a $first (dev: $dev)',
+		async ({ first, dev }) => {
+			const { server, client, serverModule, clientModule, remember, expectServerOwners } =
+				await loadHooklessScenario(hooklessRetryApp(HOOKLESS_RETRY_FIRSTS[first]!), dev, false);
+			const signalOwner = { scopeKey: 'hookless-retry-owner' };
+			// Only the browser suspends, so hydration retries the server's @try body.
+			const output = server.renderToString(
+				serverModule.App,
+				{ remember: remember('server') },
+				{ signalOwner },
+			);
+			const container = document.createElement('div');
+			container.innerHTML = output.html;
+			document.body.append(container);
+			const probes = [...container.querySelectorAll('u')];
+			let resolve!: (value: string) => void;
+			const pending = new Promise<string>((done) => (resolve = done));
+			const errors: unknown[] = [];
+			const root = client.hydrateRoot(
+				container,
+				clientModule.App,
+				{ remember: remember('client'), wait: () => pending },
+				{ signalOwner, onRecoverableError: (error) => errors.push(error) },
+			);
+			try {
+				resolve('done');
+				await pending;
+				await new Promise((done) => setTimeout(done, 0));
+				client.flushSync(() => {});
+				expect(container.querySelector('s')?.textContent).toBe('done');
+				expect([...container.querySelectorAll('u')]).toEqual(probes);
+				expectServerOwners(['b', 'c']);
+				expect(errors).toEqual([]);
+			} finally {
+				root.unmount();
+				container.remove();
 			}
 		},
 	);

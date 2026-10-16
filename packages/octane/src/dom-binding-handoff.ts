@@ -9,7 +9,7 @@ export interface BindingHandoffRange {
 	readonly end: Node;
 	readonly arm?: number;
 	readonly view?: string;
-	readonly slot?: string;
+	readonly slot?: string | undefined;
 }
 
 /** A closed caller shape proven for this actual child range, never for its module globally. */
@@ -38,11 +38,13 @@ export interface BindingHandoff {
 	view?(root: Node): BindingHandoffView | undefined;
 	rest?(element: Element, site: number): BindingHandoffRest | undefined;
 	valid?(): boolean;
+	/** A scalar host moved off its server site, which `node` (null: the end) in `parent` now holds. */
+	displaced?(parent: Node, node: Node | null): boolean;
 	/** One deferred retry; listener storage is allocated only when requested. */
 	afterPublication?(callback: () => void): () => void;
 	active(): boolean;
 	retire(publish?: () => void): void;
-	owner?: object;
+	owner?: object | undefined;
 }
 
 export interface BindingHandoffCapability {

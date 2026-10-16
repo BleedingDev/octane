@@ -22,6 +22,16 @@ function serverModule(): Record<string, any> {
 }
 const server = serverModule();
 
+/** Element and text markup, ignoring hydration comments. */
+function markup(node: Element): string {
+	const copy = node.cloneNode(true) as Element;
+	const walker = document.createTreeWalker(copy, NodeFilter.SHOW_COMMENT);
+	const comments: Node[] = [];
+	while (walker.nextNode()) comments.push(walker.currentNode);
+	for (const comment of comments) comment.parentNode!.removeChild(comment);
+	return copy.innerHTML;
+}
+
 let container: HTMLElement;
 beforeEach(() => {
 	container = document.createElement('div');
@@ -103,6 +113,57 @@ describe.each([false, true])('hydrateRoot — resolved @try siblings (dev=%s)', 
 			} finally {
 				root?.unmount();
 				warn.mockRestore();
+				error.mockRestore();
+			}
+		},
+	);
+
+	it.each([
+		{ name: 'TryThenPair', fail: false },
+		{ name: 'TryThenPair', fail: true },
+		{ name: 'BoundaryThenPair', fail: false },
+		{ name: 'BoundaryThenPair', fail: true },
+	])(
+		'hydrates a multi-root component after $name (client failure=$fail)',
+		async ({ name, fail }) => {
+			container.innerHTML = ServerRT.renderToString(server[name], { fail: false }).html;
+			const section = container.querySelector('section')!;
+			const original = [...section.querySelectorAll('*')];
+			const recoverable = vi.fn();
+			const caught = vi.fn();
+			const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+			let root: ReturnType<typeof hydrateRoot> | undefined;
+			try {
+				root = hydrateRoot(
+					container,
+					client[name],
+					{ fail },
+					{ onCaughtError: caught, onRecoverableError: recoverable },
+				);
+				flushSync(() => {});
+				await act(async () => {});
+				const current = container.querySelector('section')!;
+				expect(markup(current)).toBe(
+					`<button>${fail ? 'error' : 'inside'}</button><i>pair</i><s>s</s><button>after</button>`,
+				);
+				if (fail) {
+					// Only the client's try body throws, so it throws while hydrating.
+					// As in React, the root renders on the client, where the catch arm
+					// catches the repeated throw: no server node survives.
+					expect([section, ...original].filter((node) => node.isConnected)).toEqual([]);
+				} else {
+					const adopted = [...current.querySelectorAll('*')];
+					expect(current).toBe(section);
+					expect(adopted).toHaveLength(original.length);
+					adopted.forEach((node, index) => expect(node).toBe(original[index]));
+				}
+				expect(caught.mock.calls.map(([value]) => value.message)).toEqual(
+					fail ? ['synthetic client failure'] : [],
+				);
+				expect(recoverable).not.toHaveBeenCalled();
+				expect(error).not.toHaveBeenCalled();
+			} finally {
+				root?.unmount();
 				error.mockRestore();
 			}
 		},

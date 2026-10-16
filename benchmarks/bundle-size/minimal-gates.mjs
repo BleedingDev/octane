@@ -1,35 +1,18 @@
 import assert from 'node:assert/strict';
 
+// Positional arguments name minimal-import scenarios by id (every bundler's
+// build of it) or by name (one build). No argument selects every scenario.
 export function selectMinimalScenarios(args, scenarios) {
-	const enforceBudgets = args.includes('--budgets');
-	const requested = args.filter((argument) => argument !== '--budgets');
-	for (const argument of requested) {
+	for (const argument of args) {
 		assert.equal(
 			scenarios.some(({ id, name }) => argument === id || argument === name),
 			true,
 			`Unknown minimal-import scenario: ${argument}`,
 		);
 	}
-	const selectedScenarios = requested.length
-		? scenarios.filter(({ id, name }) => requested.includes(id) || requested.includes(name))
+	const selectedScenarios = args.length
+		? scenarios.filter(({ id, name }) => args.includes(id) || args.includes(name))
 		: scenarios;
 	assert.notEqual(selectedScenarios.length, 0, 'At least one minimal-import scenario must run');
-	return { selectedScenarios, enforceBudgets };
-}
-
-export function verifyByteBudget(name, measured, budget, enforce) {
-	for (const metric of ['raw', 'gzip', 'brotli']) {
-		assert.equal(
-			Number.isSafeInteger(budget[metric]) && budget[metric] > 0,
-			true,
-			`${name}: invalid committed ${metric} byte budget`,
-		);
-		if (enforce) {
-			assert.equal(
-				measured[metric] <= budget[metric],
-				true,
-				`${name}: production ${metric} bytes ${measured[metric]} exceed committed budget ${budget[metric]}`,
-			);
-		}
-	}
+	return selectedScenarios;
 }

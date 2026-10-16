@@ -5,7 +5,7 @@ import {
 	type CapturedFormSubmission,
 } from 'octane/behavior';
 import { bootstrapIndependentHydration } from 'octane/hydration';
-import { clicks, hydrated } from './actions.js';
+import { clicks, hydrated, editorEvents, activations } from './actions.js';
 
 type SerializableField = readonly [string, string | { name: string; size: number; type: string }];
 type SubmissionPayload = {
@@ -18,12 +18,21 @@ type SubmissionPayload = {
 
 const form = document.querySelector('#command-form') as HTMLFormElement;
 const originalInput = form.elements.namedItem('draft') as HTMLInputElement;
+const originalComposition: Array<{ type: string; trusted: boolean }> = [];
+for (const type of ['compositionstart', 'compositionend'])
+	originalInput.addEventListener(
+		type,
+		(event) => originalComposition.push({ type, trusted: event.isTrusted }),
+		true,
+	);
 const container = document.querySelector('#behavior-container')!;
 const root = attachBehaviorRoot(
 	new URLSearchParams(location.search).has('form-root') ? form : container,
 	{ formSubmissions: captureFormSubmissions() },
 );
 const captures: SubmissionPayload[] = [];
+const payloadFiles = new WeakMap<SubmissionPayload, Array<readonly [string, File]>>();
+const deliveredFiles: Array<Array<readonly [string, File]>> = [];
 const deliveries: Array<
 	SubmissionPayload & { original: boolean; submitterSame: boolean; trusted: boolean }
 > = [];
@@ -71,6 +80,10 @@ function register(id = 'save'): void {
 						Object.isFrozen(submission.form) &&
 						(submission.submitter === null || Object.isFrozen(submission.submitter))),
 			});
+			payloadFiles.set(
+				payload,
+				entries.filter((entry): entry is readonly [string, File] => typeof entry[1] !== 'string'),
+			);
 			captures.push(payload);
 			return payload;
 		},
@@ -82,6 +95,7 @@ function register(id = 'save'): void {
 		},
 		handleEvent(event, _element, _context, payload) {
 			const index = window.__formObservation.events.indexOf(event);
+			deliveredFiles.push(payloadFiles.get(payload) ?? []);
 			deliveries.push({
 				...payload,
 				original: index !== -1,
@@ -94,6 +108,25 @@ function register(id = 'save'): void {
 	});
 }
 
+let canceledRegistration: BehaviorRegistration | undefined;
+const canceledCalls: string[] = [];
+if (new URLSearchParams(location.search).has('pre-aborted')) {
+	const lifetime = new AbortController();
+	lifetime.abort();
+	canceledRegistration = root.registerBehavior({
+		id: 'save',
+		target: '#command-form',
+		events: ['submit'],
+		signal: lifetime.signal,
+		captureEvent() {
+			canceledCalls.push('capture');
+		},
+		adopt() {
+			canceledCalls.push('adopt');
+		},
+	});
+	canceledRegistration.dispose();
+}
 if (!new URLSearchParams(location.search).has('no-owner')) register();
 
 const stopHydration = bootstrapIndependentHydration(container, {
@@ -101,6 +134,7 @@ const stopHydration = bootstrapIndependentHydration(container, {
 	loadStyles() {},
 	async loadModule() {
 		islandLoads++;
+		if (new URLSearchParams(location.search).has('hold-island')) await ready;
 		// The query requests the compiler's real independent boundary entrypoint.
 		// @ts-expect-error The bundler owns independent Hydrate query modules.
 		return import('./Form.tsrx?octane-hydrate=0');
@@ -113,6 +147,22 @@ const stopHydration = bootstrapIndependentHydration(container, {
 const harness = {
 	release,
 	register,
+	fileFrozen(index = 0) {
+		return (deliveredFiles[index] ?? []).map(([, file]) => Object.isFrozen(file));
+	},
+	async files(index = 0) {
+		return Promise.all(
+			(deliveredFiles[index] ?? []).map(async ([field, file]) => ({
+				field,
+				name: file.name,
+				webkitRelativePath: file.webkitRelativePath,
+				size: file.size,
+				type: file.type,
+				lastModified: file.lastModified,
+				contents: await file.text(),
+			})),
+		);
+	},
 	disposeRegistration() {
 		registration?.dispose();
 	},
@@ -127,6 +177,12 @@ const harness = {
 			adoptions: adoptions.slice(),
 			cleanups: cleanups.slice(),
 			clicks: clicks.slice(),
+			editorEvents: editorEvents.slice(),
+			originalComposition,
+			activations: activations.slice(),
+			selectionStart: originalInput.selectionStart,
+			selectionEnd: originalInput.selectionEnd,
+			focused: document.activeElement === originalInput,
 			islandLoads,
 			hydrated,
 			errors: errors.slice(),
@@ -134,6 +190,8 @@ const harness = {
 			value: originalInput.value,
 			nativeSubmissions: window.__formObservation.events.length,
 			canceled: window.__formObservation.events.map((event) => event.defaultPrevented),
+			registrationCanceled: canceledRegistration?.signal.aborted,
+			canceledCalls: canceledCalls.slice(),
 		};
 	},
 };

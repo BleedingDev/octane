@@ -7,7 +7,7 @@ client/server environments, preview, and deployment adapters.
 ## Install
 
 ```sh
-pnpm add octane @octanejs/rsbuild-plugin
+pnpm add octane @octanejs/rsbuild-plugin @tsrx/oxc@0.20.0
 pnpm add -D @rsbuild/core
 ```
 
@@ -115,8 +115,10 @@ violations; production client builds condition memoization on the author's
 assertion that every user-authored render operation is pure for its witnessed
 inputs. Callee shape and `use*` spelling do not disable that optimization.
 
-Dependencies retain compatibility behavior unless they begin a module with
-`"use strong"`. Strong analysis is bounded: an unknown call is assumed pure, so
+Strong compiles `.tsrx`, `.ts`, and `.js` modules, so convert application
+`.tsx` and `.jsx` modules to `.tsrx` first; the build reports
+`OCTANE_STRONG_TSX_MODULE` for any it reaches. Dependencies retain
+compatibility behavior unless they begin a module with `"use strong"`. Strong analysis is bounded: an unknown call is assumed pure, so
 imported live accessors do not become immutable merely because their caller opts
 in. Keep such consumers in compatibility mode or pass an actual snapshot.
 

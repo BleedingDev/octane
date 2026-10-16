@@ -61,6 +61,102 @@ function depsOf(code: string, hook = 'useEffect'): Array<string[] | string | nul
 }
 
 describe('automatic hook dependencies — full compiler', () => {
+	it.each([
+		['const row', 'const item'],
+		['let row', 'let item'],
+		['bare row', 'item'],
+		['object row', '{ value: item }'],
+		['array row', '[item]'],
+	])('tracks a shadowing %s and preserves the outer binding in @empty', (_label, binding) => {
+		const source = `
+      import { useEffect } from 'octane';
+      export function Rows(props) @{
+        const item = 'outer';
+        <section>@for (${binding} of props.items; key item) {
+          useEffect(() => props.log(item));
+          <div>{item as string}</div>
+        } @empty {
+          useEffect(() => props.log(item));
+          <span>{item as string}</span>
+        }</section>
+      }
+    `;
+		for (const strong of [false, true]) {
+			for (const mode of ['client', 'server'] as const) {
+				for (const dev of [false, true]) {
+					const code = compile(source, 'rows.tsrx', {
+						strong,
+						mode,
+						dev,
+						inlineHookMemo: false,
+					}).code;
+					expect(
+						depsOf(code).sort(
+							(a, b) => (Array.isArray(a) ? a.length : 0) - (Array.isArray(b) ? b.length : 0),
+						),
+					).toEqual([['method(props, "log")'], ['method(props, "log")', 'item']]);
+				}
+			}
+		}
+	});
+
+	it('rejects a var row that redeclares an outer binding', () => {
+		// A `var` row belongs to the component function, as in JavaScript, so it
+		// cannot shadow the outer `item`: it redeclares it.
+		const source = `
+      import { useEffect } from 'octane';
+      export function Rows(props) @{
+        const item = 'outer';
+        <section>@for (var item of props.items; key item) {
+          useEffect(() => props.log(item));
+          <div>{item as string}</div>
+        }</section>
+      }
+    `;
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(source, 'rows.tsrx', { mode })).toThrow(
+				expect.objectContaining({
+					name: 'Error',
+					code: 'TS2300',
+					message: "Identifier 'item' has already been declared",
+				}),
+			);
+		}
+	});
+
+	it('tracks a catch reset binding without changing the outer binding in @try', () => {
+		const source = `
+      import { useEffect } from 'octane';
+      export function Boundary(props) @{
+        const retry = 'outer';
+        <section>@try {
+          useEffect(() => props.log(retry));
+          <div />
+        } @catch (error, retry) {
+          useEffect(() => props.log(retry));
+          <span />
+        }</section>
+      }
+    `;
+		for (const strong of [false, true]) {
+			for (const mode of ['client', 'server'] as const) {
+				for (const dev of [false, true]) {
+					const code = compile(source, 'boundary.tsrx', {
+						strong,
+						mode,
+						dev,
+						inlineHookMemo: false,
+					}).code;
+					expect(
+						depsOf(code).sort(
+							(a, b) => (Array.isArray(a) ? a.length : 0) - (Array.isArray(b) ? b.length : 0),
+						),
+					).toEqual([['method(props, "log")'], ['method(props, "log")', 'retry']]);
+				}
+			}
+		}
+	});
+
 	it('infers precise member paths and omits known-stable hook results', () => {
 		const code = c(`
       import {

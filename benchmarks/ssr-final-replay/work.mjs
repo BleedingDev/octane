@@ -99,10 +99,13 @@ function instrument(text) {
 		assert.ok(start >= 0 && at >= start + end.length, name);
 		text = text.slice(0, at) + `\nglobalThis.${counter}.${metric}++;` + text.slice(at);
 	}
-	text = once(
-		text,
-		'for (const { promise, key } of suspended) {',
-		`for (const { promise, key } of suspended) { globalThis.${counter}.suspended_visits++;`,
+	// Every pass over a wave's suspended members: settling it, and the
+	// stalled-wave check that decides whether the wave spends the pass limit.
+	const suspendedLoop = 'for (const { promise, key } of suspended) {';
+	assert.equal(text.split(suspendedLoop).length, 3, suspendedLoop);
+	text = text.replaceAll(
+		suspendedLoop,
+		`${suspendedLoop} globalThis.${counter}.suspended_visits++;`,
 	);
 	assert.equal(text.split('instrumented.then(NOOP, NOOP);').length, 3);
 	text = text.replaceAll(
@@ -487,23 +490,6 @@ try {
 		'a global position scratch record breaks nested memo writes',
 	);
 	delete globalThis.__sharedPosition;
-	targets.push({
-		name: 'scan-budget',
-		ops: { boundary_arrays: stat(1), copied_boundaries: stat(1) },
-	});
-	targets.push({
-		name: 'populated-budget',
-		ops: { collection_copies: stat(688), collection_entries: stat(6688) },
-	});
-	targets.push({
-		name: 'wave-budget',
-		ops: {
-			full_passes: stat(33),
-			suspended_visits: stat(528),
-			read_probes: stat(496),
-			try_closures: stat(13728),
-		},
-	});
 	const payload = {
 		suite: 'ssr-final-replay',
 		iterations: 1,

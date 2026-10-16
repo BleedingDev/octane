@@ -41,11 +41,12 @@ the production reachable-module owner weights. That proportional raw
 attribution is for prioritization; only an isolated production build delta may
 be described as gzip ownership.
 
-`inventory-budgets.json` freezes total, thread-section, and owner-slice raw
-budgets plus total gzip budgets on the issue #57 first-screen template-range
-candidate over exact base `dcf94cfc8`, which includes the merged dense-clear
-teardown. The ledger keeps the older #706/#707 entries, pre-existing mainline
-drift, and the candidate's controlled size tax separate because compressed
+Bytes are reported, never gated; the only failure is raw attribution covering
+less than 90% of an artifact. `OCTANE_INVENTORY_OUTPUT=<file>` writes the full
+payload. `controlled-ledger.json` records controlled size deltas by owner.
+Owner slices are proportional, so an owner's slice also moves when another
+owner grows or shrinks. The ledger keeps the older #706/#707 entries, mainline
+drift, and the #57 candidate's controlled size tax separate because compressed
 deltas are not additive.
 
 The checked execution report is

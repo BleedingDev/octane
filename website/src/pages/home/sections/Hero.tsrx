@@ -2,7 +2,7 @@
 // the live twin of that sample (HeroDemo) running underneath it. The sample is
 // an .mdx module so it rides the same Shiki pipeline as the docs.
 import { useRef, version } from 'octane';
-import { Link } from '@octanejs/tanstack-router';
+import { Link } from '@octanejs/tanstack-router/compiled';
 import CodeSample from '../../../content/home-sample.mdx';
 import { HeroDemo } from '../../../components/HeroDemo.tsrx';
 import { useCopyToClipboard } from '../../../hooks/use-copy.ts';
@@ -187,7 +187,9 @@ export function Hero() @{
 					href="https://www.npmjs.com/package/octane"
 					target="_blank"
 					rel="noreferrer"
-				>{'v' + version as string}</a>
+				>
+					{('v' + version) as string}
+				</a>
 				<h1 class="hero-title">
 					{'React’s programming model, '}
 					<span class="hero-accent">compiled</span>
@@ -195,12 +197,12 @@ export function Hero() @{
 				</h1>
 				<p class="hero-sub">
 					{'The successor to '}
-					<a
-						href="https://github.com/infernojs/inferno"
-						target="_blank"
-						rel="noreferrer"
-					>{'Inferno'}</a>
-					{', built around the same focus on performance. It brings React’s hooks, Suspense, and actions to a compiler-first architecture. No virtual DOM, rules of hooks, or dependency arrays you have to maintain yourself. The compiler tracks what your code uses automatically.'}
+					<a href="https://github.com/infernojs/inferno" target="_blank" rel="noreferrer">
+						{'Inferno'}
+					</a>
+					{
+						', built around the same focus on performance. It brings React’s hooks, Suspense, and actions to a compiler-first architecture. No virtual DOM, rules of hooks, or dependency arrays you have to maintain yourself. The compiler tracks what your code uses automatically.'
+					}
 				</p>
 				<div class="hero-actions">
 					<Link to="/docs/$slug" params={{ slug: 'quick-start' }} class="btn-primary">
@@ -228,9 +230,7 @@ export function Hero() @{
 							style={'--icon:url("' + (copied ? checkUrl : copyUrl) + '")'}
 							aria-hidden="true"
 						></span>
-						<span>
-							{copied ? 'Copied' : 'Copy'}
-						</span>
+						<span>{copied ? 'Copied' : 'Copy'}</span>
 					</button>
 				</div>
 				<div class="hero-code-body" ref={sampleEl}>

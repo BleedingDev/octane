@@ -9,7 +9,9 @@ import {
 	TrailingPanel,
 	ChainTrio,
 	TransitiveTrio,
+	TransitiveTwin,
 	MultiHopTransitiveTrio,
+	FragmentChainTrio,
 	Pair,
 	Tree,
 	KeyedPair,
@@ -250,6 +252,23 @@ describe('all-component-children host sibling order', () => {
 		r.unmount();
 	});
 
+	it('a chain child that empties beside a swapping sibling reappears in source order', () => {
+		// A mounts with content, then empties in the same render that swaps B's
+		// arm. A's content must return ahead of B's, beside the same C.
+		const r = mount(TransitiveTwin, { aBig: true, bOff: false });
+		const c = r.find('.leaf');
+		expect(order(r)).toEqual(['big:A', 'leaf:C']);
+
+		r.update(TransitiveTwin, { aBig: false, bOff: true });
+		expect(order(r)).toEqual(['off:off', 'leaf:C']);
+		r.update(TransitiveTwin, { aBig: true, bOff: false });
+		expect(order(r)).toEqual(['big:A', 'leaf:C']);
+		r.update(TransitiveTwin, { aBig: true, bOff: true });
+		expect(order(r)).toEqual(['big:A', 'off:off', 'leaf:C']);
+		expect(r.find('.leaf')).toBe(c);
+		r.unmount();
+	});
+
 	it('a multi-hop empty leaf repeatedly reappears before its later sibling', () => {
 		const r = mount(MultiHopTransitiveTrio, { bBig: false });
 		expect(order(r)).toEqual(['leaf:C']);
@@ -260,6 +279,25 @@ describe('all-component-children host sibling order', () => {
 		expect(order(r)).toEqual(['leaf:C']);
 		r.update(MultiHopTransitiveTrio, { bBig: true });
 		expect(order(r)).toEqual(['big:B', 'leaf:C']);
+		r.unmount();
+	});
+
+	it('a chain child leading a fragment body reappears before its sibling root', () => {
+		// B empties in the same render that removes the sibling @if, then
+		// returns: it must land ahead of the @if's content, inside the fragment.
+		const r = mount(FragmentChainTrio, { big: true, on: true });
+		expect(order(r)).toEqual(['big:B', 'on:on', 'leaf:C']);
+
+		r.update(FragmentChainTrio, { big: false, on: false });
+		expect(order(r)).toEqual(['leaf:C']);
+		r.update(FragmentChainTrio, { big: true, on: false });
+		expect(order(r)).toEqual(['big:B', 'leaf:C']);
+		r.update(FragmentChainTrio, { big: true, on: true });
+		expect(order(r)).toEqual(['big:B', 'on:on', 'leaf:C']);
+		r.update(FragmentChainTrio, { big: false, on: true });
+		expect(order(r)).toEqual(['on:on', 'leaf:C']);
+		r.update(FragmentChainTrio, { big: true, on: true });
+		expect(order(r)).toEqual(['big:B', 'on:on', 'leaf:C']);
 		r.unmount();
 	});
 

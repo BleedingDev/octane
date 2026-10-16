@@ -31,9 +31,9 @@
       "node": ">=22",
       "platform": "any",
       "arch": "any",
-      "packageManager": "pnpm@11.15.1",
+      "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "91136aca7e454123147ee81e429398d60a872288b7ce288a72b4cfbf3c038dc2"
+      "lockfileSha256": "6df573d6aa854c122b0cea3e8c3be46fb67e3debe9ce0f329a773850bbd87706"
     }
   },
   "lanes": [
@@ -88,7 +88,7 @@
         {
           "path": "packages/dropzone/audit/transformation-ledger.json",
           "role": "support",
-          "sha256": "553d3ff351cc2bd5b9ab847c26452fd66bfbec4447a7db01c0d470c588cac903"
+          "sha256": "ce1c10e23887e42eb7ba828cdffdd1fd74d7e95f99ca768ee238db7715b2d80c"
         },
         {
           "path": "scripts/react-parity/react-dropzone-evidence.mjs",
@@ -204,7 +204,7 @@
         {
           "path": "packages/dropzone/typetests/tsconfig.json",
           "role": "support",
-          "sha256": "fb490e66885e61b1db63f58a53a209205d0f9b63df536ebaa2e68685e86369cc"
+          "sha256": "2fc377a85c46a03a6265e15c596fd0ba56847d000f068bb330716809f261a291"
         }
       ]
     },

@@ -35,9 +35,9 @@
       "node": ">=22",
       "platform": "any",
       "arch": "any",
-      "packageManager": "pnpm@11.15.1",
+      "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "91136aca7e454123147ee81e429398d60a872288b7ce288a72b4cfbf3c038dc2"
+      "lockfileSha256": "6df573d6aa854c122b0cea3e8c3be46fb67e3debe9ce0f329a773850bbd87706"
     }
   },
   "lanes": [
@@ -390,7 +390,7 @@
         {
           "path": "scripts/react-parity/hook-form-types-lib.mjs",
           "role": "support",
-          "sha256": "c5743bb6e14d2b8ea50ea66d4876c890ce52b83eded2ff2e1d8bf2ad861fb469"
+          "sha256": "c659c4589b45b86d4b980d47b413d1c9e81fe2b409c576c4d1683ca8f5a9a82f"
         }
       ]
     },
@@ -490,7 +490,7 @@
         {
           "path": "packages/hook-form/tests/_fixtures/forms.tsrx",
           "role": "support",
-          "sha256": "7ce8fcc9ff9cbd73b07a26a652cd149894781f67c25e5eccb0992115fab9bd03"
+          "sha256": "30fa8a645c974d45fb6ac23583633ee4e7fbc5f6ccc654e8efa6b0b104a9b145"
         },
         {
           "path": "packages/octane/tests/differential/_rig.ts",

@@ -5,7 +5,7 @@
 // without serializing that build and this test.
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, waitFor, within } from '@octanejs/testing-library';
-import { RouterProvider, createMemoryHistory } from '@octanejs/tanstack-router';
+import { RouterProvider, createMemoryHistory } from '@octanejs/tanstack-router/compiled';
 import { getRouter } from '../src/router.ts';
 import { expectRegisteredHeadings } from './support/doc-headings.ts';
 import { docs } from '../src/content/docs.ts';
@@ -81,7 +81,9 @@ describe('Core APIs documentation', () => {
 		for (const id of [
 			'use-linked-state',
 			'strong-mode',
+			'use-lazy-ref',
 			'use-sync-external-store',
+			'use-layout-snapshot',
 			'hydrate-when',
 			'hydrate-split',
 			'hydrate-prefetch',
@@ -155,9 +157,20 @@ describe('Core APIs documentation', () => {
 				(row) => row.querySelector(':scope > code')?.textContent === 'attachBehaviorRoot',
 			),
 		).toBe(true);
-		expect(
-			apiRows.some((row) => row.querySelector(':scope > code')?.textContent === 'useLinkedState'),
-		).toBe(true);
+		for (const api of ['useLinkedState', 'useLazyRef', 'useLayoutSnapshot']) {
+			expect(
+				apiRows.some((row) => row.querySelector(':scope > code')?.textContent === api),
+				api,
+			).toBe(true);
+		}
+		// The Strong summary and the replacement hooks link to the Strong guide.
+		for (const href of [
+			'/docs/strong-mode',
+			'/docs/strong-mode#recipe-lazy-ref',
+			'/docs/strong-mode#recipe-layout-measurement',
+		]) {
+			expect(container.querySelector(`.prose a[href="${href}"]`), href).toBeTruthy();
+		}
 
 		const active = container.querySelector(
 			'a.sidebar-link[href="/docs/core-apis"][data-status="active"]',

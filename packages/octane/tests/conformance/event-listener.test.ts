@@ -7,19 +7,19 @@
  * user-visible propagation of native non-bubbling events (toggle/cancel/close,
  * media, load/error) by capture-delegating them through the logical tree.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { compile } from 'octane/compiler';
 import { act, mount, createLog, type EffectLog } from '../_helpers';
-import { loadServerFixture } from '../_server-fixture';
-import * as ClientRT from '../../src/index.js';
+import { loadCompiledFixtureSource, loadServerFixture } from '../_server-fixture';
 import { createRoot, flushSync, hydrateRoot } from '../../src/index.js';
 import * as ServerRT from 'octane/server';
 import {
 	RootDiv,
 	PropagationTree,
 	DeferredPortalEvents,
+	ToggledChildPortal,
+	ToggledValuePortal,
 	DisappearingButton,
 	BatchChild,
 	BatchParent,
@@ -39,6 +39,62 @@ const outLogger = (log: EffectLog) => (e: Event) =>
 	log.push('out:' + (e.currentTarget as Element).className);
 
 describe('portal events after descendant updates', () => {
+	it('routes late children when another root first opens a portal from a ref', async () => {
+		vi.resetModules();
+		const runtime = await import('../../src/index.js');
+		const { DeferredPortalEvents } = await import('./_fixtures/event-listener.tsrx');
+		const host = document.createElement('div');
+		const source = document.createElement('div');
+		const portalTarget = document.createElement('section');
+		const moved = document.createElement('div');
+		document.body.append(host, source, portalTarget, moved);
+		const launcher = runtime.createRoot(host);
+		const owner = runtime.createRoot(source);
+		const log: string[] = [];
+		let reveal: (value: boolean) => void = () => {};
+		try {
+			runtime.flushSync(() =>
+				launcher.render(
+					runtime.createElement('div', {
+						ref(node: Element | null) {
+							if (node !== null) {
+								owner.render(DeferredPortalEvents, {
+									target: portalTarget,
+									register: (setter: (value: boolean) => void) => (reveal = setter),
+									log: (label: string) => log.push(label),
+								});
+							}
+						},
+					}),
+				),
+			);
+			expect(portalTarget.querySelector('button')).toBeNull();
+			runtime.flushSync(() => reveal(true));
+			const button = portalTarget.querySelector('button');
+			expect(button).not.toBeNull();
+			button!.click();
+			expect(log).toEqual(['logical capture', 'target capture', 'target bubble', 'logical bubble']);
+			log.length = 0;
+			portalTarget.addEventListener('auxclick', () => log.push('native capture'), true);
+			button!.addEventListener('auxclick', () => {
+				log.push('native move');
+				moved.appendChild(button!);
+			});
+			// No auxclick capture handler is authored. Native capture must still
+			// retain the logical route before the target listener moves this host.
+			button!.dispatchEvent(new MouseEvent('auxclick', { bubbles: true }));
+			expect(moved.firstElementChild).toBe(button);
+			expect(log).toEqual(['native capture', 'native move', 'target bubble', 'logical bubble']);
+		} finally {
+			owner.unmount();
+			launcher.unmount();
+			host.remove();
+			source.remove();
+			portalTarget.remove();
+			moved.remove();
+		}
+	});
+
 	// Lifecycle extension of React's logical portal propagation, not an exact
 	// upstream test port: a child can reveal its first host without rerendering
 	// the component that created the portal. Its events still belong to that tree.
@@ -123,6 +179,84 @@ describe('portal events after descendant updates', () => {
 			target.remove();
 		}
 	});
+
+	// A shared target accumulates and releases portal ranges as owners open and
+	// close portals. Late content in every live range must keep routing to its own
+	// owner, and a closed range must stop claiming anything.
+	it.each([
+		['child position', ToggledChildPortal],
+		['value position', ToggledValuePortal],
+	] as const)(
+		'routes late portal content to its own owner while shared-target portals open and close (%s)',
+		(_placement, Owner) => {
+			const log: string[] = [];
+			const target = document.createElement('div');
+			document.body.appendChild(target);
+			const reveal = new Map<string, (visible: boolean) => void>();
+			const owners = ['a', 'b', 'c'].map((name) => {
+				const props = {
+					target,
+					open: true,
+					register: (setVisible: (visible: boolean) => void) => {
+						reveal.set(name, setVisible);
+					},
+					log: (label: string) => log.push(`${name}: ${label}`),
+				};
+				return { name, props, root: mount(Owner, props) };
+			});
+			const setOpen = (name: string, open: boolean) => {
+				const owner = owners.find((candidate) => candidate.name === name)!;
+				owner.props = { ...owner.props, open };
+				owner.root.update(Owner, owner.props);
+				if (open) flushSync(() => reveal.get(name)!(true));
+			};
+			// Click every portal button in target order; one routed owner per click.
+			const route = () =>
+				Array.from(
+					target.querySelectorAll<HTMLButtonElement>('.deferred-portal-target'),
+					(button) => {
+						log.length = 0;
+						button.click();
+						return log.join(', ');
+					},
+				);
+			const routed = (name: string) =>
+				`${name}: target capture, ${name}: target bubble, ${name}: logical bubble`;
+			try {
+				for (const name of ['a', 'b', 'c']) flushSync(() => reveal.get(name)!(true));
+				expect(route()).toEqual([routed('a'), routed('b'), routed('c')]);
+
+				setOpen('b', false);
+				expect(route()).toEqual([routed('a'), routed('c')]);
+				setOpen('b', true);
+				expect(route()).toEqual([routed('a'), routed('c'), routed('b')]);
+
+				setOpen('a', false);
+				expect(route()).toEqual([routed('c'), routed('b')]);
+				setOpen('a', true);
+				setOpen('c', false);
+				expect(route()).toEqual([routed('b'), routed('a')]);
+
+				setOpen('b', false);
+				expect(route()).toEqual([routed('a')]);
+				setOpen('a', false);
+				expect(target.childNodes).toHaveLength(0);
+
+				// No range is left to claim foreign content in the target.
+				const stray = document.createElement('button');
+				target.appendChild(stray);
+				log.length = 0;
+				stray.click();
+				expect(log).toEqual([]);
+
+				setOpen('c', true);
+				expect(route()).toEqual([routed('c')]);
+			} finally {
+				for (const owner of owners) owner.root.unmount();
+				target.remove();
+			}
+		},
+	);
 
 	it('preserves late portal ownership when a native target listener moves the host before bubbling', () => {
 		const log: string[] = [];
@@ -1057,28 +1191,11 @@ describe('ReactDOMEventListener — scroll (not emulated upward)', () => {
 			'packages/octane/tests/conformance/_fixtures/event-listener-hydrate.tsrx',
 		);
 		const FILE = 'event-listener-hydrate.tsrx';
-		const serverModule = (): Record<string, any> => {
-			let { code } = compile(readFileSync(FIX, 'utf8'), FILE, { mode: 'server' });
-			code = code.replace(
-				/import\s*\{([^}]*)\}\s*from\s*['"]octane\/server['"];?/g,
-				(_m: string, names: string) => `const {${names.replace(/ as /g, ': ')}} = __rt;`,
-			);
-			code = code.replace(/export const (\w+) =/g, 'const $1 = __exports.$1 =');
-			code = code.replace(/export function (\w+)/g, '__exports.$1 = function $1');
-			return new Function('__rt', '__exports', code + '\nreturn __exports;')(ServerRT, {});
-		};
-		const clientModule = (): Record<string, any> => {
-			let { code } = compile(readFileSync(FIX, 'utf8'), FILE, { mode: 'client' });
-			code = code.replace(
-				/import\s*\{([^}]*)\}\s*from\s*['"]octane['"];?/g,
-				(_m: string, names: string) => `const {${names.replace(/ as /g, ': ')}} = __rt;`,
-			);
-			code = code.replace(/export const (\w+) =/g, 'const $1 = __exports.$1 =');
-			code = code.replace(/export function (\w+)/g, '__exports.$1 = function $1');
-			return new Function('__rt', '__exports', code + '\nreturn __exports;')(ClientRT, {});
-		};
-		const server = serverModule();
-		const client = clientModule();
+		const server = loadServerFixture(FIX, { id: FILE });
+		const client = loadCompiledFixtureSource(readFileSync(FIX, 'utf8'), {
+			id: FILE,
+			mode: 'client',
+		});
 
 		const log = createLog();
 		const handlers = {

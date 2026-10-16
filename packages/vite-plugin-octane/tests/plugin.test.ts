@@ -230,6 +230,21 @@ export function Pair(props) @{ 'use dom bindings'; <section>
 		}
 	});
 
+	it('forwards TypeScript output and its native-transform requirement to the compiler', async () => {
+		await expect(
+			resolveConfig(
+				{
+					root: '/repo',
+					configFile: false,
+					logLevel: 'silent',
+					plugins: octane({ output: 'ts', hmr: false }),
+					oxc: false,
+				},
+				'build',
+			),
+		).rejects.toThrow("output: 'ts' requires Vite's OXC transform to be enabled");
+	});
+
 	it('forwards typed-text and native attribute provider options to the compiler', async () => {
 		expect(() => octane({ textTypes: { tsconfig: ' tsconfig.json ' } })).toThrow(
 			'`textTypes` requires { tsconfig: string }.',
@@ -934,6 +949,100 @@ export default {
 		} finally {
 			logged.mockRestore();
 			delete (globalThis as any).__octaneStreamCompletion;
+			await server.close();
+			await rm(root, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it('takes the dev request origin from a trusted proxy when server.trustProxy is enabled', async () => {
+		const root = await mkdtemp(join(tmpdir(), 'octane-vite-trust-proxy-'));
+		await mkdir(join(root, 'node_modules'));
+		await symlink(join(REPO_ROOT, 'packages/octane'), join(root, 'node_modules/octane'), 'dir');
+		await writeFile(join(root, 'index.html'), '<main>shell</main>');
+		await writeFile(
+			join(root, 'octane.config.ts'),
+			`export default {
+	server: { trustProxy: true },
+	router: {
+		routes: [
+			{
+				type: 'server',
+				path: '/origin',
+				methods: ['GET'],
+				before: [],
+				after: [],
+				handler: (context) => new Response(context.url.href),
+			},
+		],
+	},
+};
+`,
+		);
+		const server = await createServer({
+			root,
+			configFile: false,
+			logLevel: 'silent',
+			plugins: [octane({ hmr: false })],
+			server: { host: '127.0.0.1', port: 0, hmr: false, ws: false },
+		});
+		try {
+			await server.listen();
+			const address = server.httpServer?.address();
+			if (!address || typeof address !== 'object') throw new Error('no dev server address');
+			const response = await fetch(`http://127.0.0.1:${address.port}/origin?next=%2F`, {
+				headers: { 'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'app.example.com' },
+			});
+			expect(response.status).toBe(200);
+			expect(await response.text()).toBe('https://app.example.com/origin?next=%2F');
+		} finally {
+			await server.close();
+			await rm(root, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it('routes a dev request by its whole path when it starts with //', async () => {
+		const root = await mkdtemp(join(tmpdir(), 'octane-vite-request-target-'));
+		await mkdir(join(root, 'node_modules'));
+		await symlink(join(REPO_ROOT, 'packages/octane'), join(root, 'node_modules/octane'), 'dir');
+		await writeFile(join(root, 'index.html'), '<main>shell</main>');
+		await writeFile(
+			join(root, 'octane.config.ts'),
+			`export default {
+	router: {
+		routes: [
+			{
+				type: 'server',
+				path: '/*rest',
+				methods: ['GET'],
+				before: [],
+				after: [],
+				handler: (context) =>
+					Response.json({ url: context.url.href, rest: context.params.rest }),
+			},
+		],
+	},
+};
+`,
+		);
+		const server = await createServer({
+			root,
+			configFile: false,
+			logLevel: 'silent',
+			plugins: [octane({ hmr: false })],
+			server: { host: '127.0.0.1', port: 0, hmr: false, ws: false },
+		});
+		try {
+			await server.listen();
+			const address = server.httpServer?.address();
+			if (!address || typeof address !== 'object') throw new Error('no dev server address');
+			const origin = `http://127.0.0.1:${address.port}`;
+			const response = await fetch(`${origin}//evil.example/x?next=%2F`);
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({
+				url: `${origin}//evil.example/x?next=%2F`,
+				rest: '/evil.example/x',
+			});
+		} finally {
 			await server.close();
 			await rm(root, { recursive: true, force: true });
 		}

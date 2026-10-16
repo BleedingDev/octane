@@ -268,7 +268,15 @@ optional `head` and `signals` fields:
 
 A single **synchronous** pass, no awaiting. A Suspense boundary that suspends
 renders its `@pending` fallback; synchronously-resolved `use()` still seeds. Use
-`prerender` when you need the data awaited.
+`prerender` when you need the data awaited. As with React's `renderToString`,
+`hydrateRoot` renders a boundary the server left pending on the client, keeping
+the server DOM around it, and reports it once through `onRecoverableError`.
+
+As in React, every server renderer also takes an element in place of the
+component and its props: `renderToString(<App {...props} />)` renders exactly as
+`renderToString(App, props)`, so the HTML of either form hydrates through
+`hydrateRoot(container, App, props)` and `hydrateRoot(container, <App {...props} />)`
+alike.
 
 ### `renderToStaticMarkup(component, props?, options?) => RenderResult` — `octane/server`
 
@@ -428,6 +436,17 @@ concurrently rather than awaiting `allReady` before reading. Same
   before it propagates.
 - `identifierPrefix?: string` — namespaces root-local `useId` values. Pass the
   same value to `hydrateRoot` and use distinct prefixes for sibling roots.
+- `shellWitness?: (witness: ShellWitness) => void` — development only. Called
+  once per construct and site that needs client code but renders outside every
+  independent `<Hydrate>` island: an event handler or function form action, a
+  ref, an effect or store-subscription hook, a controlled `value`/`checked` the
+  user can edit, or a live signal-handle binding. Each witness names its `kind`,
+  the prop, hook, or signal kind, and where known the host `tag`, the element's
+  source `location`, and the rendering `component`. It reports what the render
+  reaches, including a suspended `@try` arm it attempts, and never changes the
+  output. The Vite dev server uses it to check
+  [islands-only routes](#islands-only-routes). Production renders ignore it,
+  because production compiler output erases static handler and ref props.
 - `signal?: AbortSignal` — abort a suspended async/streaming render when the
   request dies; pending promises reject with `signal.reason` and streams cancel.
 - `timeoutMs?: number` — per-render override of the suspense settle deadline;
@@ -503,6 +522,12 @@ policy applies to Vite, Rsbuild, and generated Node or Web Worker servers.
 - Server-compiled components are string emitters: static HTML interleaved with
   helper calls for dynamic holes, wrapped in `<!--[-->`/`<!--]-->` hydration
   markers that the client cursor walks during `hydrateRoot`.
+- The server closes every range it opens. When something removes a closing
+  marker before the page hydrates, such as an HTML minifier or proxy that
+  strips comments, the client cannot tell where that range ends. The nearest
+  Suspense or `<Hydrate>` boundary around it, or else the root, renders on the
+  client instead of adopting the server HTML, and `onRecoverableError` reports
+  it once (error #338). Keep comments when minifying server-rendered HTML.
 - `<Activity mode="visible">` renders its children normally. A hidden Activity
   does not evaluate or serialize its children on the server; hydratable output
   retains only an empty internal range so `hydrateRoot` can build the preserved
@@ -569,9 +594,10 @@ would repair a placement before hydration (for example, a `<div>` inside a
 `<p>`), Octane reports both authored locations in the server console. The check
 targets parser repairs rather than the complete HTML content model, never adds
 diagnostics to returned markup, and is removed from production compilation.
-Hydration recovers from such a repair in development and production: the
-client rebuilds the element in place of the nodes the parser split out and
-reports the recovery through `onRecoverableError`.
+Hydration treats such a repair as a mismatch in development and production:
+the nearest Suspense or `<Hydrate>` boundary around it, or else the root,
+renders on the client instead of adopting the server HTML, and
+`onRecoverableError` reports it once.
 
 On the server, page and layout props also receive `state`, the same
 request-scoped `Context.state` Map middleware populated. It is deliberately not
@@ -597,6 +623,29 @@ response socket closes. Its HTTP transport negotiates streaming gzip for
 eligible SSR and static text responses while preserving HEAD, partial,
 pre-encoded, `no-transform`, and non-compressible responses.
 
+The Node bridge builds each request URL from `http://` and the `Host` header,
+which describe the hop it received. Behind a proxy that terminates TLS or
+rewrites `Host` (Vercel Functions, nginx, a Kubernetes ingress), `Context.url`
+then names a different origin than the browser's, and same-origin checks reject
+legitimate requests. Set `server.trustProxy: true` when that proxy overwrites
+`X-Forwarded-Proto` and `X-Forwarded-Host`: `nodeHandler`, the built-in server,
+`octane-preview`, and the Vite and Rsbuild dev servers then take the URL's
+scheme and host from those headers. Only the first entry of each is read. A
+scheme other than `http` or `https`, or a host that is not a plain
+`host[:port]`, is ignored, and the path and query always come from the request.
+Leave it off when clients can reach the server directly, because they can set
+these headers themselves. On Worker and other Web-standard hosts the platform
+builds the URL, so there the option only affects the server-function origin
+check.
+
+The Node bridge, its static file layer, and the Vite and Rsbuild dev servers
+read the request target the same way (`nodeRequestUrl` from
+`@octanejs/app-core/node`). A target that starts with `/` is the whole path and
+query on that origin, so `//evil.example/x` stays a path and never names
+another host. An `http://` or `https://` absolute-form target
+keeps its own scheme and host, as RFC 9112 requires. Any other target, such as
+`*`, becomes a path under the root.
+
 ### Islands-only routes
 
 A route whose interactive parts are all independent
@@ -618,7 +667,20 @@ lifecycle, registers the page's independent islands, and then runs
 `router.preHydrate`. The shell's CSS still ships with the route; its page chunk is
 not preloaded. An island whose only child is a zero-argument
 `'use dom bindings'` view activates without the renderer; any other island loads
-the renderer through its own chunk, as before.
+the renderer through its own chunk, as before. Islands that become ready together
+activate one per task, so input and paint are not held up behind all of them; see
+[activation pacing](./deferred-hydration.md#activation-pacing).
+
+When every `RenderRoute` uses `hydrate: 'islands'`, the production client build
+also resolves Octane with the `octane-islands` package condition. The signal
+Action frame, its transition coordinator, and the code that stages resources and
+derived values inside an Action then ship with the renderer, not the signal graph.
+Only renderer Actions use them, so islands pages that load signals without the
+renderer stop downloading about 5 KB gzip. Renderer pages and renderer islands
+load them alongside the renderer and keep staging Action writes. An app that also
+has fully hydrated routes keeps the default placement, so its renderer pages pay
+nothing when they don't use signals. Another bundler can opt in by adding
+`octane-islands` to its resolve conditions.
 
 The shell is never hydrated, so the build rejects one that needs client work.
 Outside its independent islands, the route's components may not use hooks,
@@ -629,6 +691,17 @@ islands entry or the `preHydrate` hook reaches the renderer. This is a
 conservative source check of the shell, not a semantic proof; anything it cannot
 check is rejected. Client navigation into an islands-only route is not
 supported, and the Rsbuild integration refuses the option for now.
+
+The dev server also checks what each request's render reaches. When an
+islands-only shell renders an event handler, ref, effect or store subscription,
+editable controlled value, or live signal binding outside its independent
+islands, the server warns once with the element's source location or the
+component's name, and keeps serving the route. This follows components passed
+by reference, aliases, spreads, and elements that helpers create, which a source
+check cannot follow, but it sees only the branches a request renders.
+Production servers do not run it: production compiler output drops static
+handler and ref props before rendering, and the routes stream per request, so
+there is no build-time render to check.
 
 ### Root boundaries, server functions, and CSP
 

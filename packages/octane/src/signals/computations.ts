@@ -1,10 +1,9 @@
+import { yieldForHostBudget } from '../host-budget.js';
 import { formatClientError } from '../error-codes.client.generated.js';
 import { createDerivedCellWith } from './engine.js';
 import {
 	ScopedNode,
-	CandidateUnsupportedError,
 	assertAlive,
-	attachObserver,
 	createDeclarationView,
 	derivedValueState,
 	errorState,
@@ -27,11 +26,16 @@ import {
 	untrackCommitted,
 	type NodeState,
 	type GraphOwner,
-	type CandidateProducer,
 	type SignalCandidateFrame,
 } from './graph.js';
-import { SIGNAL_DEPENDENT_NODE, type SignalDependencyNotify } from './read-protocol.js';
+import {
+	SIGNAL_DEPENDENT_NODE,
+	publishNativeProducer,
+	type SignalDependencyNotify,
+} from './read-protocol.js';
 import { RedeclarableBinding } from './redeclaration.js';
+import { candidateHooks } from './transition-state.js';
+import { installDerivedCandidates } from '#octane/signal-actions/bindings';
 import {
 	SIGNAL_OWNER_RESOLVE,
 	type DerivedCompute,
@@ -39,18 +43,32 @@ import {
 	type DerivedOptions,
 	type DerivedSignal,
 	type OwnerBoundSignal,
+	type OwnerScope,
 	type Scope,
 	type SignalHandle,
 } from './types.js';
 
 export function createDeclaredDerivedCell<T>(
-	owner: Scope,
+	owner: OwnerScope,
 	key: string,
 	compute: DerivedCompute<T>,
 	options?: DerivedOptions,
 	sequence?: number,
+	captures?: readonly unknown[],
+	declaring?: number,
 ): DerivedSignal<T> {
-	return createDerivedCellWith(owner, key, compute, options, DerivedBinding, sequence);
+	// Only a bundle that creates these cells carries their candidate producer.
+	installDerivedCandidates();
+	return createDerivedCellWith(
+		owner,
+		key,
+		compute,
+		options,
+		DerivedBinding,
+		sequence,
+		captures,
+		declaring,
+	);
 }
 
 interface AttemptDependency {
@@ -121,24 +139,28 @@ function resolveHandle<T>(handle$: SignalHandle<T>, owner: Scope): ScopedNode<T>
 }
 
 export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
-	private current: DerivedAttempt<T> | undefined;
-	private compute: DerivedCompute<T> | undefined;
-	private frozen = false;
-	private candidate: SignalCandidateFrame | undefined;
+	// Members that are not private are also used by an Action frame's producer
+	// (candidate-producers.ts), which forks and publishes this binding.
+	current: DerivedAttempt<T> | undefined;
+	compute: DerivedCompute<T> | undefined;
+	frozen = false;
+	candidate: SignalCandidateFrame | undefined;
 	/** The latest evaluation produced asynchronous work rather than a value. */
 	private asynchronous = false;
 	/** A later render's computation, evaluated privately until that render is accepted. */
-	declare private view?: { readonly node: ScopedNode<T>; readonly binding: DerivedBinding<T> };
+	declare private view?:
+		{ readonly node: ScopedNode<T>; readonly binding: DerivedBinding<T> } | undefined;
 	/** A render's computation that produced the committed value, and what it read. */
-	declare private probed?: { readonly compute: DerivedCompute<T>; readonly reads: ScopedNode[] };
+	declare private probed?:
+		{ readonly compute: DerivedCompute<T>; readonly reads: ScopedNode[] } | undefined;
 	/** A view's first result, already produced by the render's probe. */
-	declare private seeded?: { readonly result: unknown };
+	declare private seeded?: { readonly result: unknown } | undefined;
 
 	constructor(
 		readonly owner: Scope & GraphOwner,
 		readonly node: ScopedNode<T>,
 		compute: DerivedCompute<T>,
-		private readonly options?: DerivedOptions,
+		readonly options?: DerivedOptions,
 	) {
 		super();
 		this.compute = compute;
@@ -197,7 +219,7 @@ export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
 		}
 		this.releaseView();
 		const node: ScopedNode<T> = createDeclarationView(this.node, (target, frame) =>
-			binding.forkCandidate(target, frame),
+			candidateHooks.derived!.call(binding, target, frame),
 		);
 		const binding: DerivedBinding<T> = new DerivedBinding(this.owner, node, compute, this.options);
 		this.view = { node, binding };
@@ -241,7 +263,7 @@ export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
 		});
 	}
 
-	protected discardDefinition(): void {
+	protected override discardDefinition(): void {
 		if (this.view?.binding.asynchronous) this.releaseView();
 	}
 
@@ -253,75 +275,6 @@ export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
 			releaseDeclarationView(view.node);
 			view.binding.dispose();
 		});
-	}
-
-	forkCandidate(target: ScopedNode<T>, frame: SignalCandidateFrame): CandidateProducer {
-		if (this.frozen || this.owner.readBarrier || !this.compute) {
-			throw new CandidateUnsupportedError(formatClientError(110));
-		}
-		const fork = new DerivedBinding(this.owner, target, this.compute, this.options);
-		fork.candidate = frame;
-		return {
-			dispose: () => fork.dispose(),
-			dependencies: () => fork.current?.dependencies.keys() ?? [],
-			prepare: () => {
-				const state = target.state;
-				// A caught error is an authoritative presentation, just like a ready
-				// value. Unhandled reads still report the authored error to the frame.
-				if (state?.snapshot.status !== 'ready' && state?.snapshot.status !== 'error')
-					return state?.waiting
-						? { status: 'pending', waiting: state.waiting }
-						: { status: 'invalid' };
-				const current = fork.current;
-				const previous = this.current;
-				return {
-					status: 'ready',
-					receipt: {
-						validate: () =>
-							!this.owner.retired &&
-							this.owner.readBarrier === undefined &&
-							this.compute !== undefined &&
-							this.current === previous &&
-							fork.current === current &&
-							target.state === state &&
-							(!current || (current.binding === fork && fork.validDependencies(current))),
-						publish: () => {
-							// Transfer producer authority without aborting the old attempt or
-							// invoking authored code while canonical graph state is installing.
-							this.current = current;
-							if (current) current.binding = this;
-							this.node.invalidateAttempt = current ? () => this.invalidateGraph() : undefined;
-							fork.current = undefined;
-							fork.candidate = undefined;
-							target.invalidateAttempt = undefined;
-							return () => {
-								if (previous !== this.current) this.stop(previous);
-							};
-						},
-						accept: () => {
-							if (!current) return;
-							const dependencies = [...current.dependencies.values()];
-							const releases: (() => void)[] = [];
-							current.dependencies.clear();
-							for (const dependency of dependencies) {
-								releases.push(dependency.unsubscribe);
-								dependency.node = frame.canonical(dependency.node);
-								dependency.revision = dependency.node.revision;
-								// Canonical states and revisions are installed. Subscribe without
-								// refresh/evaluation, and acquire every lease before releasing any.
-								dependency.unsubscribe = attachObserver(
-									dependency.node,
-									DerivedBinding.notify(current),
-									true,
-								);
-								current.dependencies.set(dependency.node, dependency);
-							}
-							for (const release of releases) release();
-						},
-					},
-				};
-			},
-		};
 	}
 
 	private static context<T>(current: DerivedAttempt<T>): DerivedContext {
@@ -338,7 +291,7 @@ export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
 		};
 	}
 
-	private static notify<T>(current: DerivedAttempt<T>): SignalDependencyNotify {
+	static notify<T>(current: DerivedAttempt<T>): SignalDependencyNotify {
 		const notify: SignalDependencyNotify = () => current.binding?.invalidate(current);
 		// Explicit reads are graph leases too. Discovery follows their dependent
 		// identity without evaluating the computation or replaying this callback.
@@ -423,7 +376,7 @@ export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
 		return this.validDependencies(current);
 	}
 
-	private validDependencies(current: DerivedAttempt<T>): boolean {
+	validDependencies(current: DerivedAttempt<T>): boolean {
 		for (const dependency of current.dependencies.values()) {
 			if (dependency.node.owner.retired || dependency.node.revision !== dependency.revision) {
 				return false;
@@ -482,6 +435,8 @@ export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
 			return derivedValueState(this.node, result as T);
 		}
 		this.asynchronous = true;
+		// Captured render values alone never restart this work.
+		this.owner.unkeyedState = true;
 		current ??= attempt(this);
 		this.current = current;
 		this.node.invalidateAttempt = () => this.invalidateGraph();
@@ -511,7 +466,7 @@ export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
 					return;
 				}
 				if (iteratorFactory) {
-					signalBatch(() =>
+					publishNativeProducer(() =>
 						publishNode(
 							binding.node,
 							pendingState(current.waiting, 'connecting', undefined, current.resolve),
@@ -546,6 +501,11 @@ export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
 
 	private next(current: DerivedAttempt<T>): void {
 		if (!this.valid(current) || !current.iterator) return;
+		const wait = yieldForHostBudget();
+		if (wait !== undefined) {
+			wait.then(() => current.binding?.next(current));
+			return;
+		}
 		let step: PromiseLike<IteratorResult<T>> | IteratorResult<T>;
 		try {
 			step = untrack(() => current.iterator!.next());
@@ -565,41 +525,48 @@ export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
 		step: PromiseLike<IteratorResult<T>> | IteratorResult<T>,
 	): void {
 		Promise.resolve(step).then(
-			(result) => {
-				const binding = current.binding;
-				if (!binding?.valid(current)) return;
-				if (!result || (typeof result !== 'object' && typeof result !== 'function')) {
-					binding.fail(current, new TypeError(formatClientError(114)));
-					return;
-				}
-				if (result.done) {
-					if (!current.hasYielded) {
-						binding.fail(current, new Error(formatClientError(115)));
-						return;
-					}
-					const snapshot = binding.node.state?.snapshot;
-					if (snapshot?.status === 'ready') {
-						binding.accept(
-							current,
-							readyState(snapshot.value, { connection: 'closed', complete: true }),
-						);
-					}
-					return;
-				}
-				current.hasYielded = true;
-				binding.accept(
-					current,
-					readyState(result.value, { connection: 'open', complete: false }),
-					false,
-				);
-				// Publish the yield before asking the producer for another one. Besides
-				// providing a bounded cancellation point, this lets dependency writes
-				// triggered by a subscriber close an async generator before it becomes
-				// suspended inside its next nested `for await` pull.
-				DerivedBinding.queueNext(current);
-			},
+			(result) => DerivedBinding.receiveStep(current, result),
 			(error) => current.binding?.fail(current, error),
 		);
+	}
+
+	private static receiveStep<T>(current: DerivedAttempt<T>, result: IteratorResult<T>): void {
+		const binding = current.binding;
+		if (!binding?.valid(current)) return;
+		const wait = yieldForHostBudget();
+		if (wait !== undefined) {
+			wait.then(() => DerivedBinding.receiveStep(current, result));
+			return;
+		}
+		if (!result || (typeof result !== 'object' && typeof result !== 'function')) {
+			binding.fail(current, new TypeError(formatClientError(114)));
+			return;
+		}
+		if (result.done) {
+			if (!current.hasYielded) {
+				binding.fail(current, new Error(formatClientError(115)));
+				return;
+			}
+			const snapshot = binding.node.state?.snapshot;
+			if (snapshot?.status === 'ready') {
+				binding.accept(
+					current,
+					readyState(snapshot.value, { connection: 'closed', complete: true }),
+				);
+			}
+			return;
+		}
+		current.hasYielded = true;
+		binding.accept(
+			current,
+			readyState(result.value, { connection: 'open', complete: false }),
+			false,
+		);
+		// Publish the yield before asking the producer for another one. Besides
+		// providing a bounded cancellation point, this lets dependency writes
+		// triggered by a subscriber close an async generator before it becomes
+		// suspended inside its next nested `for await` pull.
+		DerivedBinding.queueNext(current);
 	}
 
 	private accept(current: DerivedAttempt<T>, state: NodeState<T>, complete = true): void {
@@ -620,13 +587,13 @@ export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
 		const previousOwners = this.node.state?.owners;
 		if (previousOwners) for (const owner of previousOwners) current.owners!.add(owner);
 		const published = current.owners!.size ? { ...state, owners: current.owners! } : state;
-		signalBatch(() => publishNode(this.node, published));
+		publishNativeProducer(() => publishNode(this.node, published));
 		if (complete) this.finish(current);
 	}
 
 	private fail(current: DerivedAttempt<T>, error: unknown): void {
 		if (!this.valid(current)) return;
-		signalBatch(() =>
+		publishNativeProducer(() =>
 			publishNode(this.node, errorState(error, current.iterator ? 'closed' : 'none')),
 		);
 		this.finish(current);
@@ -656,14 +623,14 @@ export class DerivedBinding<T> extends RedeclarableBinding<DerivedCompute<T>> {
 		});
 	}
 
-	private invalidateGraph(): void {
+	invalidateGraph(): void {
 		const current = this.current;
 		if (!current) return;
 		this.stop(current);
 		if (this.current === current) this.current = undefined;
 	}
 
-	private stop(current: DerivedAttempt<T> | undefined, cancel = true): void {
+	stop(current: DerivedAttempt<T> | undefined, cancel = true): void {
 		if (!current) return;
 		const active = current.active;
 		const controller = current.controller;

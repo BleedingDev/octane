@@ -31,9 +31,9 @@
       "node": ">=22",
       "platform": "any",
       "arch": "any",
-      "packageManager": "pnpm@11.15.1",
+      "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "91136aca7e454123147ee81e429398d60a872288b7ce288a72b4cfbf3c038dc2"
+      "lockfileSha256": "6df573d6aa854c122b0cea3e8c3be46fb67e3debe9ce0f329a773850bbd87706"
     }
   },
   "lanes": [
@@ -61,7 +61,7 @@
         {
           "path": "packages/react-error-boundary/tests/_fixtures/app.tsrx",
           "role": "support",
-          "sha256": "cffc63070ed41b3a2bc30288001572caba72591826827521a62abd82bfce5bfa"
+          "sha256": "65d01a5e9ec72b11f9a0123d2ac2310170c9287e6a4d7837091344c5119ef505"
         },
         {
           "path": "packages/react-error-boundary/tests/differential/_setup.ts",

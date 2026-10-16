@@ -109,6 +109,7 @@ for (const name of ['base-ui', 'base-ui-utils']) {
 								`${prefix}/tests/${pristine ? 'vitest.pristine.browser.config.ts' : 'vitest.browser.config.ts'}`,
 							),
 							evidence('patches/@vitest__browser@4.1.10.patch'),
+							evidence('patches/@vitest__browser-playwright@4.1.10.patch'),
 							evidence('patches/@vitest__mocker@4.1.10.patch'),
 							...(!pristine ? [evidence(`${prefix}/tests/support/browser-renderer.ts`)] : []),
 						]
@@ -142,9 +143,7 @@ for (const name of ['base-ui', 'base-ui-utils']) {
 				kind: 'typescript',
 				compiler: pristine ? 'tsc' : 'tsrx-tsc',
 				project,
-				...(pristine
-					? { compilerBins: [`${prefix}/node_modules/typescript-pristine-native/bin/tsc`] }
-					: {}),
+				...(pristine ? { compilerBins: [`${prefix}/node_modules/typescript-native/bin/tsc`] } : {}),
 			},
 			files: [
 				evidence(project, 'test', [{ id: `types:${id}`, testName, fullName: testName }]),
@@ -188,7 +187,7 @@ for (const name of ['base-ui', 'base-ui-utils']) {
 				node: '>=22',
 				platform: 'any',
 				arch: 'any',
-				packageManager: 'pnpm@11.15.1',
+				packageManager: 'pnpm@12.9.1',
 				lockfile: 'pnpm-lock.yaml',
 				lockfileSha256: digest('pnpm-lock.yaml'),
 			},

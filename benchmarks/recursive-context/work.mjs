@@ -127,7 +127,10 @@ function measurePlainHook(source, environment) {
 		throw new Error(`Plain ${environment} hook output contains invalid TypeScript`);
 	}
 	return {
-		bytes: Buffer.byteLength(code),
+		// Pure-call annotations let bundlers drop an unused module-level
+		// createContext, and they vanish under minification with the printer's
+		// trailing newlines, so neither is output growth.
+		bytes: Buffer.byteLength(code.replaceAll('/* @__PURE__ */ ', '').trimEnd()),
 		batch: countImportedCalls(ast, environment === 'server' ? 'puBatch' : 'useBatch'),
 		use: countImportedCalls(ast, 'use'),
 	};
@@ -227,7 +230,7 @@ const GATES = {
 				reconcileKeyed: 0,
 				updateSurvivor: 0,
 			},
-			exact: { useBatch: 0, registerWarmPlan: 2048 },
+			exact: { useBatch: 0, registerWarmPlan: 0 },
 		},
 		update_root: {
 			maxFullSlotCalls: 1027,
@@ -242,7 +245,7 @@ const GATES = {
 				reconcileKeyed: 0,
 				updateSurvivor: 0,
 			},
-			exact: { setText: 1024, useBatch: 0, registerWarmPlan: 2048 },
+			exact: { setText: 1024, useBatch: 0, registerWarmPlan: 0 },
 		},
 		update_partial: {
 			maxFullSlotCalls: 33,
@@ -257,7 +260,7 @@ const GATES = {
 				reconcileKeyed: 0,
 				updateSurvivor: 0,
 			},
-			exact: { setText: 32, useBatch: 0, registerWarmPlan: 62 },
+			exact: { setText: 32, useBatch: 0, registerWarmPlan: 0 },
 		},
 		partial_unmount: {
 			maxFullSlotCalls: 0,
@@ -289,7 +292,7 @@ const GATES = {
 				reconcileKeyed: 0,
 				updateSurvivor: 0,
 			},
-			exact: { useBatch: 0, registerWarmPlan: 62 },
+			exact: { useBatch: 0, registerWarmPlan: 0 },
 		},
 		unmount: {
 			maxFullSlotCalls: 0,

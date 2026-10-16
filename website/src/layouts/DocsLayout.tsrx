@@ -1,6 +1,6 @@
 // Docs section shell: sidebar of documents (from the registry) + the routed
 // document via <Outlet/>.
-import { Link, Outlet, useParams } from '@octanejs/tanstack-router';
+import { Link, Outlet, useParams } from '@octanejs/tanstack-router/compiled';
 import { OnThisPage } from '../components/OnThisPage.tsrx';
 import { docGroups, defaultDoc, findDoc } from '../content/docs.ts';
 import { useAnimatedMobileNavigation } from '../hooks/use-animated-mobile-navigation.ts';
@@ -207,7 +207,9 @@ export function DocsLayout() @{
 					onClick={toggleMobileNavigation}
 				>
 					<span>Documentation</span>
-					<span class="sidebar-mobile-icon" aria-hidden="true">+</span>
+					<span class="sidebar-mobile-icon" aria-hidden="true">
+						+
+					</span>
 				</button>
 				<div class={['sidebar-panel', mobileMenuOpen && 'is-open']} ref={mobileMenuPanel}>
 					<div class="sidebar-panel-inner">
@@ -227,7 +229,9 @@ export function DocsLayout() @{
 														onClick={() => {
 															void closeMobileNavigation();
 														}}
-													>{doc.title as string}</Link>
+													>
+														{doc.title as string}
+													</Link>
 													@if (pageActive(doc.slug) && doc.sections && doc.sections.length > 0) {
 														<OnThisPage
 															sections={doc.sections}

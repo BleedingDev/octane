@@ -1,15 +1,19 @@
+'use strong';
+
 // The sticky top bar: two clusters — wordmark + section links on the left,
 // search and the theme toggle on the right. Router <Link>s are separate
 // components, so their classes are styled through :global() descendant holes.
 // Below 720px the left link row collapses behind a hamburger into a dropdown
 // panel; the X/Discord/GitHub icons move out of the bar into the bottom of that
 // dropdown (the same <SocialIcons> is rendered in both places, toggled by CSS).
-import { useState } from 'octane';
-import { Link } from '@octanejs/tanstack-router';
+import { trustHTML, useState } from 'octane';
+import { Link } from '@octanejs/tanstack-router/compiled';
 import { DocsSearch } from './DocsSearch.tsrx';
 import { ThemeToggle } from './ThemeToggle.tsrx';
 import { SocialIcons } from './SocialIcons.tsrx';
 import logoSvg from '../assets/octane-logo.svg?raw';
+
+const logo = trustHTML(logoSvg);
 
 export function Header() @{
 	const [menuOpen, setMenuOpen] = useState(false);
@@ -214,11 +218,7 @@ export function Header() @{
 						</svg>
 					</button>
 					<Link to="/" class="wordmark" aria-label="Octane home">
-						<span
-							class="wordmark-img"
-							aria-hidden="true"
-							dangerouslySetInnerHTML={{ __html: logoSvg }}
-						/>
+						<span class="wordmark-img" aria-hidden="true" dangerouslySetInnerHTML={logo} />
 					</Link>
 					<nav
 						id="site-nav"
@@ -226,9 +226,15 @@ export function Header() @{
 						aria-label="Main"
 						onClick={() => setMenuOpen(false)}
 					>
-						<Link to="/docs" activeOptions={{ exact: false }} class="nav-link">Docs</Link>
-						<Link to="/benchmarks" class="nav-link">Benchmarks</Link>
-						<Link to="/playground" class="nav-link">Playground</Link>
+						<Link to="/docs" activeOptions={{ exact: false }} class="nav-link">
+							Docs
+						</Link>
+						<Link to="/benchmarks" class="nav-link">
+							Benchmarks
+						</Link>
+						<Link to="/playground" class="nav-link">
+							Playground
+						</Link>
 						<a class="nav-link" href="/llms.txt" target="_blank" rel="noreferrer">
 							llms.txt
 						</a>

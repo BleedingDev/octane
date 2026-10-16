@@ -1,5 +1,80 @@
 # @octanejs/mcp-server
 
+## 0.3.5
+
+### Patch Changes
+
+- 479118f: Compile direct inline `@{ ... }` component props in Strong DOM templates as render-only bodies, without authored arrow wrappers or element descriptors. Preserve narrow dependencies for simple captured leaves, and keep setup, context, state, and cleanup owned by each receiving insertion. Ordinary JSX and blocks in other value positions retain their descriptor behavior.
+
+  Expose the `render-values` benchmark through the MCP benchmark tool.
+- 55139ec: Strong mode now compiles only `.tsrx`, `.ts`, and `.js` modules. A `.tsx` or `.jsx` module reports `OCTANE_STRONG_TSX_MODULE` when its own `"use strong"` directive or the application's `compiler.strong` setting reaches it, because its JSX lowers to element descriptors that render through the generic descriptor renderer instead of compiled templates. Rename the module to `.tsrx` and write its markup as template JSX, with keyed `@for` blocks in place of `.map()` lists. A module without JSX can stay `.ts` or `.js`, where `root.render(App, props)` renders an entry point. Installed dependencies keep their own mode.
+
+  `OCTANE_STRONG_ELEMENT_API` now applies to every Strong module. `collectDiagnostics` and `octane analyze --strong-preview` still list a `.tsx` module's other Strong findings next to the new code, so the conversion's remaining work shows up at once. The Strong migration recipes, the MCP server's recipes and skills, and the docs examples are written as `.tsrx`.
+
+## 0.3.4
+
+### Patch Changes
+
+- 3d5994c: Keep Strong-mode ref arrays and immutable object/array props stable when their
+  inputs are unchanged, including object literals assigned to a local before
+  being passed to a component. Local values used during setup or captured by
+  callbacks keep their ordinary JavaScript lifetime. Allow `useMemo` and
+  `useCallback` in Strong mode with inferred, explicit, or null dependencies so
+  authors can choose when to recompute a value or recreate a callback.
+
+## 0.3.3
+
+### Patch Changes
+
+- 384b600: Map `@tanstack/react-pacer`, `@tanstack/react-hotkeys`, and `@tanstack/react-table` to the official TanStack adapters `@tanstack/octane-pacer`, `@tanstack/octane-hotkeys`, and `@tanstack/octane-table`.
+
+## 0.3.2
+
+### Patch Changes
+
+- 0a8c27c: Expose the `concise-code` maintainer skill through `octane_skill` when the MCP
+  server runs against an Octane repository checkout.
+- 3557100: The `migrate-to-strong` skill now tells you to typecheck with `tsrx-tsc`, the
+  command the `typecheck` script from `octane init` runs. It used to name
+  `octane-tsc`, a tool that exists only inside the Octane repository.
+- 40fdefd: Expose the `perf-review` maintainer skill through `octane_skill` when the MCP
+  server runs against an Octane repository checkout.
+- 7540c35: Register the TanStack Query Devtools binding in the MCP React-package bridge and keep its published binding catalog complete.
+
+## 0.3.1
+
+### Patch Changes
+
+- 62e6448: Fix Strong mode rejecting effect setup that reads or writes a ref's `current`
+  or calls a state getter. Neither is an effect dependency: a ref holds a value
+  the effect uses without re-running, and a getter reads the latest state without
+  subscribing. Strong mode reported both as `OCTANE_STRONG_EFFECT_HIDDEN_DEPENDENCY`,
+  so previous-value refs, ref counters, a `Map` of callback-ref elements, a
+  `useLazyRef` store, and `getCount()` failed to compile in `useEffect`,
+  `useLayoutEffect`, and `useInsertionEffect` setup. They now compile as they do
+  in React. The diagnostic still reports a reassigned module variable read in
+  effect setup, and render-time ref reads and writes and state getter calls stay
+  errors.
+
+## 0.3.0
+
+### Minor Changes
+
+- 6651f44: Add the `octane_strong_explain` tool and the `migrate-to-strong` skill. Given an `OCTANE_STRONG_*` code, in full or without its prefix and in any case, the tool returns what the diagnostic detects, its replacement, its docs URL, and before/after recipes for the React idiom it rejects. Given a recipe id such as `lazy-ref`, it returns that recipe, and with no arguments it returns the index of codes and recipes. An unknown code returns an error that lists the closest codes. The skill walks an agent through migrating a module or app to Strong mode, from `octane analyze --strong-preview` to the coverage baseline, and lists the changes that only hide a diagnostic. Bridge reports now name the Strong mode replacement for `useRef`, `useLayoutEffect`, `useMemo`, and `useCallback`. The new `@octanejs/mcp-server/strong` export serves the same explanations to other hosts.
+
+### Patch Changes
+
+- 6651f44: Strong mode now rejects a synchronous state update in a host element's callback ref with `OCTANE_STRONG_REF_STATE_UPDATE`. Octane calls a callback ref while the element commits, before paint, so the check follows the effect setup rules. It covers inline and local functions, a state setter passed as the ref, and functions in a `ref={[...]}` list. When the callback copies a DOM measurement into state, the error names `useLayoutSnapshot`. Updates the ref defers to `requestAnimationFrame`, a timer with a positive delay, or an observer or event listener stay legal, and a component's `ref` prop is not checked. `octane explain` and the MCP server's `octane_strong_explain` describe the new code and its migration recipe.
+
+## 0.2.35
+
+### Patch Changes
+
+- 1c44df5: Require Strong effect cleanup to actually cancel or ignore asynchronous state updates. `OCTANE_STRONG_EFFECT_DATA_FETCH` now covers any state update after an `await` or in a `.then`, `.catch`, or `.finally` callback of effect-owned work, not only `fetch`. The returned cleanup must abort an `AbortController` whose `signal` reaches the request, or assign a flag declared in the effect that guards the update after the last `await`. Empty, opaque, and unconnected cleanups, component- or module-scoped flags, and ref flags are errors. Compatibility modules and emitted code are unchanged.
+- f151614: Add `OCTANE_STRONG_EFFECT_HIDDEN_DEPENDENCY`. Strong effect setup may no longer call a state getter, read `current` from a value ref, or read a reassigned module `let` or `var`, because none of them is an inferred dependency. Refs attached with `ref=` or passed to a call, component, or hook remain readable, and reads in cleanup, deferred callbacks, and `useEffectEvent` callbacks remain valid. Compatibility modules and emitted code are unchanged.
+- f151614: Add `OCTANE_STRONG_EFFECT_RESOURCE_LEAK`. Platform resources acquired in Strong effect setup must be released by the returned cleanup: event listeners on browser targets, `matchMedia` lists, attached elements, and connections (by matching `removeEventListener` or an aborted signal), `on<event>` handler properties, intervals and self-rescheduling timers, `ResizeObserver`, `IntersectionObserver`, `MutationObserver`, and `PerformanceObserver`, `WebSocket`, `EventSource`, and `BroadcastChannel`, and geolocation watches. User objects' subscriptions stay legal. Compatibility modules and emitted code are unchanged.
+- 1c44df5: Close zero-delay and custom-hook bypasses of Strong's synchronous effect update check. `OCTANE_STRONG_EFFECT_STATE_UPDATE` now treats callbacks that run before the next paint as effect setup: `startTransition`, a `useTransition` start function, `queueMicrotask`, `.then`/`.catch`/`.finally` on `Promise.resolve(value)` or `Promise.reject()`, `setTimeout` without a positive delay, and code after an `await` that resumes without waiting on any path, such as `await null` or `await (flag ? load() : null)`. It also follows state tuples, updaters, callbacks, and `useTransition` tuples and start functions returned by same-module custom hooks, giving each hook call its own state, in `.tsrx`, `.tsx`, and plain TypeScript modules. `requestAnimationFrame`, timers with a positive delay, and external subscription callbacks remain event-driven. Compatibility modules and emitted code are unchanged.
+
 ## 0.2.34
 
 ### Patch Changes

@@ -1,28 +1,62 @@
-# Website benchmark refresh — 14 September 2026
+# Website benchmark refresh — main, 11 October 2026
 
-The website imports 29 records from `local/`. This refresh measures the complete
-framework matrix for each published suite with its normal sample count. The
-home-page summary is recomputed with `createHomeSummary(FRAMEWORK_CARDS)`.
+The website imports 29 records from `local/`. This snapshot measures every
+published suite with its normal sample count and complete framework matrix.
+The homepage's 20 summary rows and bundle-size ranges are recomputed with
+`createHomeSummary(FRAMEWORK_CARDS)`.
 
-## Environment
+## Source and environment
 
-- Source base: `7d4dc4f51fb1e97203fdcfe2a05d8b5a3e27ab6c`.
-- Apple M5 Max, 18 CPU cores, arm64, macOS 26.6.2 (25G83).
-- Node 24.18.0, pnpm 11.15.1, Playwright 1.61.1, Chromium 149.0.7827.55.
-- Repository lockfile, with Ripple updated to 0.3.128 to match the already
-  installed `@tsrx/ripple` 0.1.65 compiler's hydration helpers.
+- Measured Octane main revision:
+  [`6892fd6682af9f02f8be477da23b81e349c111ec`](https://github.com/octanejs/octane/commit/6892fd6682af9f02f8be477da23b81e349c111ec)
+  (package version 0.13.1). This is a source snapshot, not a measurement of
+  the published Octane release or subsequent main changes.
+- [Measurement run](https://github.com/octanejs/octane/actions/runs/38164749859):
+  all 29 suites ran sequentially in one CI job with `full: true`.
+  Measurements ran on 11 October 2026, 18:40:59–19:20:33 UTC
+  (19:40:59–20:20:33 Europe/London).
+- Blacksmith `blacksmith-4vcpu-ubuntu-2404` runner: Intel Xeon, four vCPUs,
+  Linux 6.6.141, x64.
+- Node 24.19.0, pnpm 12.9.1, Playwright 1.61.1, Chromium 149.0.7827.55,
+  Vite 8.1.5.
+- Frozen repository lockfile: React 19.2.7 with React Compiler 1.0.0,
+  Preact 10.29.8, Solid 2.0.0-rc.14, Svelte 5.57.2, Ripple 0.4.0,
+  Vue 3.6.0-rc.10, and Inferno 9.1.0. Solid uses
+  `@solidjs/vite-plugin` 3.0.0-next.49 and the matching compiler/Babel
+  plugin at 2.0.0-rc.14. Vue Vapor uses the matching runtime and compiler
+  packages at 3.6.0-rc.10.
 
-Suites ran sequentially, without concurrent test or build jobs. Framework
-comparisons use measurements from the same suite invocation. Absolute timings
-are specific to this environment; this refresh does not compare them with the
-previous snapshot as evidence of an Octane speedup.
+## Measurement protocol
+
+Suites ran sequentially. Every framework comparison uses targets from the same
+complete suite invocation. The normal sample counts and default single harness
+invocation per suite are retained; this is not a quick run or a five-run
+`bench:stable` aggregate.
+
+The `js-framework` harness measures `select`,
+`swap`, and `select_lots` in bounded, calibrated batches targeting about 20 ms,
+followed by untimed warmup of the exact batch. Each score is normalized per
+committed click;
+`repeat` and `sampleMs` retain the batch size and median batch duration. Selection
+alternates rows and swaps use odd counts, with the usual correctness gates.
+These warm batch averages differ from the isolated-click timings published
+before 10 October 2026 and must not be presented as direct speedups over them.
+The other operations, including `update` and `remove`, retain single-click
+samples because repetition changes their workload.
+
+This run used an Intel Xeon runner; the previous snapshot used AMD EPYC.
+Runner state can also differ between snapshots. Absolute timing differences alone
+do not establish a framework speedup. The source, toolchain, and sampling
+configuration are recorded here for reproduction.
 
 ## Reproduction
 
-Run from the repository root after installing the locked dependencies and the
-Playwright browser:
+Check out the measurement revision above, install the frozen lockfile and
+Playwright Chromium, then run from the repository root:
 
 ```sh
+pnpm install --frozen-lockfile
+pnpm --filter octane-js-framework-benchmarks exec playwright install --with-deps chromium
 node benchmarks/bench.mjs --record \
   js-framework js-framework-reorder js-framework-deopt todomvc \
   weather-app weather-app-lighthouse chat-stream svg-dashboard uibench \
@@ -32,50 +66,34 @@ node benchmarks/bench.mjs --record \
   three-renderer three-bundle-size lynx-table lynx-table-web
 ```
 
-## Fixture and measurement corrections
+CI used the same suite list with `--ratios` instead of `--record`, selected by
+the Bench workflow's `full: true` input. The 29 suite JSON files were imported
+from its `bench-results` artifact and formatted without changing their values.
+The artifact's `environment.json` supplies the environment above. No quick-run
+results are substituted, and no guard thresholds are changed.
 
-- Plain TypeScript rows, TodoMVC, and chat fixtures expose the public
-  `flushSync` adapter already supported by their harnesses. Scripted events now
-  include their DOM commit within each timed interaction, following Octane's
-  documented event scheduling contract.
-- Signal and navigation work observers rebuild unminified diagnostic assets
-  after timing. The SSR HTML observer likewise uses a separate unminified
-  build and compares its complete response with the timed production bundle.
-  Navigation also rejects missing `renderBlock` coverage. Normal timing and
-  bundle-byte measurements retain production minification.
-- Recursive-context work ceilings account for the three identity-aware Blocks
-  introduced for direct Provider children by #1082: one under the root Provider
-  and two under the local Provider. Exact visible-update and fallback gates
-  remain enforced.
-- Ripple 0.3.128 supplies the hydration helpers required by the current compiler;
-  the news harness checks server-node retention and a working theme interaction.
+## Import validation and ratio guards
 
-The committed ratio guards in `ratios.json` are unchanged.
+All 29 harnesses exited successfully. The imported records contain 232 targets
+and 3,092 target/operation measurements, with no missing targets, operations, or
+non-finite scores. Iteration counts, repetition counts, and fixed sample counts
+match the previous snapshot; duration-based SSR throughput counts vary with the
+number of renders completed. The calibrated JS Framework batching metadata is
+present and valid.
 
-## Validation and historical guards
+The run checked 169 applicable paired ratio guards: 167 passed and two timing
+guards breached their bounds. Neither breach has a waiver, so the measurement
+workflow failed its ratio gate even though every harness completed successfully.
+All applicable bundle-size guards passed.
 
-All 29 suite invocations exited successfully. The records contain 231 targets
-(including diagnostics and budget controls) and 3,075 operations, with finite
-scores and no failed harnesses.
+| Suite / operation | Target / reference | Observed ratio | Maximum |
+| --- | --- | ---: | ---: |
+| `svg-dashboard` / `select_toggle` | Octane TSRX / Solid | 1.0916× | 0.9× |
+| `uibench` / `tree/[2,2,2,2,2,2,2,2,2,2]/render` | Octane TSRX / React | 2.0722× | 1.9× |
 
-Auditing the published records against the applicable committed ratio guards
-checks 213 guards and finds 62 breaches:
-
-| Suite | Breaches | Observation |
-| --- | ---: | --- |
-| Bundle size | 57 | All 57 also fail on the untouched source base. |
-| Three bundle size | 2 | Both also fail on the untouched source base; the Octane byte counts are unchanged. |
-| Rows reordering | 1 | `rotateb`: Octane/React 0.625 against a 0.6 ceiling. |
-| Signal favoring | 1 | Paired shallow update: JSX/TSRX 7.931 against a 5.5 ceiling. |
-| Three renderer | 1 | 1,000 frame subscribers: Octane/R3F 1.347 against a 1.0 ceiling. |
-
-The byte comparison used a separate, untouched checkout of the source base
-above, its frozen lockfile, and the normal `bundle-size` and `three-bundle-size`
-suites. The flush adapters add 32 gzip bytes to the complete TodoMVC bundle and
-12 gzip bytes to chat. Other Octane bundle measurements are unchanged. None of
-the 59 byte breaches is newly introduced by this refresh.
-
-The three timing breaches are retained as measured. This PR does not change
-their timed fixture or runtime code; the signal observer rebuild happens after
-all timing. They remain performance follow-ups, and this snapshot must not be
-described as passing `--ratios`.
+These are the unmodified measurements from the complete run. The SVG guard also
+breached in the previous snapshot; the UIbench guard breached in this run.
+This refresh records those outcomes without changing guard bounds or adding
+waivers. The prior snapshot's memo-wall JSX/TSRX guard passed in this run.
+The timings alone do not determine whether a change is a regression or runner
+variation; that needs a controlled investigation.

@@ -4,6 +4,10 @@ export { createResizeObserver } from './resize-observer.js';
 // read `version` can tree-shake this module and the package.json payload in full.
 export { version } from './version.js';
 export type * from './public-types.js';
+export type {
+	LayoutSnapshotOptions,
+	LayoutSnapshotOptionsWithInitial,
+} from './layout-snapshot-types.js';
 export { StrictMode, unstable_batchedUpdates } from './compatibility.js';
 export { initializeHydrationEventCapture } from './hydration/event-capture.js';
 // Keep external DOM ownership separate from the reconciling runtime so
@@ -49,10 +53,12 @@ export {
 	useReducer,
 	useEffect,
 	useLayoutEffect,
+	useLayoutSnapshot,
 	useInsertionEffect,
 	useMemo,
 	useCallback,
 	useRef,
+	useLazyRef,
 	useId,
 	useImperativeHandle,
 	useEffectEvent,
@@ -78,6 +84,10 @@ export {
 	prefetchDNS,
 	// Context
 	createContext,
+	createCompiledContext,
+	CompiledContext,
+	CompiledOutlet,
+	type CompiledComponent,
 	use,
 	useContext,
 	type Context,
@@ -119,6 +129,8 @@ export {
 	// (the compiled-output ↔ runtime contract; also used by @octanejs/* bindings)
 	// `@try`/`@catch` as the language tooling's type-only virtual TSX spells it.
 	TsrxErrorBoundary,
+	__createDiscreteEventListener,
+	__useCommittedState,
 	__useStateWithGetter,
 	__useLinkedStateWithGetter,
 	__useReducerWithGetter,
@@ -132,6 +144,8 @@ export {
 	// Module-load "this module uses <ViewTransition>" hint (view-transitions plan).
 	__vtSeen,
 	template,
+	scriptTemplate,
+	__PermanentStaticHydrate,
 	clone,
 	drainFrag,
 	// Binding-bag arity factories — one-shot allocate+insert+commit for the
@@ -239,6 +253,7 @@ export {
 	activityBlock,
 	componentSlot,
 	componentSlotVoid,
+	componentSlotFromConfig,
 	componentSlotLite,
 	compilerCacheArray,
 	compilerCacheImmutableArrayFilter,

@@ -115,9 +115,7 @@ export function TextArm(props: { server?: boolean; k: string; leaf: Promise<stri
 					<>
 						@switch (props.k) {
 							@case 'a': {
-								<>
-									{use(props.leaf) as string}
-								</>
+								<>{use(props.leaf) as string}</>
 							}
 							@case 'c': {
 								<b>{'c'}</b>
@@ -322,5 +320,132 @@ export function LastArm(props: { server?: boolean; k: string }) @{
 				}
 			}
 		</section>
+	</div>
+}
+
+// The arm's last root is static, after the component that suspends. The
+// arm is the whole content of the @else arm, so the server's @if range
+// ends after it.
+export function TrailingRoot(props: { server?: boolean; k: string; leaf: Promise<string> }) @{
+	<div>
+		<Hydrate split={false} when={load()}>
+			<section>
+				@if (props.server) {
+					<>
+						<s>{'s'}</s>
+						<i>{'z'}</i>
+						<b>{'b'}</b>
+					</>
+				} @else {
+					@if (props.k === 'a') {
+						<>
+							<s>{'s'}</s>
+							<Reader value={props.leaf} />
+							<b>{'b'}</b>
+						</>
+					} @else if (props.k === 'c') {
+						<p>{'c'}</p>
+					}
+				}
+				<em>{'e'}</em>
+			</section>
+		</Hydrate>
+	</div>
+}
+
+// The arm suspends before its template adopts anything, so only the retry
+// says where its roots end.
+export function TrailingClone(props: { server?: boolean; k: string; leaf: Promise<string> }) @{
+	<div>
+		<Hydrate split={false} when={load()}>
+			<section>
+				@if (props.server) {
+					<>
+						<s>{'s'}</s>
+						<i>{'z'}</i>
+						<b>{'b'}</b>
+					</>
+				} @else {
+					@if (props.k === 'a') {
+						const text = use(props.leaf);
+						<>
+							<s>{'s'}</s>
+							<i>{text as string}</i>
+							<b>{'b'}</b>
+						</>
+					} @else if (props.k === 'c') {
+						<p>{'c'}</p>
+					}
+				}
+				<em>{'e'}</em>
+			</section>
+		</Hydrate>
+	</div>
+}
+
+function ServerFrame() @{
+	<>
+		<s>{'s'}</s>
+		<i>{'z'}</i>
+		<b>{'b'}</b>
+	</>
+}
+
+function ClientFrame(props: { k: string; leaf: Promise<string> }) @{
+	@if (props.k === 'a') {
+		<>
+			<s>{'s'}</s>
+			<Reader value={props.leaf} />
+			<b>{'b'}</b>
+		</>
+	} @else if (props.k === 'c') {
+		<p>{'c'}</p>
+	}
+}
+
+// The same arm as the body of a component whose identity differs on the
+// client: the arm's template adopts the server component's roots in place.
+export function TrailingFrame(props: { server?: boolean; k: string; leaf: Promise<string> }) @{
+	const Shape = props.server ? ServerFrame : ClientFrame;
+	<div>
+		<Hydrate split={false} when={load()}>
+			<section>
+				<Shape k={props.k} leaf={props.leaf} />
+				<em>{'e'}</em>
+			</section>
+		</Hydrate>
+	</div>
+}
+
+// The same component in a body that returns JSX: the boundary's children are
+// descriptors, so the section's children are a list, and the arm renders in
+// its first item. That item's first render suspends, so the list keeps no
+// item, and the retry adopts the server's items again.
+export function TrailingDescriptor(props: { server?: boolean; k: string; leaf: Promise<string> }) {
+	const Shape = props.server ? ServerFrame : ClientFrame;
+	return (
+		<div>
+			<Hydrate split={false} when={load()}>
+				<section>
+					<Shape k={props.k} leaf={props.leaf} />
+					<em>{'e'}</em>
+				</section>
+			</Hydrate>
+		</div>
+	);
+}
+
+// The same component as the row of a keyed @for.
+export function TrailingRow(props: { server?: boolean; k: string; leaf: Promise<string> }) @{
+	const Shape = props.server ? ServerFrame : ClientFrame;
+	<div>
+		<Hydrate split={false} when={load()}>
+			<section>
+				@for (const row of ['a']; key row) {
+					<Shape k={props.k} leaf={props.leaf} />
+				}
+				<em>{'e'}</em>
+			</section>
+		</Hydrate>
 	</div>
 }

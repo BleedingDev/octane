@@ -1,4 +1,13 @@
-import { useInsertionEffect, useLayoutEffect, useRef, useState } from 'octane';
+'use strong';
+
+import {
+	useEffectEvent,
+	useInsertionEffect,
+	useLayoutEffect,
+	useLayoutSnapshot,
+	useRef,
+	useState,
+} from 'octane';
 import type { OctaneNode } from 'octane';
 import { createUniversalHostBoundary } from 'octane/universal';
 import type { RendererRegion } from 'octane/universal';
@@ -25,15 +34,13 @@ export type CanvasRef =
 	| readonly CanvasRef[]
 	| null;
 
-export interface CanvasProps extends Omit<RenderProps<HTMLCanvasElement>, 'size'>, Record<
-	string,
-	unknown
-> {
+export interface CanvasProps
+	extends Omit<RenderProps<HTMLCanvasElement>, 'size'>, Record<string, unknown> {
 	/**
- * Authored Three-scene JSX. The compiler lowers the authored children into a
- * `RendererRegion` payload at the boundary, so the runtime only ever sees the
- * region form; `OctaneNode` keeps the authoring side type-checkable.
- */
+	 * Authored Three-scene JSX. The compiler lowers the authored children into a
+	 * `RendererRegion` payload at the boundary, so the runtime only ever sees the
+	 * region form; `OctaneNode` keeps the authoring side type-checkable.
+	 */
 	children?: RendererRegion | OctaneNode;
 	/** Fallback content rendered as native canvas fallback DOM. */
 	fallback?: unknown;
@@ -48,9 +55,13 @@ export interface CanvasProps extends Omit<RenderProps<HTMLCanvasElement>, 'size'
 }
 
 function sameSize(previous: Size | null, next: Size): boolean {
-	return previous !== null && previous.width === next.width && previous.height === next.height &&
+	return (
+		previous !== null &&
+		previous.width === next.width &&
+		previous.height === next.height &&
 		previous.top === next.top &&
-		previous.left === next.left;
+		previous.left === next.left
+	);
 }
 
 function configurationError(error: unknown): Error {
@@ -73,7 +84,7 @@ function resolveEventSource(
 	wrapper: HTMLDivElement | null,
 ): HTMLElement | null {
 	if (source === undefined) return wrapper;
-	return 'current' in source ? source.current ?? wrapper : source;
+	return 'current' in source ? (source.current ?? wrapper) : source;
 }
 
 function createPrefixCompute(prefix: EventPrefix): ComputeFunction {
@@ -88,12 +99,11 @@ function createPrefixCompute(prefix: EventPrefix): ComputeFunction {
 function bindCanvasEvents(
 	state: RootState,
 	source: CanvasProps['eventSource'],
-	wrapper: HTMLDivElement | null,
+	target: HTMLElement | null,
 	prefix: EventPrefix | undefined,
 	binding: CanvasEventBinding,
 ): void {
 	let current = state.get();
-	const target = resolveEventSource(source, wrapper);
 	if (!binding.initialized || binding.source !== source || binding.target !== target) {
 		binding.source = source;
 		binding.target = target;
@@ -147,40 +157,48 @@ export function Canvas({
 	onPointerMissed,
 	onCreated,
 	...domProps
-}: CanvasProps) {
+}: CanvasProps) @{
 	const wrapperRef = useRef<HTMLDivElement | null>(null);
 	const canvasRef = useRef<HTMLCanvasElement | null>(null);
 	const rootRef = useRef<ThreeRoot<HTMLCanvasElement> | null>(null);
-	const eventSourceRef = useRef<CanvasProps['eventSource']>(eventSource);
-	const eventPrefixRef = useRef<EventPrefix | undefined>(eventPrefix);
-	const onCreatedRef = useRef(onCreated);
-	const onPointerMissedRef = useRef(onPointerMissed);
 	const eventBindingRef = useRef<CanvasEventBinding>({ initialized: false });
-	const createdHandlerRef = useRef<((state: RootState) => void) | null>(null);
-	const pointerMissedHandlerRef = useRef<((event: MouseEvent) => void) | null>(null);
 	const [size, setSize] = useState<Size | null>(null);
 	const [boundaryMount, setBoundaryMount] = useState<ThreeBoundaryMount | null>(null);
 	const [error, setError] = useState<Error | null>(null);
-	const eventTarget = resolveEventSource(eventSource, wrapperRef.current);
-	eventSourceRef.current = eventSource;
-	eventPrefixRef.current = eventPrefix;
-	onCreatedRef.current = onCreated;
-	onPointerMissedRef.current = onPointerMissed;
-	if (createdHandlerRef.current === null) {
-		createdHandlerRef.current = (state) => {
-			bindCanvasEvents(
-				state,
-				eventSourceRef.current,
-				wrapperRef.current,
-				eventPrefixRef.current,
-				eventBindingRef.current,
-			);
-			onCreatedRef.current?.(state.get());
-		};
-	}
-	if (pointerMissedHandlerRef.current === null) {
-		pointerMissedHandlerRef.current = (event) => onPointerMissedRef.current?.(event);
-	}
+	const [initialEventSource] = useState(() => ({
+		source: eventSource,
+		target: resolveEventSource(eventSource, null),
+		prefix: eventPrefix,
+	}));
+	const eventSnapshot = useLayoutSnapshot(
+		() => {
+			const wrapper = wrapperRef.current;
+			const target = resolveEventSource(eventSource, wrapper);
+			return {
+				source: eventSource,
+				target: target === wrapper ? null : target,
+				prefix: eventPrefix,
+			};
+		},
+		{
+			initial: initialEventSource,
+			equal: (previous, next) =>
+				previous.source === next.source &&
+				previous.target === next.target &&
+				previous.prefix === next.prefix,
+		},
+	);
+	const handleCreated = useEffectEvent((state: RootState) => {
+		bindCanvasEvents(
+			state,
+			eventSource,
+			resolveEventSource(eventSource, wrapperRef.current),
+			eventPrefix,
+			eventBindingRef.current,
+		);
+		onCreated?.(state.get());
+	});
+	const handlePointerMissed = useEffectEvent((event: MouseEvent) => onPointerMissed?.(event));
 
 	if (error !== null) throw error;
 
@@ -190,7 +208,7 @@ export function Canvas({
 		return observeCanvasSize(wrapper, resize ?? DEFAULT_RESIZE_OPTIONS, (next) => {
 			setSize((previous) => (sameSize(previous, next) ? previous : next));
 		});
-	}, [resize]);
+	});
 
 	// A DOM Suspense or Activity boundary disconnects layout effects while its
 	// content is hidden. Root ownership must survive that retained state and
@@ -201,7 +219,7 @@ export function Canvas({
 			rootRef.current = null;
 			root?.unmount();
 		};
-	}, []);
+	});
 
 	useLayoutEffect(() => {
 		const canvas = canvasRef.current;
@@ -213,64 +231,50 @@ export function Canvas({
 			root = createRoot(canvas);
 			rootRef.current = root;
 		}
-		void root.configure({
-			gl,
-			events,
-			shadows,
-			linear,
-			flat,
-			legacy,
-			orthographic,
-			frameloop,
-			dpr,
-			performance,
-			raycaster,
-			camera,
-			scene,
-			// Both handlers were lazily created during render; the `| null` only
-			// survives because TS cannot carry the narrowing into this closure.
-			onPointerMissed: pointerMissedHandlerRef.current ?? undefined,
-			onCreated: createdHandlerRef.current ?? undefined,
-			size,
-		}).then(() => {
-			if (cancelled) return;
-			setBoundaryMount(createThreeBoundaryMount(root));
-		}).catch((reason) => {
-			if (!cancelled) setError(configurationError(reason));
-		});
+		void root
+			.configure({
+				gl,
+				events,
+				shadows,
+				linear,
+				flat,
+				legacy,
+				orthographic,
+				frameloop,
+				dpr,
+				performance,
+				raycaster,
+				camera,
+				scene,
+				onPointerMissed: handlePointerMissed,
+				onCreated: handleCreated,
+				size,
+			})
+			.then(() => {
+				if (cancelled) return;
+				setBoundaryMount(createThreeBoundaryMount(root));
+			})
+			.catch((reason) => {
+				if (!cancelled) setError(configurationError(reason));
+			});
 		return () => {
 			cancelled = true;
 		};
-	}, [
-		size,
-		gl,
-		events,
-		shadows,
-		linear,
-		flat,
-		legacy,
-		orthographic,
-		frameloop,
-		dpr,
-		performance,
-		raycaster,
-		camera,
-		scene,
-	]);
+	});
 
-	// A stable ref object can receive a new current target during commit. Recheck after every
-	// render; bindCanvasEvents avoids reconnecting when the resolved target is unchanged.
+	// The layout snapshot observes stable ref objects whose target changes during commit.
+	// Initialization belongs to onCreated, which may choose its own event connection.
 	useLayoutEffect(() => {
 		const root = rootRef.current;
-		if (boundaryMount === null || root === null) return;
+		if (root === null || !eventBindingRef.current.initialized) return;
 		bindCanvasEvents(
 			root.store.getState(),
-			eventSource,
-			wrapperRef.current,
-			eventPrefix,
+			eventSnapshot.source,
+			eventSnapshot.target ?? wrapperRef.current,
+			eventSnapshot.prefix,
 			eventBindingRef.current,
 		);
-	}, null);
+	});
 
 	const renderedBoundaryMount: ThreeBoundaryMount | null =
 		boundaryMount === null
@@ -287,24 +291,26 @@ export function Canvas({
 		width: '100%',
 		height: '100%',
 		overflow: 'hidden',
-		pointerEvents: eventTarget === wrapperRef.current ? 'auto' : 'none',
+		pointerEvents: eventSnapshot.target === null ? 'auto' : 'none',
 		...style,
 	};
 
-	return <div
+	<div
 		ref={wrapperRef}
 		style={wrapperStyle}
-		{...domProps as typeof domProps & { ref?: undefined }}
+		{...(domProps as typeof domProps & { ref?: undefined })}
 	>
 		<div style={{ width: '100%', height: '100%' }}>
-			<canvas ref={[canvasRef, ref]} style={{ display: 'block' }}>{fallback}</canvas>
+			<canvas ref={[canvasRef, ref]} style={{ display: 'block' }}>
+				{fallback}
+			</canvas>
 		</div>
-		{renderedBoundaryMount === null
-			? null
-			: <ThreeBoundary
-					root={renderedBoundaryMount.root}
-					component={renderedBoundaryMount.component}
-					props={renderedBoundaryMount.props}
-				/>}
-	</div>;
+		@if (renderedBoundaryMount !== null) {
+			<ThreeBoundary
+				root={renderedBoundaryMount.root}
+				component={renderedBoundaryMount.component}
+				props={renderedBoundaryMount.props}
+			/>
+		}
+	</div>
 }

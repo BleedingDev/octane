@@ -8,7 +8,7 @@ import { attachStreamedSignalResult, initializeDocumentSignalOwner } from '../si
 import { registerSignalOwnerDocument } from '../signals/early-values.js';
 import { retireSignalOwnerIdentity } from '../signals/owner-context.js';
 import {
-	parseNativeSignalManifest,
+	validateNativeSignalManifest,
 	type NativeSignalManifest,
 } from '../signals/native-read-seeds.js';
 export type { NativeSignalManifest, NativeSignalReference } from '../signals/native-read-seeds.js';
@@ -196,7 +196,7 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 			for (const selection of selections.values()) attach(selection, owner);
 		});
 		if (options.initialSignals !== undefined) {
-			const manifest = parseNativeSignalManifest(JSON.stringify(options.initialSignals));
+			const manifest = validateNativeSignalManifest(options.initialSignals);
 			if (manifest.version !== 1) throw new TypeError(formatClientError(270));
 			initializeDocumentSignalOwner(
 				signalOwner,
@@ -227,7 +227,7 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 	// before a synchronous hydrateRoot read can consider starting its loader.
 	// Placement stays on the normal async delivery path because its DOM range and
 	// styles may not be registered yet.
-	const earlyRenderer = target.__octaneStreamedRenderer as EarlyStreamedRenderer | undefined;
+	const earlyRenderer = target['__octaneStreamedRenderer'] as EarlyStreamedRenderer | undefined;
 	if (
 		earlyRenderer !== undefined &&
 		earlyRenderer !== null &&
@@ -263,19 +263,19 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 		if (initialized) retireSignalOwnerIdentity(signalOwner);
 		throw error;
 	}
-	const installedRenderer = target.__octaneStreamedRenderer;
+	const installedRenderer = target['__octaneStreamedRenderer'];
 	const close = (restore: boolean): void => {
 		if (disposed) return;
 		disposed = true;
 		if (early.register === register) early.register = restore ? originalRegister : () => {};
 		uninstallOwnerActivator();
 		for (const selection of selections.values()) selection.detach?.();
-		const ownsIngress = target.__octaneStreamedRenderer === installedRenderer;
+		const ownsIngress = target['__octaneStreamedRenderer'] === installedRenderer;
 		uninstallDelivery();
 		if (!restore && ownsIngress) {
 			// Uninstall restores the pre-module descriptor. Do not allow late
 			// parser calls to refill that mailbox after a BFCache freeze.
-			target.__octaneStreamedRenderer = { receive() {} };
+			target['__octaneStreamedRenderer'] = { receive() {} };
 			if (earlyRenderer) earlyRenderer.frames.length = 0;
 		}
 		selections.clear();

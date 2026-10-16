@@ -5,7 +5,12 @@ import {
 	validateNativeReadWitness,
 	type NativeReadWitness,
 } from './native-read-collector.js';
-import { NATIVE_TRANSITION_CONSUMER, type NativeReadSource } from './read-protocol.js';
+import {
+	NATIVE_TRANSITION_CONSUMER,
+	setSignalDeclarationInvocation,
+	type NativeReadRelease,
+	type NativeReadSource,
+} from './read-protocol.js';
 import { inspectNativeReadWitness } from './native-read-inspection.js';
 
 interface NativeReadHost {
@@ -37,6 +42,10 @@ interface Consumer {
 	pending: Set<Candidate>;
 }
 
+/** Lets a release find the consumer behind a subscription (rebaseNativeRead). */
+const CONSUMER: unique symbol = Symbol();
+type ConsumerNotify = (() => void) & { [CONSUMER]?: Consumer };
+
 interface Candidate extends NativeReadWitness {
 	consumer: Consumer;
 	reads: Map<NativeReadSource, number>;
@@ -50,9 +59,58 @@ interface RenderFrame {
 	candidates: Map<Scope, Candidate> | null;
 	/** Renderer data scoped to this one invocation, such as a declaration stage. */
 	invocationData: unknown;
+	/** This invocation's declaration number; nested invocations have larger ones. */
+	invocation: number;
+	/** The renderer capture this invocation renders into, which a nested one may replace. */
+	capture: object | null;
+	/** The declaration invocation this one interrupted, restored when it ends. */
+	outerInvocation: number;
 }
 
 type CandidateSet = Map<Consumer, Candidate>;
+
+/**
+ * Hydration registers this as the NativeReadRebase. A consumer whose committed
+ * render alone holds a released historical read moves it to the unchanged live
+ * successor, as if the render had read it live, and is not rendered again. A
+ * pending attempt that shares the lease revalidates and renders instead.
+ */
+export function rebaseNativeRead(notify: () => void, release: NativeReadRelease): boolean {
+	const consumer = (notify as ConsumerNotify)[CONSUMER];
+	if (consumer === undefined) return false;
+	const { historical } = release;
+	const committed = consumer.committed;
+	const subscription = consumer.subscriptions.get(historical);
+	if (
+		committed === null ||
+		consumer.block.disposed ||
+		subscription?.leases !== 1 ||
+		!committed.reads.has(historical)
+	)
+		return false;
+	let successor: ReturnType<NativeReadRelease['successor']>;
+	try {
+		successor = release.successor();
+	} catch {
+		// The consumer's own render reports whatever this read now throws.
+		return false;
+	}
+	if (successor === undefined) return false;
+	const { live, version } = successor;
+	if (!release.binding && !committed.reads.has(live)) {
+		committed.reads.set(live, version);
+		let current = consumer.subscriptions.get(live);
+		if (current === undefined) {
+			current = { leases: 0, dispose: live.subscribe(consumer.notify) };
+			consumer.subscriptions.set(live, current);
+		}
+		current.leases++;
+	}
+	committed.reads.delete(historical);
+	consumer.subscriptions.delete(historical);
+	subscription.dispose();
+	return true;
+}
 
 interface PublicationOwner {
 	generation: number;
@@ -80,6 +138,7 @@ export function createNativeReadDriver(host: NativeReadHost) {
 	const captures = new WeakMap<object, CandidateSet>();
 	const frames: RenderFrame[] = [];
 	let depth = 0;
+	let invocations = 0;
 	let publications: WeakMap<object, Publication> | null = null;
 	let ownerPublications: WeakMap<PublicationOwner, Publication> | null = null;
 	let unpublishedRefs: WeakMap<object, UnpublishedRef> | null = null;
@@ -138,6 +197,7 @@ export function createNativeReadDriver(host: NativeReadHost) {
 			};
 			consumers.set(scope, consumer);
 			const owned = consumer;
+			(owned.notify as ConsumerNotify)[CONSUMER] = owned;
 			if (host.prepare !== undefined) {
 				Object.assign(owned.notify, {
 					[NATIVE_TRANSITION_CONSUMER]: {
@@ -292,27 +352,49 @@ export function createNativeReadDriver(host: NativeReadHost) {
 		},
 		replayDeferredRefs: host.replayRefs,
 		beginRender(block: Block): void {
+			// Any call here can exhaust the native stack, and the renderer then ends
+			// whatever was published. Publish only state endRender can restore: the
+			// invocation is already entered, and the collector token stays -1 until
+			// the collector has entered too.
+			const outerInvocation = setSignalDeclarationInvocation(++invocations);
 			const frame = (frames[depth++] ??= {
 				block: null,
 				collectorToken: -1,
 				candidates: null,
 				invocationData: null,
+				invocation: 0,
+				capture: null,
+				outerInvocation: 0,
 			});
 			frame.block = block;
-			frame.collectorToken = collector.beginRender(block);
+			frame.collectorToken = -1;
 			frame.candidates = null;
 			frame.invocationData = null;
+			frame.invocation = invocations;
+			frame.outerInvocation = outerInvocation;
+			frame.collectorToken = collector.beginRender(block);
+			frame.capture = host.capture();
 			// Parameters precede compiler body scopes. Start with the actual Block
 			// owner, and retire prior reads even when this invocation no longer
 			// enters an instrumented body or reads a native source.
 			if (consumers.has(block)) getCandidate(frame, block);
 		},
 		endRender(block: Block, completed: boolean, suspended: boolean): void {
-			const frame = frames[depth - 1];
+			// A native stack overflow can stop a descendant's setup or cleanup before
+			// it ends its frame, leaving that frame above this Block's own.
+			let index = depth - 1;
+			while (index >= 0 && frames[index].block !== block) index--;
 			// The first native component can install the driver inside a child of
 			// an already-running non-native Block. That outer Block has no frame.
-			if (frame === undefined || frame.block !== block) return;
+			if (index < 0) return;
+			const frame = frames[index];
 			try {
+				// Restoring this frame's collector token and invocation below also
+				// restores whatever abandoned frames entered. Only their reads remain.
+				for (let above = depth - 1; above > index; above--) {
+					const candidates = frames[above].candidates;
+					if (candidates !== null) for (const candidate of candidates.values()) release(candidate);
+				}
 				if (frame.candidates !== null) {
 					if (completed) {
 						const capture = host.capture();
@@ -328,10 +410,15 @@ export function createNativeReadDriver(host: NativeReadHost) {
 				}
 			} finally {
 				collector.endRender(frame.collectorToken);
-				frame.block = null;
-				frame.candidates = null;
-				frame.invocationData = null;
-				depth--;
+				setSignalDeclarationInvocation(frame.outerInvocation);
+				while (depth > index) {
+					const ended = frames[--depth];
+					ended.block = null;
+					ended.candidates = null;
+					ended.invocationData = null;
+					// A reused frame must not retain a settled capture's commit work.
+					ended.capture = null;
+				}
 			}
 		},
 		/**
@@ -342,6 +429,21 @@ export function createNativeReadDriver(host: NativeReadHost) {
 		invocation(block: Block): { invocationData: unknown } | undefined {
 			const frame = frames[depth - 1];
 			return frame !== undefined && frame.block === block ? frame : undefined;
+		},
+		/**
+		 * The invocation numbered `id` while it is still rendering, such as the
+		 * component whose directive arm is rendering now, or undefined once it
+		 * has ended. Frames deeper in the stack began later and number higher.
+		 */
+		enclosingInvocation(
+			id: number,
+		): { invocationData: unknown; readonly capture: object | null } | undefined {
+			for (let index = depth - 1; index >= 0; index--) {
+				const frame = frames[index];
+				if (frame.invocation <= id)
+					return frame.invocation === id && frame.block !== null ? frame : undefined;
+			}
+			return undefined;
 		},
 		beginScope(scope: Scope, block: Block): number {
 			if (collector.isDetached()) return collector.beginScope(scope);

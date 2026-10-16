@@ -16,6 +16,7 @@
 import * as nodeCrypto from 'node:crypto';
 import * as nodeFs from 'node:fs';
 import * as nodePath from 'node:path';
+import * as nodeUrl from 'node:url';
 import { parseModule } from '@tsrx/core';
 import {
 	CLIENT_REFERENCE_MANIFEST_FILENAME,
@@ -34,11 +35,11 @@ import {
 	readCssModuleExports,
 	validateCssModuleConstants,
 } from './css-module-imports.js';
+import { PROFILE_DEFINE, foldProfileGuards } from './profile-guards.js';
 
 export { discoverOctaneSourceDependencies };
-
-const PROFILE_DEFINE = '__OCTANE_PROFILE_ENABLED__';
 const VOID_EXPORTS_META = 'octane:void-component-exports';
+const COMPILER_MEMO_EXPORTS_META = 'octane:compiler-memo-exports';
 const DESCRIPTOR_CHILDREN_EXPORTS_META = 'octane:descriptor-children-exports';
 const CLIENT_REFERENCE_META = 'octane:client-reference';
 const INDEPENDENT_WIDGETS_META = 'octane:independent-widgets';
@@ -145,8 +146,48 @@ function voidImportKey(request, imported) {
 	return `${request}\0${imported}`;
 }
 
+// A relative request never starts with these prefixes, so the keys cannot collide.
+function liteImportKey(request, imported) {
+	return `lite\0${request}\0${imported}`;
+}
+
+function strongLiteImportKey(request, imported) {
+	return `strong\0${request}\0${imported}`;
+}
+
+function anchorlessImportKey(request, imported) {
+	return `anchorless\0${request}\0${imported}`;
+}
+
 function compiledCodeFingerprint(code) {
 	return nodeCrypto.createHash('sha256').update(code).digest('base64url');
+}
+
+// AST fields that only record how a program was printed: positions and
+// comments. A literal's `raw` spelling is printing too (a template element's
+// raw text is not, because a tag can read it). Every other field is part of the
+// program itself.
+const PRINT_ONLY_AST_KEYS = new Set(['start', 'end', 'loc', 'range', 'comments', 'hashbang']);
+
+// A fingerprint of the program that code parses to, independent of how it is
+// printed. Vite's TypeScript transform reprints every `.ts` and `.tsx` module
+// after this plugin's pre-order transform, so a `.tsx` component's final code
+// never matches its compiled code byte for byte. A void-export proof must
+// survive that reprint, and still fail closed when a later transform changes
+// the program. Returns null when the code cannot be parsed or serialized here,
+// so an importer falls back to the generic paths instead of failing its build.
+function structuralCodeFingerprint(context, code) {
+	if (typeof context?.parse !== 'function') return null;
+	try {
+		const json = JSON.stringify(context.parse(code), function (key, value) {
+			if (PRINT_ONLY_AST_KEYS.has(key) || (key === 'raw' && this.type === 'Literal'))
+				return undefined;
+			return typeof value === 'bigint' ? `${value}n` : value;
+		});
+		return nodeCrypto.createHash('sha256').update(json).digest('base64url');
+	} catch {
+		return null;
+	}
 }
 
 const NO_PREFLIGHT_FACTS = Object.freeze([]);
@@ -284,12 +325,87 @@ function verifyCssModuleProofs(context, state) {
 	}
 }
 
+function createProofWaitGraph() {
+	// `structures` caches a loaded module's structural fingerprint by its byte
+	// fingerprint, so a component imported from many modules is parsed once.
+	return { waits: new Map(), cut: new Set(), structures: new Map() };
+}
+
+// Whether a void-export proof still describes the module's final code: the
+// exact compiled bytes, or the same program after a reprint.
+function voidExportsProofHolds(context, proofWaits, metadata, code) {
+	if (typeof code !== 'string') return false;
+	const fingerprint = compiledCodeFingerprint(code);
+	if (metadata.fingerprint === fingerprint) return true;
+	if (typeof metadata.structure !== 'string') return false;
+	let structure = proofWaits.structures.get(fingerprint);
+	if (structure === undefined) {
+		structure = structuralCodeFingerprint(context, code);
+		proofWaits.structures.set(fingerprint, structure);
+	}
+	return structure === metadata.structure;
+}
+
+function proofWaitKey(importer, id) {
+	return `${importer}\0${id}`;
+}
+
+// The pending waits from `from` that reach `to`, as wait keys, or null.
+function proofWaitPath(graph, from, to, visited = new Set()) {
+	if (from === to) return [];
+	if (visited.has(from)) return null;
+	visited.add(from);
+	for (const target of graph.waits.get(from)?.keys() ?? []) {
+		const path = proofWaitPath(graph, target, to, visited);
+		if (path !== null) {
+			path.push(proofWaitKey(from, target));
+			return path;
+		}
+	}
+	return null;
+}
+
+// `this.load()` settles only after the loaded module's transforms finish, so a
+// proof load from A to B while B's transform proves A is a deadlock: each
+// transform awaits the other. Record every pending proof load as a wait-for
+// edge, and refuse the one that would close a cycle. A cut wait resolves to
+// null and its import keeps ordinary component dispatch.
+//
+// Every edge on the closed cycle is cut, including waits already pending, so a
+// ring of components compiles the same way whichever member the build reaches
+// first. Overlapping cycles can still keep a proof on a chord, depending on
+// which cycle closes first; a completed proof is sound either way. An import
+// outside every cycle never closes one, so it always keeps its proof.
+async function loadProofModule(context, graph, importer, id) {
+	const key = proofWaitKey(importer, id);
+	if (graph.cut.has(key)) return null;
+	const cycle = proofWaitPath(graph, id, importer);
+	if (cycle !== null) {
+		graph.cut.add(key);
+		for (const wait of cycle) graph.cut.add(wait);
+		return null;
+	}
+	let targets = graph.waits.get(importer);
+	if (targets === undefined) graph.waits.set(importer, (targets = new Map()));
+	targets.set(id, (targets.get(id) ?? 0) + 1);
+	try {
+		const loaded = await context.load({ id, resolveDependencies: false });
+		return graph.cut.has(key) ? null : loaded;
+	} finally {
+		const count = targets.get(id) - 1;
+		if (count > 0) targets.set(id, count);
+		else targets.delete(id);
+		if (targets.size === 0) graph.waits.delete(importer);
+	}
+}
+
 async function loadImportMetadata(
 	context,
 	imports,
 	importer,
 	metadataKey,
-	{ failLoud = false } = {},
+	proofWaits,
+	{ failLoud = false, hints = null } = {},
 ) {
 	if (typeof context.resolve !== 'function' || typeof context.load !== 'function') return new Set();
 	const proven = new Set();
@@ -327,7 +443,7 @@ async function loadImportMetadata(
 				// Avoid recursively walking the dependency graph merely to classify one
 				// imported JSX binding. A pre-transform snapshot is handled below by the
 				// live-graph and exact-filesystem fallbacks.
-				loadedModuleInfo = await context.load({ id: resolved.id, resolveDependencies: false });
+				loadedModuleInfo = await loadProofModule(context, proofWaits, importer, resolved.id);
 			} catch (error) {
 				if (failLoud)
 					throw new Error(
@@ -338,11 +454,20 @@ async function loadImportMetadata(
 					);
 				return;
 			}
+			if (loadedModuleInfo === null) return;
 			// Rollup/Vite may return the pre-transform ModuleInfo snapshot from
 			// `this.load()` while publishing transform metadata to the live graph
 			// record. Read that record after the awaited load without touching the
 			// unsupported `ModuleInfo.code` accessor.
 			const moduleInfo = context.getModuleInfo?.(resolved.id) ?? loadedModuleInfo;
+			// Hints ride on the same load. An importer reads one only as an
+			// optimization the runtime still checks, so it needs no final-code proof.
+			const hinted = hints === null ? null : moduleInfo?.meta?.[hints.metadataKey]?.exports;
+			if (Array.isArray(hinted)) {
+				for (const { imported } of candidates) {
+					if (hinted.includes(imported)) hints.exports.add(voidImportKey(request, imported));
+				}
+			}
 			const metadata = moduleInfo?.meta?.[metadataKey];
 			if (metadata == null) return;
 			const valid =
@@ -357,14 +482,19 @@ async function loadImportMetadata(
 			}
 			if (
 				metadataKey === VOID_EXPORTS_META &&
-				(typeof loadedModuleInfo?.code !== 'string' ||
-					metadata.fingerprint !== compiledCodeFingerprint(loadedModuleInfo.code))
+				!voidExportsProofHolds(context, proofWaits, metadata, loadedModuleInfo?.code)
 			) {
 				return;
 			}
 			for (const { imported, exported } of candidates) {
 				if (!metadata.exports.includes(imported)) continue;
 				proven.add(voidImportKey(request, imported));
+				if (Array.isArray(metadata.lite) && metadata.lite.includes(imported))
+					proven.add(liteImportKey(request, imported));
+				if (Array.isArray(metadata.strongLite) && metadata.strongLite.includes(imported))
+					proven.add(strongLiteImportKey(request, imported));
+				if (Array.isArray(metadata.anchorless) && metadata.anchorless.includes(imported))
+					proven.add(anchorlessImportKey(request, imported));
 				if (exported !== undefined) proven.add(`export\0${exported}`);
 			}
 		}),
@@ -372,8 +502,10 @@ async function loadImportMetadata(
 	return proven;
 }
 
-async function loadVoidComponentImports(context, imports, importer) {
-	return loadImportMetadata(context, imports, importer, VOID_EXPORTS_META);
+async function loadVoidComponentImports(context, imports, importer, proofWaits, memoExports) {
+	return loadImportMetadata(context, imports, importer, VOID_EXPORTS_META, proofWaits, {
+		hints: { metadataKey: COMPILER_MEMO_EXPORTS_META, exports: memoExports },
+	});
 }
 
 async function readDescriptorSourceAnalysis(id, descriptorSourceCache) {
@@ -601,6 +733,52 @@ async function loadClientOnlyImports(context, compiler, requests, importer) {
 	);
 }
 
+// This package's runtime trees, as Vite spells module IDs. Resolved on first
+// use: the browser playground evaluates this module without a file URL.
+let runtimeRoots = null;
+function octaneRuntimeRoots() {
+	if (runtimeRoots === null) {
+		const packageRoot = realRoot(
+			nodePath.resolve(nodeUrl.fileURLToPath(import.meta.url), '../../..'),
+		);
+		runtimeRoots = ['src', 'dist'].map((tree) =>
+			nodePath.join(packageRoot, tree, nodePath.sep).replaceAll('\\', '/'),
+		);
+	}
+	return runtimeRoots;
+}
+
+// The last fold of each runtime module. Vitest starts one dev server per
+// project in a single process, and each would otherwise parse the same large
+// runtime module again. A fold depends only on the source text, so an entry is
+// reused only for identical text; there is one entry per runtime module.
+const servedProfileFolds = new Map();
+
+// Vite's dev server leaves `define` to the client as runtime globals, so a
+// served Octane runtime module would keep every profiling guard as a global
+// read on its hot paths and still load profiling.ts and devtools-hook.ts. With
+// profiling off, fold those guards the way a production build does. Only
+// modules of this package qualify: its side-effect-free contract is what lets
+// the fold drop imports that only profiling used.
+function foldServedProfileGuards(context, code, id) {
+	if (!code.includes(PROFILE_DEFINE) || typeof context.parse !== 'function') return null;
+	const file = cleanModuleId(id).replaceAll('\\', '/');
+	if (!octaneRuntimeRoots().some((root) => file.startsWith(root))) return null;
+	const typescript = /\.[cm]?ts$/.test(file);
+	if (!typescript && !/\.[cm]?js$/.test(file)) return null;
+	const cached = servedProfileFolds.get(file);
+	if (cached?.source === code) return cached.folded;
+	let program;
+	try {
+		program = context.parse(code, { lang: typescript ? 'ts' : 'js', preserveParens: true });
+	} catch {
+		return null;
+	}
+	const folded = foldProfileGuards(code, program, false);
+	servedProfileFolds.set(file, { source: code, folded });
+	return folded;
+}
+
 function assertProfilingDefineAvailable(definitions, enabled) {
 	if (
 		definitions === null ||
@@ -650,6 +828,8 @@ export function octane(options = {}) {
 		);
 	}
 	let hmrEnabled = options.hmr;
+	let resolvedConfig;
+	let foldDevProfileGuards = false;
 	let specializeProductionRoots = false;
 	let specializeCssModuleConstants = false;
 	let emitClientReferenceManifest = options.ssr !== true;
@@ -697,6 +877,9 @@ export function octane(options = {}) {
 	// CSS naming/virtual providers can differ between them, so never key a proof
 	// merely by its path or share a previous build's final-module snapshot.
 	const cssModuleProofStates = new Map();
+	// Each environment has its own module graph, so its proof loads form their
+	// own wait-for graph.
+	const proofWaitGraphs = new Map();
 	let textTypeProject = null;
 	let createTextTypeProject = null;
 	let typedTextEnabled = false;
@@ -763,6 +946,12 @@ export function octane(options = {}) {
 		}
 		return state;
 	};
+	const proofWaitGraph = (context, environment) => {
+		const key = context.environment ?? environment;
+		let graph = proofWaitGraphs.get(key);
+		if (graph === undefined) proofWaitGraphs.set(key, (graph = createProofWaitGraph()));
+		return graph;
+	};
 	// Rollup's one-shot build graph can safely load an unresolved virtual module
 	// to collect its transform metadata. Vite's dev plugin container cannot: a
 	// transform awaiting `this.load()` for a virtual dependency can wait on the
@@ -774,10 +963,12 @@ export function octane(options = {}) {
 		_descriptorPreflightAuthority: DESCRIPTOR_PREFLIGHT_AUTHORITY,
 		root: projectRoot,
 		exclude: options.exclude,
+		output: options.output,
 		profile: profileEnabled,
 		strong: options.strong,
 		knownAttributeSpreads: options.knownAttributeSpreads,
 		domBindingFixedProps: options.domBindingFixedProps,
+		opaqueSignalHandles: options.opaqueSignalHandles,
 		renderers: options.renderers,
 		requireDirective,
 		warn,
@@ -792,15 +983,18 @@ export function octane(options = {}) {
 		descriptorExportCache.clear();
 		descriptorGraphCache.clear();
 		cssModuleProofStates.clear();
+		proofWaitGraphs.clear();
 		projectRoot = nodePath.resolve(root);
 		compiler = createOctaneCompiler({
 			_descriptorPreflightAuthority: DESCRIPTOR_PREFLIGHT_AUTHORITY,
 			root: projectRoot,
 			exclude: options.exclude,
+			output: options.output,
 			profile: profileEnabled,
 			strong: options.strong,
 			knownAttributeSpreads: options.knownAttributeSpreads,
 			domBindingFixedProps: options.domBindingFixedProps,
+			opaqueSignalHandles: options.opaqueSignalHandles,
 			renderers: options.renderers,
 			requireDirective,
 			warn,
@@ -809,13 +1003,36 @@ export function octane(options = {}) {
 
 	// Parse authored source once, synchronously classify every applicable adapter
 	// concern, then let the AST fall out of scope before any graph loading begins.
-	// Compilation keeps its independent authoritative parser.
+	// Compilation keeps its independent authoritative parser. A module Octane
+	// will not compile reads only some of these facts, and is parsed only when
+	// one of them needs the AST.
 	const preflightFor = (authoredSource, id, server, specializeVoidRoots) => {
 		const environment = server ? 'server' : 'client';
 		const key = `${environment}\0${specializeCssModuleConstants}\0${specializeVoidRoots}\0${id}`;
 		const digest = compiledCodeFingerprint(authoredSource);
 		const cached = preflightCache.get(key);
 		if (cached !== undefined && cached.digest === digest) return cached;
+		const scope = compiler._preflightScope(authoredSource, id);
+		const compiled = scope === 'compile';
+		const voidImports = specializeVoidRoots && scope !== 'none';
+		// Only compilation reads JSX-tag candidates. A re-export candidate is kept
+		// only for a module absent from disk, which publishes it as barrel
+		// metadata; importers read a filesystem barrel directly.
+		const descriptorImports = compiled || !nodeFs.existsSync(cleanModuleId(id));
+		if (!compiled && !voidImports && !descriptorImports) {
+			const preflight = {
+				digest,
+				cssRequests: NO_PREFLIGHT_FACTS,
+				descriptorExportsReceipt: null,
+				descriptorImports: NO_PREFLIGHT_FACTS,
+				serverImportRequests: server
+					? retainedPreflightFacts(compiler.findServerImportRequests(authoredSource, id))
+					: NO_PREFLIGHT_FACTS,
+				voidImports: NO_PREFLIGHT_FACTS,
+			};
+			preflightCache.set(key, preflight);
+			return preflight;
+		}
 		let ast;
 		try {
 			ast = parseModule(authoredSource, id);
@@ -838,22 +1055,27 @@ export function octane(options = {}) {
 		}
 		const preflight = {
 			digest,
-			cssRequests: specializeCssModuleConstants
-				? retainedPreflightFacts(
-						compiler.findCssModuleImportRequests(authoredSource, id, environment, ast),
+			cssRequests:
+				compiled && specializeCssModuleConstants
+					? retainedPreflightFacts(
+							compiler.findCssModuleImportRequests(authoredSource, id, environment, ast),
+						)
+					: NO_PREFLIGHT_FACTS,
+			descriptorExportsReceipt: compiled
+				? compiler._analyzeDescriptorChildrenExports(
+						DESCRIPTOR_PREFLIGHT_AUTHORITY,
+						authoredSource,
+						id,
+						ast,
 					)
+				: null,
+			descriptorImports: descriptorImports
+				? retainedPreflightFacts(findDescriptorChildrenImports(ast, id))
 				: NO_PREFLIGHT_FACTS,
-			descriptorExportsReceipt: compiler._analyzeDescriptorChildrenExports(
-				DESCRIPTOR_PREFLIGHT_AUTHORITY,
-				authoredSource,
-				id,
-				ast,
-			),
-			descriptorImports: retainedPreflightFacts(findDescriptorChildrenImports(ast, id)),
 			serverImportRequests: server
 				? retainedPreflightFacts(compiler.findServerImportRequests(ast, id))
 				: NO_PREFLIGHT_FACTS,
-			voidImports: specializeVoidRoots
+			voidImports: voidImports
 				? retainedPreflightFacts(findVoidComponentImports(ast, id))
 				: NO_PREFLIGHT_FACTS,
 		};
@@ -882,14 +1104,31 @@ export function octane(options = {}) {
 				// profiling branches completely. Keep it defined in both modes so Vite's
 				// production optimizer never has to preserve a runtime feature check.
 				define: {
-					__OCTANE_PROFILE_ENABLED__: JSON.stringify(profileEnabled),
+					[PROFILE_DEFINE]: JSON.stringify(profileEnabled),
 				},
 				// Raw Octane dependencies must reach this plugin, never esbuild's dep
 				// prebundle or Node's SSR external loader. A raw package can also declare
 				// exact dependencies or an installed `family/*` that must stay out of
 				// Vite's rolling optimizer; this keeps module-identity-sensitive packages
 				// from mixing cold-crawl generations.
-				optimizeDeps: { exclude: optimizeDepsExclusions },
+				optimizeDeps: {
+					exclude: optimizeDepsExclusions,
+					// The dependency optimizer ignores `define`, so a pre-bundled octane
+					// would read the profiling constant as a global and bundle the
+					// profiler. Give Rolldown the constant so it folds both away. Vite
+					// copies a deprecated `esbuildOptions.define` here only when this is
+					// unset, so carry it over.
+					rolldownOptions: {
+						transform: {
+							define: {
+								...(config.optimizeDeps?.rolldownOptions?.transform?.define === undefined
+									? config.optimizeDeps?.esbuildOptions?.define
+									: null),
+								[PROFILE_DEFINE]: JSON.stringify(profileEnabled),
+							},
+						},
+					},
+				},
 				resolve: {
 					dedupe: ['octane'],
 					// Vite's default extension list, plus .tsrx: extensionless imports
@@ -903,6 +1142,10 @@ export function octane(options = {}) {
 			};
 		},
 		configResolved(config) {
+			resolvedConfig = config;
+			if (options.output === 'ts' && config.oxc === false) {
+				throw new Error("octane output: 'ts' requires Vite's OXC transform to be enabled.");
+			}
 			logger = config.logger ?? null;
 			// Re-resolve from the finalized command (ResolvedConfig.command) so a
 			// command-aware `'auto'` signal stays correct even if `config` ran
@@ -916,6 +1159,7 @@ export function octane(options = {}) {
 			if (realRoot(nodePath.resolve(config.root)) !== realRoot(projectRoot))
 				resetCompiler(config.root);
 			if (hmrEnabled === undefined) hmrEnabled = config.command === 'serve';
+			foldDevProfileGuards = config.command === 'serve' && !profileEnabled;
 			emitClientReferenceManifest =
 				options.ssr === false || (options.ssr !== true && !config.build?.ssr);
 			// A watch rebuild does not guarantee that an importer's cached transform
@@ -932,11 +1176,18 @@ export function octane(options = {}) {
 			}
 		},
 		buildStart() {
-			if (this.environment === undefined) cssModuleProofStates.clear();
-			else cssModuleProofStates.delete(this.environment);
+			if (this.environment === undefined) {
+				cssModuleProofStates.clear();
+				proofWaitGraphs.clear();
+			} else {
+				cssModuleProofStates.delete(this.environment);
+				proofWaitGraphs.delete(this.environment);
+			}
 		},
 		buildEnd(error) {
 			if (error) releaseTextTypeProject();
+			if (this.environment === undefined) proofWaitGraphs.clear();
+			else proofWaitGraphs.delete(this.environment);
 			const keys = this.environment === undefined ? ['client', 'server'] : [this.environment];
 			for (const key of keys) {
 				const state = cssModuleProofStates.get(key);
@@ -1013,6 +1264,10 @@ export function octane(options = {}) {
 			return resolved ?? null;
 		},
 		transform(code, id, transformOptions) {
+			const foldedCode = foldDevProfileGuards ? foldServedProfileGuards(this, code, id) : null;
+			if (foldedCode !== null) code = foldedCode;
+			// A module the compiler leaves alone still serves its folded code.
+			const passThrough = foldedCode === null ? null : { code, map: null };
 			const server =
 				forceSsr !== undefined
 					? forceSsr
@@ -1034,65 +1289,10 @@ export function octane(options = {}) {
 					options.cssModuleConstants,
 					cssModuleProofState(this, environment),
 				);
-			const transformWithProof = (
-				proven,
-				descriptorProven = new Set(),
-				clientOnlyImports = [],
-				cssImports = null,
-			) => {
-				const propagatedExports = [...descriptorProven]
-					.filter((key) => key.startsWith('export\0'))
-					.map((key) => key.slice('export\0'.length));
-				// Mint this transform's one-use proof from the reusable receipt.
-				const descriptorExportsProof =
-					preflight.descriptorExportsReceipt === null
-						? null
-						: compiler._prepareDescriptorChildrenExports(
-								DESCRIPTOR_PREFLIGHT_AUTHORITY,
-								preflight.descriptorExportsReceipt,
-								code,
-								id,
-							);
-				const result = compiler.transform(code, id, {
-					...(descriptorExportsProof === null
-						? null
-						: { _descriptorChildrenExportsProof: descriptorExportsProof }),
-					environment,
-					...(typedTextEnabled ? { textTypeFacts: textFactsFor(code, id, environment) } : null),
-					hmr: !server && hmrEnabled ? 'vite' : false,
-					// DEV server transforms also carry SSR-only diagnostics. HMR itself
-					// remains client-only; an explicit `hmr: false` keeps both transforms
-					// on the production compiler path.
-					dev: !!hmrEnabled,
-					profile: !server && profileEnabled,
-					collectVoidComponentExports:
-						specializeProductionRoots && !server && !hmrEnabled && !profileEnabled,
-					...(clientOnlyImports.length > 0 ? { clientOnlyImports } : null),
-					...(proven?.size
-						? {
-								isVoidComponentImport: (request, imported) =>
-									proven.has(voidImportKey(request, imported)),
-							}
-						: {}),
-					...(descriptorProven.size
-						? {
-								isDescriptorChildrenImport: (request, imported) =>
-									descriptorProven.has(voidImportKey(request, imported)),
-							}
-						: {}),
-					...(cssImports === null
-						? null
-						: {
-								resolveCssModuleConstant: cssImports.resolve,
-								// A real class read must survive in each independently retained
-								// template. A global side-effect override would make styles from
-								// an unused exported component newly eager.
-								preserveCssModuleReferences: cssImports.requests,
-							}),
-				});
+			const finishTransform = (result, cssImports, propagatedExports) => {
 				if (result === null) {
 					options.__onIndependentWidgets?.(id, environment, [], false);
-					if (propagatedExports.length === 0) return null;
+					if (propagatedExports.length === 0) return passThrough;
 					return {
 						code,
 						map: null,
@@ -1122,10 +1322,37 @@ export function octane(options = {}) {
 					meta[INDEPENDENT_WIDGETS_META] = result.independentWidgets;
 				}
 				if (result.kind === 'compile' && Array.isArray(result.voidComponentExports)) {
+					const voidExports = result.voidComponentExports;
+					// Only a module with void exports can satisfy an importer's proof,
+					// so only it pays for the reprint-tolerant structural fingerprint.
+					const structure =
+						voidExports.length === 0 ? null : structuralCodeFingerprint(this, result.code);
+					// Lite exports are void exports whose bodies an importer may also run
+					// without a Block, and anchorless ones are lite exports whose calls also
+					// need no anchor; Strong importers alone may run the strongLite ones. The
+					// same fingerprint vouches for every list.
+					const lite = (result.liteComponentExports ?? []).filter((name) =>
+						voidExports.includes(name),
+					);
+					const anchorless = (result.anchorlessComponentExports ?? []).filter((name) =>
+						lite.includes(name),
+					);
+					const strongLite = (result.strongLiteComponentExports ?? []).filter((name) =>
+						voidExports.includes(name),
+					);
 					meta[VOID_EXPORTS_META] = {
-						exports: result.voidComponentExports ?? [],
+						exports: voidExports,
 						fingerprint: compiledCodeFingerprint(result.code),
+						...(structure === null ? null : { structure }),
+						...(lite.length === 0 ? null : { lite }),
+						...(strongLite.length === 0 ? null : { strongLite }),
+						...(anchorless.length === 0 ? null : { anchorless }),
 					};
+				}
+				// A hint, not a proof: the importer's region still reads the runtime
+				// witness, so a stale entry costs only a region that misses.
+				if (result.kind === 'compile' && Array.isArray(result.compilerMemoExports)) {
+					meta[COMPILER_MEMO_EXPORTS_META] = { exports: result.compilerMemoExports };
 				}
 				if (
 					(result.kind === 'compile' && Array.isArray(result.descriptorChildrenExports)) ||
@@ -1137,12 +1364,132 @@ export function octane(options = {}) {
 						],
 					};
 				}
-				if (result.kind === 'none' && Object.keys(meta).length === 0) return null;
+				if (result.kind === 'none' && Object.keys(meta).length === 0) return passThrough;
 				return {
 					code: result.code,
 					map: result.map,
 					...(Object.keys(meta).length === 0 ? null : { meta }),
 				};
+			};
+
+			const transformWithProof = (
+				proven,
+				descriptorProven = new Set(),
+				clientOnlyImports = [],
+				cssImports = null,
+				memoProven = null,
+			) => {
+				const propagatedExports = [...descriptorProven]
+					.filter((key) => key.startsWith('export\0'))
+					.map((key) => key.slice('export\0'.length));
+				// Mint this transform's one-use proof from the reusable receipt.
+				const descriptorExportsProof =
+					preflight.descriptorExportsReceipt === null
+						? null
+						: compiler._prepareDescriptorChildrenExports(
+								DESCRIPTOR_PREFLIGHT_AUTHORITY,
+								preflight.descriptorExportsReceipt,
+								code,
+								id,
+							);
+				const result = compiler.transform(code, id, {
+					...(descriptorExportsProof === null
+						? null
+						: { _descriptorChildrenExportsProof: descriptorExportsProof }),
+					environment,
+					// Vite applies `resolve.alias` before any plugin's resolveId, so an
+					// alias for bare `octane` would hand server modules the client
+					// runtime. Name the server runtime in the source instead, as compiled
+					// `.tsrx` output already does; resolveId still covers other importers.
+					explicitRuntimeRequests: server,
+					...(typedTextEnabled ? { textTypeFacts: textFactsFor(code, id, environment) } : null),
+					hmr: !server && hmrEnabled ? 'vite' : false,
+					// DEV server transforms also carry SSR-only diagnostics. HMR itself
+					// remains client-only; an explicit `hmr: false` keeps both transforms
+					// on the production compiler path.
+					dev: !!hmrEnabled,
+					profile: !server && profileEnabled,
+					collectVoidComponentExports:
+						specializeProductionRoots && !server && !hmrEnabled && !profileEnabled,
+					...(clientOnlyImports.length > 0 ? { clientOnlyImports } : null),
+					...(proven?.size
+						? {
+								isVoidComponentImport: (request, imported) =>
+									proven.has(voidImportKey(request, imported)),
+								isLiteComponentImport: (request, imported) =>
+									proven.has(liteImportKey(request, imported)),
+								isStrongLiteComponentImport: (request, imported) =>
+									proven.has(strongLiteImportKey(request, imported)),
+								isAnchorlessComponentImport: (request, imported) =>
+									proven.has(anchorlessImportKey(request, imported)),
+							}
+						: {}),
+					// Production client output always answers this, so a component over
+					// an import without a proof publishes none of its own.
+					...(specializeProductionRoots && !server && !hmrEnabled && !profileEnabled
+						? {
+								isCompilerMemoImport: (request, imported) =>
+									memoProven?.has(voidImportKey(request, imported)) === true,
+							}
+						: {}),
+					// Production client output always answers this, so a component over
+					// an import without a proof publishes none of its own.
+					...(specializeProductionRoots && !server && !hmrEnabled && !profileEnabled
+						? {
+								isCompilerMemoImport: (request, imported) =>
+									memoProven?.has(voidImportKey(request, imported)) === true,
+							}
+						: {}),
+					...(descriptorProven.size
+						? {
+								isDescriptorChildrenImport: (request, imported) =>
+									descriptorProven.has(voidImportKey(request, imported)),
+							}
+						: {}),
+					...(cssImports === null
+						? null
+						: {
+								resolveCssModuleConstant: cssImports.resolve,
+								// A real class read must survive in each independently retained
+								// template. A global side-effect override would make styles from
+								// an unused exported component newly eager.
+								preserveCssModuleReferences: cssImports.requests,
+							}),
+				});
+				if (result?.lang === 'ts') {
+					// Vite owns this downstream compiler and map composition. Keep it
+					// lazy so ordinary JS compilation and browser imports do not load Vite.
+					const oxc = this.environment?.config?.oxc ?? resolvedConfig?.oxc ?? {};
+					if (oxc === false) {
+						throw new Error("octane output: 'ts' requires Vite's OXC transform to be enabled.");
+					}
+					const {
+						include,
+						exclude,
+						jsxInject,
+						jsxRefreshInclude,
+						jsxRefreshExclude,
+						...transformOptions
+					} = oxc;
+					return import('vite')
+						.then(({ transformWithOxc }) =>
+							transformWithOxc(
+								result.code,
+								cleanModuleId(id),
+								{ ...transformOptions, lang: 'ts', sourcemap: true },
+								result.map,
+								resolvedConfig,
+							),
+						)
+						.then((emitted) =>
+							finishTransform(
+								{ ...result, code: emitted.code, map: emitted.map },
+								cssImports,
+								propagatedExports,
+							),
+						);
+				}
+				return finishTransform(result, cssImports, propagatedExports);
 			};
 
 			if (server) {
@@ -1176,8 +1523,15 @@ export function octane(options = {}) {
 			if (voidImports.length === 0 && descriptorImports.length === 0 && cssRequests.length === 0) {
 				return transformWithProof(null);
 			}
+			const memoProven = new Set();
 			return Promise.all([
-				loadVoidComponentImports(this, voidImports, id),
+				loadVoidComponentImports(
+					this,
+					voidImports,
+					id,
+					proofWaitGraph(this, environment),
+					memoProven,
+				),
 				loadDescriptorChildrenImports(
 					this,
 					descriptorImports,
@@ -1189,7 +1543,7 @@ export function octane(options = {}) {
 				),
 				loadCssImports(),
 			]).then(([proven, descriptorProven, cssImports]) =>
-				transformWithProof(proven, descriptorProven, [], cssImports),
+				transformWithProof(proven, descriptorProven, [], cssImports, memoProven),
 			);
 		},
 	};

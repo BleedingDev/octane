@@ -1,5 +1,387 @@
 # @octanejs/rsbuild-plugin
 
+## 0.1.65
+
+### Patch Changes
+
+- Updated dependencies [860e865]
+- Updated dependencies [f2bcd28]
+- Updated dependencies [860e865]
+- Updated dependencies [177f44e]
+  - @octanejs/rspack-plugin@0.2.4
+  - @octanejs/app-core@0.1.7
+
+## 0.1.64
+
+### Patch Changes
+
+- Updated dependencies [64c33de]
+- Updated dependencies [7dcbc75]
+- Updated dependencies [4fe0867]
+- Updated dependencies [a0c7f0e]
+- Updated dependencies [6518d90]
+- Updated dependencies [a03d79d]
+- Updated dependencies [dd8805f]
+- Updated dependencies [4cc2a1e]
+- Updated dependencies [4ff7d0d]
+- Updated dependencies [974a3a6]
+- Updated dependencies [05699de]
+- Updated dependencies [773144a]
+- Updated dependencies [c30f912]
+- Updated dependencies [d7c1de0]
+- Updated dependencies [152e4f7]
+- Updated dependencies [0258e74]
+- Updated dependencies [36c6bf3]
+- Updated dependencies [b27d8db]
+- Updated dependencies [5d6d02c]
+- Updated dependencies [6101f66]
+- Updated dependencies [2fe1f9f]
+- Updated dependencies [54ee25f]
+- Updated dependencies [2075c0e]
+- Updated dependencies [8c09d81]
+- Updated dependencies [bdc21d8]
+- Updated dependencies [c9d4793]
+- Updated dependencies [440fb6f]
+  - octane@0.13.0
+  - @octanejs/app-core@0.1.6
+  - @octanejs/rspack-plugin@0.2.3
+
+## 0.1.63
+
+### Patch Changes
+
+- Updated dependencies [28552d9]
+- Updated dependencies [f934732]
+- Updated dependencies [7d5a0df]
+- Updated dependencies [ae05de0]
+- Updated dependencies [dbab7f5]
+- Updated dependencies [ec86041]
+  - octane@0.12.0
+  - @octanejs/app-core@0.1.5
+  - @octanejs/rspack-plugin@0.2.2
+
+## 0.1.62
+
+### Patch Changes
+
+- Updated dependencies [7540c35]
+- Updated dependencies [f6b6615]
+- Updated dependencies [293d143]
+- Updated dependencies [9d4c14f]
+- Updated dependencies [b6c040c]
+- Updated dependencies [247dffe]
+- Updated dependencies [3a94771]
+- Updated dependencies [79ca088]
+- Updated dependencies [d1e308b]
+- Updated dependencies [6e6aa98]
+- Updated dependencies [5e922d9]
+- Updated dependencies [8fa3398]
+- Updated dependencies [3557100]
+- Updated dependencies [1fb0ecd]
+- Updated dependencies [37a1c14]
+- Updated dependencies [0d95b26]
+- Updated dependencies [a3dcbd9]
+- Updated dependencies [c0192ec]
+- Updated dependencies [6df3359]
+- Updated dependencies [d30025a]
+- Updated dependencies [0ce371a]
+- Updated dependencies [8444db8]
+- Updated dependencies [78750a0]
+- Updated dependencies [f183be7]
+- Updated dependencies [0f3abca]
+- Updated dependencies [cbc1e8e]
+- Updated dependencies [1048eab]
+- Updated dependencies [188d60b]
+- Updated dependencies [3557100]
+- Updated dependencies [b4a61e7]
+- Updated dependencies [90a57d8]
+- Updated dependencies [47e030e]
+- Updated dependencies [d788d32]
+- Updated dependencies [e2044cb]
+- Updated dependencies [a7ae419]
+- Updated dependencies [21f911d]
+- Updated dependencies [3557100]
+- Updated dependencies [3557100]
+- Updated dependencies [3557100]
+- Updated dependencies [1e74902]
+- Updated dependencies [7e6bda5]
+- Updated dependencies [43b60d9]
+  - octane@0.11.0
+  - @octanejs/app-core@0.1.4
+  - @octanejs/rspack-plugin@0.2.1
+
+## 0.1.61
+
+### Patch Changes
+
+- Updated dependencies [8e16346]
+- Updated dependencies [ceba949]
+- Updated dependencies [0bb170c]
+- Updated dependencies [50e18cc]
+- Updated dependencies [e595a13]
+- Updated dependencies [5722871]
+- Updated dependencies [8a9969c]
+- Updated dependencies [995aa9a]
+- Updated dependencies [8996380]
+- Updated dependencies [b8e55da]
+- Updated dependencies [7e1793f]
+- Updated dependencies [8855e2f]
+- Updated dependencies [7023961]
+  - octane@0.10.1
+  - @octanejs/rspack-plugin@0.2.0
+  - @octanejs/app-core@0.1.3
+
+## 0.1.60
+
+### Patch Changes
+
+- 1d5832e: Honour `server.trustProxy` in the request URL. Behind a proxy that terminates
+  TLS or rewrites `Host`, the Node bridge built every URL from `http://` and the
+  `Host` header, so `Context.url` named a different origin than the browser's and
+  same-origin checks rejected legitimate requests. With `server.trustProxy: true`,
+  `nodeHandler`, the built-in server, `octane-preview`, and the Vite and Rsbuild
+  dev servers take the scheme from the first `X-Forwarded-Proto` entry (`http` or
+  `https` only) and the host from the first `X-Forwarded-Host` entry (a plain
+  `host[:port]` only). A malformed value is ignored, and the path and query always
+  come from the request. `nodeRequestToWebRequest` and `createNodeServer` accept
+  the same `trustProxy` option. The default is unchanged.
+
+  `server.trustProxy` must now be a boolean, so a string such as `'false'` read
+  from an environment variable can no longer enable it.
+- 95090b1: Keep a request path that starts with `//` on the request's own host. The Node
+  bridge resolved the raw request target against the request origin, so a target
+  such as `//evil.example/x` (or `/\evil.example/x`) became host `evil.example`
+  and path `/x` in `Context.url`, and the Vite and Rsbuild dev servers routed it
+  as `/x`. An origin-form target now keeps its whole path and query on the
+  request origin (the `Host` header, or the trusted proxy's with
+  `server.trustProxy`) in `nodeRequestToWebRequest`, the built-in static file
+  layer, and both dev servers. An `http://` or `https://` absolute-form target
+  still keeps its own origin. An absolute-form target with any other scheme, such
+  as `ftp://`, becomes a path under the root instead of a foreign-scheme URL.
+  `@octanejs/app-core/node` exports `nodeRequestUrl`, the URL the bridge gives a
+  Node request.
+- Updated dependencies [ed57b1e]
+- Updated dependencies [8aeb6c0]
+- Updated dependencies [6182678]
+- Updated dependencies [3fb1bec]
+- Updated dependencies [c15aa5a]
+- Updated dependencies [5cad0fa]
+- Updated dependencies [5041f00]
+- Updated dependencies [f7980e0]
+- Updated dependencies [97f1b8e]
+- Updated dependencies [fb404c2]
+- Updated dependencies [9bacb23]
+- Updated dependencies [2f88235]
+- Updated dependencies [8aeb6c0]
+- Updated dependencies [b353f54]
+- Updated dependencies [72cd60b]
+- Updated dependencies [91079dd]
+- Updated dependencies [393b75a]
+- Updated dependencies [f50c128]
+- Updated dependencies [ba46692]
+- Updated dependencies [f69215f]
+- Updated dependencies [9c84293]
+- Updated dependencies [1d5832e]
+- Updated dependencies [95090b1]
+- Updated dependencies [e233e4a]
+- Updated dependencies [087cd77]
+- Updated dependencies [c3c0a3b]
+- Updated dependencies [262926c]
+- Updated dependencies [9dafaef]
+- Updated dependencies [35c0d1b]
+- Updated dependencies [21e0575]
+- Updated dependencies [8b97478]
+- Updated dependencies [ab9a043]
+- Updated dependencies [32e4f3f]
+- Updated dependencies [1de873c]
+- Updated dependencies [7a92ad2]
+- Updated dependencies [a2a0c41]
+- Updated dependencies [e03350a]
+- Updated dependencies [0d6ef67]
+- Updated dependencies [c213e87]
+- Updated dependencies [da6524e]
+- Updated dependencies [ace4737]
+- Updated dependencies [b77ab18]
+- Updated dependencies [1744e83]
+- Updated dependencies [023aa7d]
+- Updated dependencies [82a5f31]
+  - octane@0.10.0
+  - @octanejs/app-core@0.1.2
+  - @octanejs/rspack-plugin@0.1.58
+
+## 0.1.59
+
+### Patch Changes
+
+- Updated dependencies [1aa7696]
+- Updated dependencies [8e68622]
+- Updated dependencies [c1a8faf]
+- Updated dependencies [12c32ec]
+- Updated dependencies [1066cf6]
+- Updated dependencies [00f8304]
+- Updated dependencies [00f8304]
+- Updated dependencies [dfff293]
+- Updated dependencies [00cb8a5]
+- Updated dependencies [39006d3]
+- Updated dependencies [16d6090]
+- Updated dependencies [949894d]
+- Updated dependencies [39cf382]
+- Updated dependencies [6651f44]
+- Updated dependencies [6651f44]
+- Updated dependencies [425a32a]
+- Updated dependencies [02e6726]
+- Updated dependencies [414e192]
+  - octane@0.9.0
+  - @octanejs/app-core@0.1.1
+  - @octanejs/rspack-plugin@0.1.57
+
+## 0.1.58
+
+### Patch Changes
+
+- 53db436: `new RenderRoute({ …, hydrate: 'islands' })` serves a route's server-rendered shell with a renderer-free bootstrap: the shell's module, layout and the renderer never load, and only the page's independent `<Hydrate>` islands activate. The shell's CSS still ships. The Vite build fails if the shell needs client work (hooks, handlers, refs, controlled values, ordinary `<Hydrate>`, `@try`, signal reads, spreads, unchecked components or root boundaries) or if the bootstrap or `preHydrate` hook reaches the renderer. The Rsbuild integration rejects the option for now.
+- Updated dependencies [fbf6e40]
+- Updated dependencies [a50b846]
+- Updated dependencies [9ef7385]
+- Updated dependencies [6ea582e]
+- Updated dependencies [52c9d33]
+- Updated dependencies [8f8349b]
+- Updated dependencies [f355acd]
+- Updated dependencies [53db436]
+- Updated dependencies [3ffd8cc]
+- Updated dependencies [9350268]
+- Updated dependencies [4212874]
+- Updated dependencies [f03d812]
+- Updated dependencies [3315f74]
+- Updated dependencies [f5896c6]
+- Updated dependencies [3770c1e]
+- Updated dependencies [3994e1e]
+- Updated dependencies [6f019c5]
+- Updated dependencies [6c50c70]
+- Updated dependencies [de31710]
+- Updated dependencies [fbaf501]
+- Updated dependencies [70ee6a3]
+- Updated dependencies [ab2798e]
+- Updated dependencies [95421bb]
+- Updated dependencies [9168bf6]
+- Updated dependencies [11a9da9]
+- Updated dependencies [92495b9]
+- Updated dependencies [bfed959]
+- Updated dependencies [c016c2d]
+- Updated dependencies [21c3bfe]
+- Updated dependencies [320f9e3]
+- Updated dependencies [da9b1e4]
+- Updated dependencies [4ab33b6]
+- Updated dependencies [8e90048]
+- Updated dependencies [6bb20ac]
+- Updated dependencies [6959fa0]
+- Updated dependencies [105e0f0]
+- Updated dependencies [0d91b93]
+- Updated dependencies [7698907]
+- Updated dependencies [3baa492]
+- Updated dependencies [1fa3853]
+- Updated dependencies [62e76bf]
+- Updated dependencies [3e3749d]
+- Updated dependencies [a1f136c]
+- Updated dependencies [39f3e97]
+- Updated dependencies [11aebc7]
+- Updated dependencies [416882f]
+- Updated dependencies [3ec43da]
+- Updated dependencies [0b833bb]
+- Updated dependencies [11aebc7]
+- Updated dependencies [bc30a18]
+- Updated dependencies [b319c16]
+- Updated dependencies [53db436]
+- Updated dependencies [bc6761f]
+- Updated dependencies [950ef0b]
+- Updated dependencies [f5644f7]
+- Updated dependencies [5ef4f9a]
+- Updated dependencies [18c1b77]
+- Updated dependencies [2b69387]
+- Updated dependencies [07cc1d2]
+- Updated dependencies [3d0e5e2]
+- Updated dependencies [f647cef]
+- Updated dependencies [8e90048]
+- Updated dependencies [d496796]
+- Updated dependencies [fdf54fe]
+- Updated dependencies [ce97a96]
+- Updated dependencies [dc3e180]
+- Updated dependencies [e219d88]
+- Updated dependencies [ed188d7]
+- Updated dependencies [afbad9f]
+- Updated dependencies [09cf476]
+- Updated dependencies [0887a68]
+- Updated dependencies [b319c16]
+- Updated dependencies [3514dc7]
+- Updated dependencies [3f1a7b2]
+- Updated dependencies [985a81e]
+- Updated dependencies [cb71034]
+- Updated dependencies [69b02f1]
+- Updated dependencies [3041f5d]
+- Updated dependencies [b58c783]
+- Updated dependencies [02e4eb0]
+- Updated dependencies [5f354d2]
+- Updated dependencies [02e4eb0]
+- Updated dependencies [ad203e9]
+- Updated dependencies [5e586e2]
+- Updated dependencies [cdc9b07]
+- Updated dependencies [90c209e]
+- Updated dependencies [f34be34]
+- Updated dependencies [d5030cf]
+- Updated dependencies [a9594d0]
+- Updated dependencies [15c7b97]
+- Updated dependencies [3971840]
+- Updated dependencies [d930afb]
+- Updated dependencies [d930afb]
+- Updated dependencies [6615a19]
+- Updated dependencies [791f12e]
+- Updated dependencies [0a14c20]
+- Updated dependencies [9aa6736]
+- Updated dependencies [541ecdc]
+- Updated dependencies [5ef4f9a]
+- Updated dependencies [e93bb26]
+- Updated dependencies [97618d7]
+- Updated dependencies [b5277d1]
+- Updated dependencies [5ef4f9a]
+- Updated dependencies [648a8d2]
+- Updated dependencies [63f07f5]
+- Updated dependencies [1d33932]
+- Updated dependencies [2b4b3fc]
+- Updated dependencies [b98179f]
+- Updated dependencies [2b69559]
+- Updated dependencies [5ef4f9a]
+- Updated dependencies [1c44df5]
+- Updated dependencies [f151614]
+- Updated dependencies [f151614]
+- Updated dependencies [1c44df5]
+- Updated dependencies [dc4800b]
+- Updated dependencies [cda985b]
+- Updated dependencies [b6a414a]
+- Updated dependencies [09565b4]
+- Updated dependencies [752028d]
+- Updated dependencies [b6a414a]
+- Updated dependencies [0339abc]
+- Updated dependencies [e936a90]
+- Updated dependencies [dc4800b]
+- Updated dependencies [dc4800b]
+- Updated dependencies [752028d]
+- Updated dependencies [752028d]
+- Updated dependencies [dc4800b]
+- Updated dependencies [54ff59e]
+- Updated dependencies [25017f3]
+- Updated dependencies [c2fea71]
+- Updated dependencies [5ef4f9a]
+- Updated dependencies [27c2a12]
+- Updated dependencies [b682c2b]
+- Updated dependencies [56de31a]
+- Updated dependencies [ad12525]
+- Updated dependencies [85cb387]
+- Updated dependencies [7422815]
+- Updated dependencies [517b61d]
+  - octane@0.8.0
+  - @octanejs/app-core@0.1.0
+  - @octanejs/rspack-plugin@0.1.56
+
 ## 0.1.57
 
 ### Patch Changes

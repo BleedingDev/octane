@@ -1,24 +1,36 @@
-import { dirname, resolve } from 'node:path';
-import ts from 'typescript';
+import { dirname, posix, resolve } from 'node:path';
+import {
+	hasParseErrors,
+	is,
+	isReparsed,
+	parseSourceFile,
+} from '../../../scripts/octane-tsc/native-syntax.mjs';
 import { frameworkErrorSurface } from '../../../scripts/error-codes/generate.mjs';
-import { formatProdErrorMessage } from '../src/error-message.ts';
 
 const HELPER = '__octaneNoArgError';
-const SENTINEL = 8642097531;
-const productionParts = formatProdErrorMessage(SENTINEL, []).split(String(SENTINEL));
+// A specialized module imports its production text from
+// error-message-no-arguments.ts instead of carrying its own copy, so every such
+// module of a consumer's bundle, and every chunk of a split one, shares it.
+const SHARED_FORMATTER = 'formatNoArgumentErrorMessage';
+
+// `filename` is relative to src/, with forward slashes.
+function sharedFormatterSpecifier(filename) {
+	const specifier = posix.relative(posix.dirname(filename), 'error-message-no-arguments.js');
+	return specifier.startsWith('.') ? specifier : `./${specifier}`;
+}
 
 // Only modules whose formatter binding has exclusively literal, zero-argument
 // calls can stop importing the generic formatter. Unknown forms are left alone.
 export function specializeErrorCalls(source, filename, catalog) {
 	const surface = frameworkErrorSurface(filename);
-	if (surface === undefined || productionParts.length !== 3) return source;
+	if (surface === undefined) return source;
 	const formatter = surface === 'server' ? 'formatServerError' : 'formatClientError';
 	const runtime = surface === 'server' ? 'server' : 'client';
-	const sourceFile = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
-	if (sourceFile.parseDiagnostics.length !== 0) return source;
+	const sourceFile = parseSourceFile(filename, source);
+	if (hasParseErrors(sourceFile)) return source;
 
 	const imports = sourceFile.statements.filter((node) => {
-		if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier)) return false;
+		if (!is.isImportDeclaration(node) || !is.isStringLiteral(node.moduleSpecifier)) return false;
 		// Bare and absolute specifiers have different resolution rules, even when
 		// their text happens to resemble the generated file's name.
 		if (!/^\.{1,2}\//.test(node.moduleSpecifier.text)) return false;
@@ -31,7 +43,7 @@ export function specializeErrorCalls(source, filename, catalog) {
 		imports[0].importClause?.isTypeOnly ||
 		imports[0].importClause?.name ||
 		!binding ||
-		!ts.isNamedImports(binding) ||
+		!is.isNamedImports(binding) ||
 		binding.elements.length !== 1 ||
 		binding.elements[0].isTypeOnly ||
 		binding.elements[0].propertyName ||
@@ -41,20 +53,23 @@ export function specializeErrorCalls(source, filename, catalog) {
 	}
 
 	let safe = true;
-	let calls = 0;
+	/** @type {any[]} */
+	const calls = [];
 	function scan(node) {
-		if (ts.isIdentifier(node)) {
+		// JSDoc in a .js module reparses into nodes; it is a comment, not code.
+		if (isReparsed(node)) return;
+		if (is.isIdentifier(node)) {
 			// A caller-local process binding would change the lookup that used to
 			// happen inside the formatter's module. Conservatively skip any module
 			// that mentions process, even when that mention is harmless.
 			if (node.text === 'process' || node.text === HELPER) safe = false;
 			if (node.text === formatter) {
 				const parent = node.parent;
-				if (ts.isImportSpecifier(parent) && parent.name === node) {
+				if (is.isImportSpecifier(parent) && parent.name === node) {
 					// The binding was checked above.
-				} else if (ts.isCallExpression(parent) && parent.expression === node) {
+				} else if (is.isCallExpression(parent) && parent.expression === node) {
 					const code = parent.arguments[0];
-					const raw = code && ts.isNumericLiteral(code) ? code.getText(sourceFile) : '';
+					const raw = code && is.isNumericLiteral(code) ? code.getText(sourceFile) : '';
 					const entry = catalog.codes[raw];
 					if (
 						parent.questionDotToken ||
@@ -71,100 +86,36 @@ export function specializeErrorCalls(source, filename, catalog) {
 					) {
 						safe = false;
 					} else {
-						calls++;
+						calls.push({ call: parent, code: raw, message: entry.message });
 					}
 				} else {
 					safe = false;
 				}
 			}
 		}
-		ts.forEachChild(node, scan);
+		node.forEachChild(scan);
 	}
 	scan(sourceFile);
-	if (!safe || calls === 0) return source;
+	if (!safe || calls.length === 0) return source;
 
-	const factory = ts.factory;
-	const helperCode = factory.createIdentifier('code');
-	const productionExpression = productionParts
-		.slice(1)
-		.reduce(
-			(expression, part) =>
-				factory.createBinaryExpression(
-					factory.createBinaryExpression(
-						expression,
-						factory.createToken(ts.SyntaxKind.PlusToken),
-						helperCode,
-					),
-					factory.createToken(ts.SyntaxKind.PlusToken),
-					factory.createStringLiteral(part),
-				),
-			factory.createStringLiteral(productionParts[0]),
-		);
-	const helper = factory.createFunctionDeclaration(
-		undefined,
-		undefined,
-		HELPER,
-		undefined,
-		[
-			factory.createParameterDeclaration(
-				undefined,
-				undefined,
-				helperCode,
-				undefined,
-				factory.createKeywordTypeNode(ts.SyntaxKind.NumberKeyword),
-			),
-		],
-		factory.createKeywordTypeNode(ts.SyntaxKind.StringKeyword),
-		factory.createBlock([factory.createReturnStatement(productionExpression)], true),
-	);
-	const result = ts.transform(sourceFile, [
-		(context) => {
-			const visit = (node) => {
-				if (
-					ts.isCallExpression(node) &&
-					ts.isIdentifier(node.expression) &&
-					node.expression.text === formatter
-				) {
-					const code = node.arguments[0].getText(sourceFile);
-					return factory.createConditionalExpression(
-						factory.createBinaryExpression(
-							factory.createPropertyAccessExpression(
-								factory.createPropertyAccessExpression(factory.createIdentifier('process'), 'env'),
-								'NODE_ENV',
-							),
-							factory.createToken(ts.SyntaxKind.ExclamationEqualsEqualsToken),
-							factory.createStringLiteral('production'),
-						),
-						undefined,
-						factory.createStringLiteral(catalog.codes[code].message),
-						undefined,
-						factory.createCallExpression(factory.createIdentifier(HELPER), undefined, [
-							factory.createNumericLiteral(code),
-						]),
-					);
-				}
-				return ts.visitEachChild(node, visit, context);
-			};
-			return (file) => {
-				const statements = file.statements
-					.filter((statement) => statement !== imports[0])
-					.map((statement) => ts.visitNode(statement, visit));
-				let index = 0;
-				while (
-					index < statements.length &&
-					(ts.isImportDeclaration(statements[index]) ||
-						(ts.isExpressionStatement(statements[index]) &&
-							ts.isStringLiteral(statements[index].expression)))
-				)
-					index++;
-				statements.splice(index, 0, helper);
-				return factory.updateSourceFile(file, statements);
-			};
+	// Splice the edits into the authored text, so comments, directives and pure
+	// annotations stay where they were; esbuild prints the published module.
+	// Each replacement is parenthesized, so it binds like the call it replaces.
+	const edits = [
+		{
+			start: imports[0].getStart(sourceFile),
+			end: imports[0].end,
+			text: `import { ${SHARED_FORMATTER} as ${HELPER} } from ${JSON.stringify(sharedFormatterSpecifier(filename))};`,
 		},
-	]);
-	try {
-		return ts.createPrinter().printFile(result.transformed[0]);
-	} finally {
-		result.dispose();
+		...calls.map(({ call, code, message }) => ({
+			start: call.getStart(sourceFile),
+			end: call.end,
+			text: `(process.env.NODE_ENV !== 'production' ? ${JSON.stringify(message)} : ${HELPER}(${code}))`,
+		})),
+	].sort((left, right) => right.start - left.start);
+	let specialized = source;
+	for (const { start, end, text } of edits) {
+		specialized = specialized.slice(0, start) + text + specialized.slice(end);
 	}
+	return specialized;
 }

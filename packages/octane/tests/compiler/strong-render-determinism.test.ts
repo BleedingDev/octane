@@ -7,6 +7,9 @@ const RENDER_IMPURE_CALL = 'OCTANE_STRONG_RENDER_IMPURE_CALL';
 const RENDER_LOCALE_FORMAT = 'OCTANE_STRONG_RENDER_LOCALE_FORMAT';
 const RENDER_STATE_UPDATE = 'OCTANE_STRONG_RENDER_STATE_UPDATE';
 const RENDER_REF_READ = 'OCTANE_STRONG_RENDER_REF_READ';
+const RENDER_SIDE_EFFECT = 'OCTANE_STRONG_RENDER_SIDE_EFFECT';
+const RENDER_AMBIENT_READ = 'OCTANE_STRONG_RENDER_AMBIENT_READ';
+const IMPURE_UPDATER = 'OCTANE_STRONG_IMPURE_UPDATER';
 
 const IMPORTS = "import { useEffect, useLayoutEffect, useRef, useState } from 'octane';\n";
 const MODES = [
@@ -73,16 +76,18 @@ describe('Strong render-phase array callbacks', () => {
   const value = ${call};
   return <p>{String(value)}{seen.length}</p>;
 }`;
-		expectStrongError(source, '/src/App.tsx', RENDER_IMPURE_CALL);
+		expectStrongError(source, '/src/App.tsrx', RENDER_IMPURE_CALL);
 	});
 
-	it('rejects the .tsx probe keys and children rendered from .map', () => {
-		const key = `export function A({ items }) { return <ul>{items.map(i => <li key={Math.random()}>{i.name}</li>)}</ul>; }`;
-		const child = `export function A({ items }) { return <ul>{items.map(i => <li key={i.id}>{Math.random()}</li>)}</ul>; }`;
-		expectStrongError(key, '/src/App.tsx', RENDER_IMPURE_CALL);
-		expectStrongError(child, '/src/App.tsx', RENDER_IMPURE_CALL);
-		expect(messageOf(key, '/src/App.tsx', RENDER_IMPURE_CALL)).toContain('stable ID from the item');
-		expect(messageOf(child, '/src/App.tsx', RENDER_IMPURE_CALL)).toContain(
+	it('rejects random row-root keys and row children in @for', () => {
+		const key = `export function A({ items }) @{ <ul>@for (const i of items) { <li key={Math.random()}>{i.name as string}</li> }</ul> }`;
+		const child = `export function A({ items }) @{ <ul>@for (const i of items; key i.id) { <li>{String(Math.random())}</li> }</ul> }`;
+		expectStrongError(key, '/src/App.tsrx', RENDER_IMPURE_CALL);
+		expectStrongError(child, '/src/App.tsrx', RENDER_IMPURE_CALL);
+		expect(messageOf(key, '/src/App.tsrx', RENDER_IMPURE_CALL)).toContain(
+			'stable ID from the item',
+		);
+		expect(messageOf(child, '/src/App.tsrx', RENDER_IMPURE_CALL)).toContain(
 			'Read time or randomness outside render',
 		);
 	});
@@ -90,10 +95,10 @@ describe('Strong render-phase array callbacks', () => {
 	it('follows callbacks passed by reference and applies the other render rules', () => {
 		expectStrongError(
 			`export function App({ items }) {
-  const renderItem = (item) => <li key={item.id}>{Date.now()}</li>;
-  return <ul>{items.map(renderItem)}</ul>;
+  const label = (item) => item.name + Date.now();
+  return <p>{items.map(label).join(', ')}</p>;
 }`,
-			'/src/App.tsx',
+			'/src/App.tsrx',
 			RENDER_IMPURE_CALL,
 		);
 		expectStrongError(
@@ -102,15 +107,15 @@ describe('Strong render-phase array callbacks', () => {
   items.forEach(setSelected);
   return <p>{selected}</p>;
 }`,
-			'/src/App.tsx',
+			'/src/App.tsrx',
 			RENDER_STATE_UPDATE,
 		);
 		expectStrongError(
 			`${IMPORTS}export function App({ items }) {
   const widths = useRef({});
-  return <ul>{items.map((item) => <li key={item.id}>{widths.current[item.id]}</li>)}</ul>;
+  return <p>{items.map((item) => widths.current[item.id]).join(', ')}</p>;
 }`,
-			'/src/App.tsx',
+			'/src/App.tsrx',
 			RENDER_REF_READ,
 		);
 	});
@@ -149,10 +154,10 @@ export function App({ items }) {
   const steps = items.map(function* () { Octane.flushSync(() => {}); });
   return <p>{steps.length}</p>;
 }`;
-		expectStrongError(source, '/src/App.tsx', 'OCTANE_STRONG_COMPAT_IMPORT');
+		expectStrongError(source, '/src/App.tsrx', 'OCTANE_STRONG_COMPAT_IMPORT');
 		expectStrongValid(
 			source.replace('Octane.flushSync(() => {});', 'yield Math.random();'),
-			'/src/App.tsx',
+			'/src/App.tsrx',
 		);
 	});
 
@@ -168,7 +173,7 @@ export function App({ items, request }) {
   request.then(() => Date.now());
   return <button onClick={() => items.forEach((item) => setPicked(item.id + Date.now()))}>{String(seeds.length + doubled.length + stable.length)}{picked}</button>;
 }`,
-			'/src/App.tsx',
+			'/src/App.tsrx',
 		);
 	});
 });
@@ -182,12 +187,12 @@ describe('Strong random IDs during render', () => {
 		['const aliases', '(() => { const c = crypto; return c.randomUUID(); })()'],
 	])('rejects %s and suggests useId', (_label, call) => {
 		const source = `export function App() { const id = ${call}; return <p id={String(id)} />; }`;
-		expectStrongError(source, '/src/App.tsx', RENDER_IMPURE_CALL);
-		expect(messageOf(source, '/src/App.tsx', RENDER_IMPURE_CALL)).toContain('useId()');
+		expectStrongError(source, '/src/App.tsrx', RENDER_IMPURE_CALL);
+		expect(messageOf(source, '/src/App.tsrx', RENDER_IMPURE_CALL)).toContain('useId()');
 	});
 
-	it('rejects random keys in .tsx lists and @for headers with the key replacement', () => {
-		const list = `export function App({ items }) { return <ul>{items.map((item) => <li key={crypto.randomUUID()}>{item.name}</li>)}</ul>; }`;
+	it('rejects random @for row-root and header keys with the key replacement', () => {
+		const list = `export function App({ items }) @{ <ul>@for (const item of items) { <li key={crypto.randomUUID()}>{item.name as string}</li> }</ul> }`;
 		const row = `export function App({ items }) @{
   <ul>
     @for (const item of items; key crypto.randomUUID()) {
@@ -195,8 +200,8 @@ describe('Strong random IDs during render', () => {
     }
   </ul>
 }`;
-		expectStrongError(list, '/src/App.tsx', RENDER_IMPURE_CALL);
-		expect(messageOf(list, '/src/App.tsx', RENDER_IMPURE_CALL)).toContain(
+		expectStrongError(list, '/src/App.tsrx', RENDER_IMPURE_CALL);
+		expect(messageOf(list, '/src/App.tsrx', RENDER_IMPURE_CALL)).toContain(
 			'stable ID from the item',
 		);
 		expectStrongError(row, '/src/App.tsrx', RENDER_IMPURE_CALL);
@@ -214,7 +219,7 @@ describe('Strong random IDs during render', () => {
   return <button onClick={() => setId(crypto.randomUUID())}>{draftId}{id}{String(Boolean(subtle))}{provided.randomUUID()}</button>;
 }
 export function Shadowed({ crypto }) { return <p>{crypto.randomUUID()}</p>; }`,
-			'/src/App.tsx',
+			'/src/App.tsrx',
 		);
 	});
 });
@@ -242,16 +247,16 @@ describe('Strong locale and time-zone formatting during render', () => {
 		['the probe with new Date()', 'new Intl.DateTimeFormat().format(new Date())'],
 	])('rejects %s', (_label, expression) => {
 		const source = `export function App({ t }) { return <p>{${expression}}</p>; }`;
-		expectStrongError(source, '/src/App.tsx', RENDER_LOCALE_FORMAT);
+		expectStrongError(source, '/src/App.tsrx', RENDER_LOCALE_FORMAT);
 	});
 
 	it('names explicit locale and time-zone replacements', () => {
 		const date = `export function App({ t }) { return <p>{new Date(t).toLocaleString()}</p>; }`;
 		const intl = `export function App({ n }) { return <p>{new Intl.NumberFormat().format(n)}</p>; }`;
-		expect(messageOf(date, '/src/App.tsx', RENDER_LOCALE_FORMAT)).toContain(
+		expect(messageOf(date, '/src/App.tsrx', RENDER_LOCALE_FORMAT)).toContain(
 			"toLocaleString('en-US', { timeZone: 'UTC' })",
 		);
-		expect(messageOf(intl, '/src/App.tsx', RENDER_LOCALE_FORMAT)).toContain(
+		expect(messageOf(intl, '/src/App.tsrx', RENDER_LOCALE_FORMAT)).toContain(
 			"new Intl.NumberFormat('en-US')",
 		);
 	});
@@ -260,19 +265,19 @@ describe('Strong locale and time-zone formatting during render', () => {
 		expectStrongError(
 			`const format = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium' });
 export function App({ t }) { return <p>{format.format(t)}</p>; }`,
-			'/src/App.tsx',
+			'/src/App.tsrx',
 			RENDER_LOCALE_FORMAT,
 		);
 		expectStrongError(
 			`export function App({ n }) { return <p>{numbers.format(n)}</p>; }
 const numbers = new Intl.NumberFormat();`,
-			'/src/App.tsx',
+			'/src/App.tsrx',
 			RENDER_LOCALE_FORMAT,
 		);
 		expectStrongError(
 			`const format = new Intl.DateTimeFormat();
 export function App({ t }) { const local = format; const again = local; return <p>{again.format(t)}</p>; }`,
-			'/src/App.tsx',
+			'/src/App.tsrx',
 			RENDER_LOCALE_FORMAT,
 		);
 	});
@@ -290,14 +295,14 @@ export function App({ t }) {
   const [last, record] = useReducer((current, next) => new Date(next).toLocaleTimeString(), '');
   return <button onClick={() => { setLog((current) => stamp(current, t)); record(t); }}>{log.length}{last}</button>;
 }`,
-			'/src/App.tsx',
+			'/src/App.tsrx',
 		);
 		expectStrongError(
 			`${IMPORTS}export function App() {
   const [ids, setIds] = useState([]);
   return <button onClick={() => setIds((current) => [...current, crypto.randomUUID()])}>{ids.length}</button>;
 }`,
-			'/src/App.tsx',
+			'/src/App.tsrx',
 			'OCTANE_STRONG_IMPURE_UPDATER',
 		);
 	});
@@ -348,7 +353,7 @@ export function App({ t, n, date, locale, timeZone, options, args, rest }) {
 export function Shadowed({ Date, Intl, t }) {
   return <p>{new Date(t).toLocaleString()}{new Intl.NumberFormat().format(t)}</p>;
 }`,
-			'/src/App.tsx',
+			'/src/App.tsrx',
 		);
 	});
 
@@ -357,8 +362,205 @@ export function Shadowed({ Date, Intl, t }) {
   return <time>{new Date(t).toLocaleString('en-US', { timeZone: 'UTC' })}</time>;
 }`;
 		for (const mode of ['client', 'server'] as const) {
-			const standard = compile(source, '/src/Stamp.tsx', { mode });
-			const strong = compile(source, '/src/Stamp.tsx', { mode, strong: true } as any);
+			const standard = compile(source, '/src/Stamp.tsrx', { mode });
+			const strong = compile(source, '/src/Stamp.tsrx', { mode, strong: true } as any);
+			expect(strong.code).toBe(standard.code);
+		}
+	});
+});
+
+describe('Strong scheduling during render', () => {
+	const codes = (source: string, filename = '/src/App.tsrx') =>
+		errors(`"use strong";\n${source}`, filename).map((entry: { code: string }) => entry.code);
+
+	it.each([
+		['setTimeout', 'setTimeout(() => notify(), 100);'],
+		['setInterval', 'setInterval(notify, 1000);'],
+		['queueMicrotask', 'queueMicrotask(notify);'],
+		['requestAnimationFrame', 'requestAnimationFrame(() => notify());'],
+		['requestIdleCallback', 'requestIdleCallback(notify);'],
+		['a kept timer id', 'const timer = setTimeout(notify, 0);'],
+		['an optional call', 'setTimeout?.(notify, 0);'],
+		['a conditional call', 'if (enabled) setTimeout(notify, 0);'],
+		['a logical call', 'enabled && queueMicrotask(notify);'],
+		['a module alias', 'later(notify, 0);'],
+		['a local alias', 'const schedule = requestAnimationFrame; schedule(notify);'],
+		['a synchronous helper', 'scheduleNotify(notify);'],
+		['a local closure', 'const run = () => setTimeout(notify, 0); run();'],
+		['a known array callback', 'items.forEach((item) => queueMicrotask(item));'],
+	])('rejects %s', (_label, setup) => {
+		const source = `const later = setTimeout;
+function scheduleNotify(callback) { setTimeout(callback, 0); }
+export function Tick({ notify, enabled, items }) {
+  ${setup}
+  return <div>Ready</div>;
+}`;
+		expectStrongError(source, '/src/App.tsrx', RENDER_SIDE_EFFECT);
+	});
+
+	it('names the scheduler at its authored location', () => {
+		const source = `export function Tick({ notify }) {
+  requestAnimationFrame(notify);
+  return <div />;
+}`;
+		const [diagnostic] = errors(`"use strong";\n${source}`, '/src/App.tsrx');
+		expect(diagnostic).toMatchObject({
+			code: RENDER_SIDE_EFFECT,
+			start: { line: 3, column: 2 },
+			end: { line: 3, column: 23 },
+		});
+		expect(diagnostic.message).toContain('`requestAnimationFrame()` during render');
+		expect(diagnostic.message).toContain('effect that cancels it in cleanup');
+	});
+
+	it('rejects eager factories for effects and event props', () => {
+		const factories = `function makeSetup(notify) { setTimeout(notify, 0); return () => {}; }
+function makeHandler(notify) { queueMicrotask(notify); return () => notify(); }`;
+		expectStrongError(
+			`${IMPORTS}${factories}
+export function Effect({ notify }) {
+  useEffect(makeSetup(notify), [notify]);
+  return <div />;
+}`,
+			'/src/App.tsrx',
+			RENDER_SIDE_EFFECT,
+		);
+		expectStrongError(
+			`${factories}
+export function Button({ notify }) {
+  return <button onClick={makeHandler(notify)}>Notify</button>;
+}`,
+			'/src/App.tsrx',
+			RENDER_SIDE_EFFECT,
+		);
+	});
+
+	it('rejects scheduling in lazy initializers, which may still capture a clock', () => {
+		expectStrongValid(
+			`${IMPORTS}export function App() {
+  const [startedAt] = useState(() => Date.now());
+  return <time>{startedAt}</time>;
+}`,
+			'/src/App.tsrx',
+		);
+		for (const initializer of [
+			'useState(() => { setTimeout(() => {}, 0); return 0; })',
+			'useState(initial)',
+			'useReducer((value) => value, 0, (value) => { queueMicrotask(() => {}); return value; })',
+		]) {
+			expectStrongError(
+				`${IMPORTS}import { useReducer } from 'octane';
+function initial() { requestIdleCallback(() => {}); return 0; }
+export function App() {
+  const [value] = ${initializer};
+  return <div>{value}</div>;
+}`,
+				'/src/App.tsrx',
+				RENDER_SIDE_EFFECT,
+			);
+		}
+		// A lazy initializer may read browser globals, so only the scheduling reports.
+		expect(
+			codes(`${IMPORTS}export function App() {
+  const [value] = useState(() => { window.setTimeout(() => {}, 0); return globalThis['queueMicrotask'](() => {}); });
+  return <div>{value}</div>;
+}`),
+		).toEqual([RENDER_SIDE_EFFECT, RENDER_SIDE_EFFECT]);
+	});
+
+	it('reports a global-object scheduler alongside the browser read during render', () => {
+		expect(
+			codes(`export function App({ notify }) {
+  window.setTimeout(notify, 0);
+  return <div />;
+}`),
+		).toEqual([RENDER_AMBIENT_READ, RENDER_SIDE_EFFECT]);
+	});
+
+	it('leaves scheduling in updaters and reducers to the updater check', () => {
+		expect(
+			codes(`${IMPORTS}export function App() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount((current) => { setTimeout(() => {}, 0); return current + 1; })}>{count}</button>;
+}`),
+		).toEqual([IMPURE_UPDATER]);
+	});
+
+	it('checks .tsrx components and plain custom-hook modules', () => {
+		expectStrongError(
+			`export function Tick({ notify }) @{
+  setTimeout(() => notify(), 100);
+  <div>Ready</div>
+}`,
+			'/src/Tick.tsrx',
+			RENDER_SIDE_EFFECT,
+		);
+		expect(() =>
+			slotHooks(
+				'"use strong"; export function useTick(notify) { setTimeout(notify, 0); }',
+				'/src/useTick.ts',
+			),
+		).toThrow(RENDER_SIDE_EFFECT);
+		expect(() =>
+			slotHooks(
+				'"use strong"; export function useTick(notify) { return () => setTimeout(notify, 0); }',
+				'/src/useTick.ts',
+			),
+		).not.toThrow();
+	});
+
+	it('keeps events, effects, deferred bodies, unused helpers, and other names legal', () => {
+		expectStrongValid(
+			`${IMPORTS}import { useImperativeHandle } from 'octane';
+setTimeout(() => {}, 0);
+function scheduleLater() { setTimeout(() => {}, 0); }
+function unused(notify) { queueMicrotask(notify); }
+export function App({ notify, timers, ref, enabled }) {
+  const box = useRef(null);
+  const later = () => setTimeout(notify, 0);
+  useEffect(() => {
+    const timer = setTimeout(() => { setTimeout(notify, 0); }, 100);
+    return () => clearTimeout(timer);
+  });
+  useLayoutEffect(() => {
+    const frame = requestAnimationFrame(() => box.current.classList.add('in'));
+    return () => cancelAnimationFrame(frame);
+  });
+  useImperativeHandle(ref, () => ({ ping: () => queueMicrotask(notify) }));
+  timers.setTimeout(notify, 0);
+  if (false) setTimeout(notify, 0);
+  let swap = setTimeout;
+  swap = (callback) => callback();
+  swap(() => {});
+  return (
+    <div ref={box}>
+      <button onClick={() => setTimeout(notify, 0)}>Later</button>
+      <button onClick={later}>Closure</button>
+      <button onClick={scheduleLater}>Helper</button>
+    </div>
+  );
+}
+export function Shadowed({ setTimeout, requestAnimationFrame, notify }) {
+  setTimeout(notify, 0);
+  requestAnimationFrame(notify);
+  return <div />;
+}`,
+			'/src/App.tsrx',
+		);
+	});
+
+	it('keeps valid Strong output unchanged', () => {
+		const source = `import { useEffect } from 'octane';
+export function Tick({ notify }) {
+  useEffect(() => {
+    const timer = setTimeout(() => notify(), 100);
+    return () => clearTimeout(timer);
+  }, [notify]);
+  return <button onClick={() => queueMicrotask(notify)}>Ready</button>;
+}`;
+		for (const mode of ['client', 'server'] as const) {
+			const standard = compile(source, '/src/Tick.tsrx', { mode });
+			const strong = compile(source, '/src/Tick.tsrx', { mode, strong: true } as any);
 			expect(strong.code).toBe(standard.code);
 		}
 	});

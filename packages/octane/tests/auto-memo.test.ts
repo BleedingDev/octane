@@ -1,13 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as ServerRuntime from 'octane/server';
 import { prerender } from 'octane/static';
 import { compile } from '../src/compiler/compile.js';
-import { createContext, createElement, flushSync, hydrateRoot } from '../src/index.js';
+import {
+	createContext,
+	createElement,
+	createRoot,
+	flushSync,
+	hydrateRoot,
+	use,
+} from '../src/index.js';
 import { act, flushEffects, mount } from './_helpers';
 import { loadCompiledFixtureSource } from './_server-fixture.js';
 import { AutoMemoApp } from './_fixtures/auto-memo.tsrx';
 import { CompilerNameCollisionApp } from './_fixtures/auto-memo-name-collisions.tsrx';
 import { ParentCaptureApp } from './_fixtures/auto-memo-parent-capture.tsrx';
+import { EffectImportRow } from './_fixtures/auto-memo-effect-row.tsrx';
+import { setEffectRowImports } from './_fixtures/auto-memo-effect-imports';
+import { AutoMemoCycleA } from './_fixtures/auto-memo-cycle-a.tsrx';
+import { setAutoMemoCycleValue } from './_fixtures/auto-memo-cycle-b.tsrx';
 import {
 	TsxAutoMemoApp,
 	TsxBoundMapApp,
@@ -18,6 +29,108 @@ import {
 	TsxMapExtraArgumentApp,
 	TsxStatefulMappedApp,
 } from './_fixtures/tsx-auto-memo.tsx';
+
+function loadEffectRowParent(Row: any, mode: 'client' | 'server' = 'client') {
+	return loadCompiledFixtureSource(
+		`import { Row } from './row';
+		 export function App(props) @{
+			const items = props.items;
+			const onEffect = props.onEffect;
+			<section data-tick={props.tick}>
+				<ul>@for (const item of items; key item.id) {
+					<Row item={item} onEffect={onEffect} />
+				}</ul>
+			</section>
+		 }`,
+		{
+			id: 'effectful-parent.tsrx',
+			mode,
+			compileOptions: { hmr: false, dev: false },
+			runtimeModules: { './row': { Row } },
+		},
+	);
+}
+
+const EFFECT_ROW_SOURCE = `
+	import { useEffect, useLayoutEffect, useRef } from 'octane';
+	export function Row(props) @{
+		const cell = useRef(null);
+		useEffect(() => {
+			props.onEffect('effect:' + props.item.label);
+			return () => props.onEffect('cleanup:' + props.item.label);
+		}, [props.item.label]);
+		useLayoutEffect(() => {
+			props.onEffect('layout:' + cell.current.textContent);
+		}, [props.item.label]);
+		<li><span ref={cell}>{props.item.label as string}</span></li>
+	}
+`;
+
+function loadEffectRow(source = EFFECT_ROW_SOURCE, mode: 'client' | 'server' = 'client') {
+	return loadCompiledFixtureSource(source, {
+		id: 'effectful-row.tsrx',
+		mode,
+		compileOptions: { hmr: false, dev: false },
+	});
+}
+
+// Middle's caches over the hookless Leaf and Badge hit on every tick while
+// Counter, their hookful sibling, re-renders. Badge's root can render nothing,
+// so its lite slot keeps an anchor. Frame is hookless too, but it renders a
+// memo wall that may read context, so its cache must keep refreshing that
+// reader.
+const LITE_CALLEE_REGION_SOURCE = `
+	import { createContext, memo, useContext, useState } from 'octane';
+
+	const Theme = createContext('light');
+
+	function Counter(props) @{
+		const [own, setOwn] = useState(0);
+		<button id="lite-region-counter" onClick={() => setOwn(own + 1)}>
+			{props.label + ':' + own}
+		</button>
+	}
+
+	function Leaf(props) @{
+		<span id="lite-region-leaf">{props.label as string}</span>
+	}
+
+	function Badge(props) @{
+		@if (props.on) {
+			<b id="lite-region-badge">{'on'}</b>
+		}
+	}
+
+	function Middle(props) @{
+		<div id="lite-region-middle">
+			<Leaf label={props.label} />
+			<Badge on={props.on} />
+			<Counter label={props.label + '/' + props.tick} />
+		</div>
+	}
+
+	const Themed = memo(function Themed() @{
+		const theme = useContext(Theme);
+		<em id="lite-region-themed">{theme as string}</em>
+	});
+
+	function Frame(props) @{
+		<p id="lite-region-frame" title={props.label}><Themed /></p>
+	}
+
+	function Shell(props) @{
+		<section id="lite-region">
+			<Middle label={props.label} tick={props.tick} on={props.on} />
+			<Frame label={props.label} />
+		</section>
+	}
+
+	export function App(props) @{
+		<Theme value={props.theme}>
+			<Shell label={props.label} tick={props.tick} on={props.on} />
+		</Theme>
+	}
+`;
 
 function trailingVersion(text: string | null): number {
 	return Number(text?.match(/(\d+)$/)?.[1]);
@@ -39,7 +152,7 @@ function expectNoCompilerRegion(code: string): void {
 	expect(code).not.toContain('compilerCacheContext');
 }
 
-function loadMappedHydrationComponents() {
+function loadMappedHydrationComponents(load = loadCompiledFixtureSource) {
 	const source = `
 		function AppImpl(props) {
 			const rows = props.rows;
@@ -57,17 +170,36 @@ function loadMappedHydrationComponents() {
 	`;
 	const id = 'tsx-custom-map-hydration.tsx';
 	return {
-		server: loadCompiledFixtureSource(source, {
+		server: load(source, {
 			id,
 			mode: 'server',
 			compileOptions: { hmr: false, dev: false },
 		}),
-		client: loadCompiledFixtureSource(source, {
+		client: load(source, {
 			id,
 			mode: 'client',
 			compileOptions: { hmr: false, dev: false },
 		}),
 	};
+}
+
+// Evaluate fresh client and server runtimes, so the next mapped render is the
+// first one either runtime sees. The fixture loader is already loaded by this
+// file's static import, so the re-import comes from the worker's module cache.
+async function loadFreshMappedRuntimes() {
+	vi.resetModules();
+	const fixtures = await import('./_server-fixture.js');
+	return {
+		...loadMappedHydrationComponents(fixtures.loadCompiledFixtureSource),
+		ClientRuntime: await import('../src/index.js'),
+		ServerRuntime: await import('octane/server'),
+	};
+}
+
+function mappedRowTexts(html: string): Array<string | null> {
+	const container = document.createElement('div');
+	container.innerHTML = html;
+	return Array.from(container.querySelectorAll('li'), (row) => row.textContent);
 }
 
 function loadMappedComponentHydrationComponents() {
@@ -784,6 +916,1954 @@ describe('state-derived collections and independent host bindings', () => {
 			root?.unmount();
 			container.remove();
 		}
+	});
+});
+
+describe('effectful component regions', () => {
+	it('keeps changed props, effect cleanup and row identity synchronized', () => {
+		const { App } = loadEffectRowParent(loadEffectRow().Row);
+		const events: string[] = [];
+		const onEffect = (event: string) => events.push(event);
+		const items = [{ id: 'row', label: 'first' }];
+		const root = mount(App, { items, tick: 0, onEffect });
+		flushEffects();
+		const row = root.find('li');
+		expect(events).toEqual(['layout:first', 'effect:first']);
+		root.update(App, { items, tick: 1, onEffect });
+		flushEffects();
+		expect(root.find('li')).toBe(row);
+		expect(events).toEqual(['layout:first', 'effect:first']);
+		events.length = 0;
+		root.update(App, { items: [{ id: 'row', label: 'second' }], tick: 2, onEffect });
+		flushEffects();
+		expect(root.find('li')).toBe(row);
+		expect(row.textContent).toBe('second');
+		expect(events).toContain('layout:second');
+		expect(events.filter((event) => !event.startsWith('layout:'))).toEqual([
+			'cleanup:first',
+			'effect:second',
+		]);
+		root.unmount();
+		flushEffects();
+		expect(events.at(-1)).toBe('cleanup:second');
+	});
+
+	it('updates live imported refs independently in two retained roots', () => {
+		const attached = [new Set<Element>(), new Set<Element>()];
+		const ref = (index: number) => (element: Element | null) => {
+			if (element === null) return;
+			attached[index].add(element);
+			return () => {
+				attached[index].delete(element);
+			};
+		};
+		setEffectRowImports(ref(0), 0);
+		const { App } = loadEffectRowParent(EffectImportRow);
+		const props = { items: [{ id: 'row', label: 'same' }], tick: 0 };
+		const first = mount(App, props);
+		const second = mount(App, props);
+		const firstRow = first.find('li');
+		const secondRow = second.find('li');
+		try {
+			expect(attached[0]).toEqual(new Set([firstRow, secondRow]));
+			setEffectRowImports(ref(1), 0);
+			first.update(App, { ...props, tick: 1 });
+			expect(attached[0]).toEqual(new Set([secondRow]));
+			expect(attached[1]).toEqual(new Set([firstRow]));
+			second.update(App, { ...props, tick: 1 });
+			expect(attached[0].size).toBe(0);
+			expect(attached[1]).toEqual(new Set([firstRow, secondRow]));
+			expect(first.find('li')).toBe(firstRow);
+			expect(second.find('li')).toBe(secondRow);
+		} finally {
+			first.unmount();
+			second.unmount();
+			flushEffects();
+			setEffectRowImports(() => {}, 0);
+		}
+		expect(attached[1].size).toBe(0);
+	});
+
+	it('observes signed-zero changes in a live imported value across roots', () => {
+		const ref = () => {};
+		setEffectRowImports(ref, 0);
+		const { App } = loadEffectRowParent(EffectImportRow);
+		const props = { items: [{ id: 'row', label: 'value' }], tick: 0 };
+		const first = mount(App, props);
+		const second = mount(App, props);
+		try {
+			expect(first.find('li').textContent).toBe('value:Infinity');
+			setEffectRowImports(ref, -0);
+			first.update(App, { ...props, tick: 1 });
+			second.update(App, { ...props, tick: 1 });
+			expect(first.find('li').textContent).toBe('value:-Infinity');
+			expect(second.find('li').textContent).toBe('value:-Infinity');
+			setEffectRowImports(ref, 0);
+			second.update(App, { ...props, tick: 2 });
+			first.update(App, { ...props, tick: 2 });
+			expect(first.find('li').textContent).toBe('value:Infinity');
+			expect(second.find('li').textContent).toBe('value:Infinity');
+		} finally {
+			first.unmount();
+			second.unmount();
+			flushEffects();
+			setEffectRowImports(() => {}, 0);
+		}
+	});
+
+	it.each(['null', 'callback factory', 'dependency factory'])(
+		'preserves %s effects on unchanged parent updates',
+		(kind) => {
+			const call =
+				kind === 'null'
+					? "useEffect(() => { props.onEffect('effect'); return () => props.onEffect('cleanup'); }, null);"
+					: kind === 'callback factory'
+						? 'useEffect(props.callbackFactory(), []);'
+						: "useEffect(() => props.onEffect('effect'), props.dependencyFactory());";
+			const { Row } = loadEffectRow(
+				`import { useEffect } from 'octane'; export function Row(props) @{ ${call} <li>{props.item.label as string}</li> }`,
+			);
+			const events: string[] = [];
+			const parent = loadCompiledFixtureSource(
+				`import { Row } from './row'; export function App(props) @{
+					const items = props.items;
+					const onEffect = props.onEffect;
+					const callbackFactory = props.callbackFactory;
+					const dependencyFactory = props.dependencyFactory;
+					<ul data-tick={props.tick}>@for (const item of items; key item.id) {
+						<Row item={item} onEffect={onEffect} callbackFactory={callbackFactory} dependencyFactory={dependencyFactory} />
+					}</ul>
+				}`,
+				{
+					id: 'effect-factories-parent.tsrx',
+					mode: 'client',
+					compileOptions: { hmr: false, dev: false },
+					runtimeModules: { './row': { Row } },
+				},
+			);
+			const props = {
+				items: [{ id: 'row', label: 'same' }],
+				onEffect: (event: string) => events.push(event),
+				callbackFactory: () => {
+					events.push('callback');
+					return () => {};
+				},
+				dependencyFactory: () => {
+					events.push('dependencies');
+					return [];
+				},
+			};
+			const root = mount(parent.App, props);
+			flushEffects();
+			events.length = 0;
+			root.update(parent.App, { ...props, tick: 1 });
+			flushEffects();
+			expect(events).toEqual(
+				kind === 'null'
+					? ['cleanup', 'effect']
+					: [kind === 'callback factory' ? 'callback' : 'dependencies'],
+			);
+			root.unmount();
+			flushEffects();
+		},
+	);
+
+	it('does not transfer component behavior guarantees when statics are copied to a wrapper', () => {
+		const { Row } = loadEffectRow();
+		let label = 'first';
+		function Wrapper(props: any, scope: any, extra: any) {
+			return Row({ ...props, item: { ...props.item, label } }, scope, extra);
+		}
+		Object.defineProperties(Wrapper, Object.getOwnPropertyDescriptors(Row));
+		const { App } = loadEffectRowParent(Wrapper);
+		const props = { items: [{ id: 'row', label: 'ignored' }], tick: 0, onEffect: () => {} };
+		const root = mount(App, props);
+		expect(root.find('li').textContent).toBe('first');
+		label = 'second';
+		root.update(App, { ...props, tick: 1 });
+		expect(root.find('li').textContent).toBe('second');
+		root.unmount();
+		flushEffects();
+	});
+
+	it('observes defaults added and changed on an effectful provider child', () => {
+		const { Row } = loadEffectRow(
+			`import { useEffect } from 'octane'; export function Row(props) @{ useEffect(() => {}, []); <li>{props.label as string}</li> }`,
+		);
+		const parent = loadCompiledFixtureSource(
+			`import { createContext } from 'octane'; import { Row } from './row'; const Theme = createContext(null); export function App(props) { return <Theme value={null}><Row /></Theme>; }`,
+			{
+				id: 'effect-defaults-parent.tsx',
+				mode: 'client',
+				compileOptions: { hmr: false, dev: false },
+				runtimeModules: { './row': { Row } },
+			},
+		);
+		const props = { items: [{ id: 'row' }] };
+		const root = mount(parent.App, props);
+		Row.defaultProps = { label: 'first' };
+		root.update(parent.App, props);
+		expect(root.find('li').textContent).toBe('first');
+		Row.defaultProps = { label: 'second' };
+		root.update(parent.App, props);
+		expect(root.find('li').textContent).toBe('second');
+		root.unmount();
+		flushEffects();
+	});
+
+	it('reconnects retained effects when an Activity becomes visible again', () => {
+		const { Row } = loadEffectRow();
+		const { App } = loadCompiledFixtureSource(
+			`
+			import { Activity } from 'octane';
+			import { Row } from './row';
+			function Rows(props) @{
+				const items = props.items;
+				const onEffect = props.onEffect;
+				<ul>@for (const item of items; key item.id) {
+					<Row item={item} onEffect={onEffect} />
+				}</ul>
+			}
+			export function App(props) @{ <Activity mode={props.mode}><Rows items={props.items} onEffect={props.onEffect} /></Activity> }
+		`,
+			{
+				id: 'effectful-activity.tsrx',
+				mode: 'client',
+				compileOptions: { hmr: false, dev: false },
+				runtimeModules: { './row': { Row } },
+			},
+		);
+		const events: string[] = [];
+		const props = {
+			items: [{ id: 'row', label: 'live' }],
+			onEffect: (event: string) => events.push(event),
+			mode: 'visible',
+		};
+		const root = mount(App, props);
+		flushEffects();
+		const row = root.find('li');
+		expect(events).toEqual(['layout:live', 'effect:live']);
+		root.update(App, { ...props, mode: 'hidden' });
+		flushEffects();
+		expect(events).toContain('cleanup:live');
+		events.length = 0;
+		root.update(App, props);
+		flushEffects();
+		expect(root.find('li')).toBe(row);
+		expect(row.textContent).toBe('live');
+		expect(events).toEqual(['layout:live', 'effect:live']);
+		root.unmount();
+		flushEffects();
+		expect(events.at(-1)).toBe('cleanup:live');
+	});
+
+	it('restores effectful row output before retrying a held root update', async () => {
+		const { Row } = loadEffectRow();
+		const { App } = loadCompiledFixtureSource(
+			`
+			import { use } from 'octane';
+			import { Row } from './row';
+			function Reader(props) @{ const value = use(props.promise); <output>{value as string}</output> }
+			export function App(props) @{
+				const items = props.items;
+				const onEffect = props.onEffect;
+				<main><ul>@for (const item of items; key item.id) {
+					<Row item={item} onEffect={onEffect} />
+				}</ul><Reader promise={props.promise} /></main>
+			}
+		`,
+			{
+				id: 'effectful-held-root.tsrx',
+				mode: 'client',
+				compileOptions: { hmr: false, dev: false },
+				runtimeModules: { './row': { Row } },
+			},
+		);
+		const events: string[] = [];
+		const onEffect = (event: string) => events.push(event);
+		const first = Promise.resolve('ready');
+		const root = mount(App, { items: [{ id: 'row', label: 'first' }], onEffect, promise: first });
+		await act(() => first);
+		flushEffects();
+		const row = root.find('li');
+		let resolve!: (value: string) => void;
+		const pending = new Promise<string>((done) => {
+			resolve = done;
+		});
+		await act(() =>
+			root.root.render(App, {
+				items: [{ id: 'row', label: 'second' }],
+				onEffect,
+				promise: pending,
+			}),
+		);
+		expect(root.find('li')).toBe(row);
+		expect(row.textContent).toBe('first');
+		expect(events.filter((event) => !event.startsWith('layout:'))).toEqual(['effect:first']);
+		await act(() => resolve('accepted'));
+		flushEffects();
+		expect(root.find('li')).toBe(row);
+		expect(row.textContent).toBe('second');
+		expect(root.find('output').textContent).toBe('accepted');
+		expect(events.filter((event) => !event.startsWith('layout:'))).toEqual([
+			'effect:first',
+			'cleanup:first',
+			'effect:second',
+		]);
+		root.unmount();
+		flushEffects();
+	});
+
+	it('hydrates effectful rows in place and preserves changed dependencies', () => {
+		const server = loadEffectRowParent(loadEffectRow(EFFECT_ROW_SOURCE, 'server').Row, 'server');
+		const client = loadEffectRowParent(loadEffectRow().Row);
+		const events: string[] = [];
+		const onEffect = (event: string) => events.push(event);
+		const props = { items: [{ id: 'row', label: 'server' }], tick: 0, onEffect };
+		const container = document.createElement('div');
+		container.innerHTML = ServerRuntime.renderToString(server.App, props).html;
+		const row = container.querySelector('li');
+		const root = hydrateRoot(container, client.App, props);
+		flushEffects();
+		expect(container.querySelector('li')).toBe(row);
+		expect(events).toEqual(['layout:server', 'effect:server']);
+		flushSync(() => root.render(client.App, { ...props, tick: 1 }));
+		flushEffects();
+		expect(events).toEqual(['layout:server', 'effect:server']);
+		flushSync(() => root.render(client.App, { ...props, items: [{ id: 'row', label: 'client' }] }));
+		flushEffects();
+		expect(container.querySelector('li')).toBe(row);
+		expect(row?.textContent).toBe('client');
+		expect(events).toContain('cleanup:server');
+		expect(events).toContain('effect:client');
+		root.unmount();
+		flushEffects();
+		expect(events.at(-1)).toBe('cleanup:client');
+	});
+});
+
+// The lite exports each imported module published, and the anchorless ones
+// among them, keyed by request, as a production bundler hands them to the
+// importer's compile. Every import is reported memo-proven, as a stale build
+// fact would be: the runtime witness must still keep each region correct.
+interface LiteProof {
+	readonly lite: readonly string[];
+	readonly anchorless: readonly string[];
+}
+type LiteProofs = Readonly<Record<string, LiteProof>>;
+
+function liteCompileOptions(proofs: LiteProofs) {
+	return {
+		hmr: false,
+		dev: false,
+		isCompilerMemoImport: () => true,
+		isLiteComponentImport: (request: string, imported: string) =>
+			proofs[request]?.lite.includes(imported) === true,
+		isAnchorlessComponentImport: (request: string, imported: string) =>
+			proofs[request]?.anchorless.includes(imported) === true,
+	};
+}
+
+function liteExportsOf(source: string, id: string, proofs: LiteProofs = {}): LiteProof {
+	const result = compile(source, id, liteCompileOptions(proofs)) as {
+		liteComponentExports?: string[];
+		anchorlessComponentExports?: string[];
+	};
+	return {
+		lite: result.liteComponentExports ?? [],
+		anchorless: result.anchorlessComponentExports ?? [],
+	};
+}
+
+function loadImportedModule(
+	source: string,
+	id: string,
+	runtimeModules?: Record<string, any>,
+	lite: LiteProofs = {},
+	mode: 'client' | 'server' = 'client',
+) {
+	return loadCompiledFixtureSource(source, {
+		id,
+		mode,
+		compileOptions: liteCompileOptions(lite),
+		runtimeModules,
+	});
+}
+
+// Each module is its own file. Leaf and Badge are hookless and read no context,
+// so the bundler proves them lite, and Mid too through its proven imports.
+// Counter is hookful, so the edge to it keeps a Block and its updates never
+// re-run App. Badge's root can render nothing, so it is not anchorless, and its
+// lite edge keeps an anchor among its siblings; Mid's call needs none.
+const IMPORTED_LITE_MODULES = {
+	leaf: `export function Leaf(props) @{ <span class="leaf">{props.text as string}</span> }`,
+	badge: `export function Badge(props) @{ @if (props.on) { <b class="badge">{'on'}</b> } }`,
+	counter: `import { useState } from 'octane';
+		export function Counter(props) @{
+			const [count, setCount] = useState(0);
+			<button class="counter" onClick={() => setCount(count + 1)}>
+				{(props.text + ':' + count) as string}
+			</button>
+		}`,
+	mid: `import { Leaf } from './leaf';
+		import { Badge } from './badge';
+		export function Mid(props) @{
+			<div class="mid">
+				<Leaf text={props.text} />
+				<Badge on={props.on} />
+				<Leaf text="tail" />
+			</div>
+		}`,
+	app: `import { Mid } from './mid';
+		import { Counter } from './counter';
+		export function App(props) @{
+			props.onRender();
+			<section data-tick={props.tick}>
+				<Mid text={props.text} on={props.on} />
+				<Counter text={props.text} />
+			</section>
+		}`,
+};
+
+function loadImportedLiteApp(mode: 'client' | 'server' = 'client') {
+	const sources = IMPORTED_LITE_MODULES;
+	const lite = {
+		'./leaf': liteExportsOf(sources.leaf, 'lite-leaf.tsrx'),
+		'./badge': liteExportsOf(sources.badge, 'lite-badge.tsrx'),
+		'./counter': liteExportsOf(sources.counter, 'lite-counter.tsrx'),
+	};
+	const all = { ...lite, './mid': liteExportsOf(sources.mid, 'lite-mid.tsrx', lite) };
+	const modules = {
+		'./leaf': loadImportedModule(sources.leaf, 'lite-leaf.tsrx', undefined, {}, mode),
+		'./badge': loadImportedModule(sources.badge, 'lite-badge.tsrx', undefined, {}, mode),
+		'./counter': loadImportedModule(sources.counter, 'lite-counter.tsrx', undefined, {}, mode),
+	};
+	const mid = loadImportedModule(sources.mid, 'lite-mid.tsrx', modules, lite, mode);
+	const app = loadImportedModule(
+		sources.app,
+		'lite-app.tsrx',
+		{ ...modules, './mid': mid },
+		all,
+		mode,
+	);
+	return { app, lite: all };
+}
+
+describe('imported component regions', () => {
+	it('admits imported regions only for exports that publish a proof', () => {
+		const card = `import { useState } from 'octane';
+			 import { Leaf } from './leaf';
+			 export function Card(props) @{ <div><Leaf label={props.label} /></div> }
+			 function Private(props) @{ <i>{props.label as string}</i> }
+			 export function Stateful() @{ const [count] = useState(0); <b>{count as number}</b> }
+			 export { Private as Item };`;
+		const compileCard = (leafProven: boolean) =>
+			compile(card, 'imported-memo-card.tsrx', {
+				hmr: false,
+				autoMemo: true,
+				isCompilerMemoImport: (request: string, imported: string) =>
+					leafProven && request === './leaf' && imported === 'Leaf',
+			});
+		const proven = compileCard(true);
+		// The proof witnesses the imported child it renders: live binding and proof.
+		expect(proven.code).toMatch(/\(\) => \[Leaf, _\$compilerMemoWitness\(Leaf\)\]/);
+		expect(proven.code).toMatch(/const Stateful = \/\* @__PURE__ \*\/ _\$__s\(/);
+		expect(proven.compilerMemoExports).toEqual(['Card', 'Item']);
+		// A proof over an import without one could never hold.
+		expect(compileCard(false).compilerMemoExports).toEqual(['Item']);
+
+		const parent = `import { Card } from './card';
+			 import { Stateful } from './stateful';
+			 export function App(props) @{
+				<p data-tick={props.tick}><Card label={props.label} /><Stateful label={props.label} /></p>
+			 }`;
+		const compileParent = (proofs: string[]) =>
+			compile(parent, 'imported-memo-parent.tsrx', {
+				hmr: false,
+				autoMemo: true,
+				isCompilerMemoImport: (request: string) => proofs.includes(request),
+			}).code;
+		const admitted = compileParent(['./card']);
+		expectCompilerRegion(admitted);
+		expect(admitted).toContain('_$compilerMemoWitness(Card)');
+		// An import without a published proof keeps its plain call.
+		expect(admitted).not.toContain('_$compilerMemoWitness(Stateful)');
+		expectNoCompilerRegion(compileParent([]));
+
+		const withChildren = compile(
+			`import { Card } from './card';
+			 export function App(props) @{ <p data-tick={props.tick}><Card label={props.label}><b /></Card></p> }`,
+			'imported-memo-children.tsrx',
+			{ hmr: false, autoMemo: true, isCompilerMemoImport: () => true },
+		).code;
+		expectNoCompilerRegion(withChildren);
+	});
+
+	it('re-renders a proven import whose imported child is unproven', () => {
+		const inner = loadImportedModule(
+			`let value = 'a';
+			 export function setValue(next) { value = next; }
+			 export function Inner(props) @{ <b>{(props.label + ':' + value) as string}</b> }`,
+			'imported-unproven-inner.tsrx',
+		);
+		const wrapper = loadImportedModule(
+			`import { Inner } from './inner';
+			 export function Wrapper(props) @{ <span><Inner label={props.label} /></span> }`,
+			'imported-proven-wrapper.tsrx',
+			{ './inner': inner },
+		);
+		const { App } = loadImportedModule(
+			`import { Wrapper } from './wrapper';
+			 export function App(props) @{ <p data-tick={props.tick}><Wrapper label={props.label} /></p> }`,
+			'imported-wrapper-parent.tsrx',
+			{ './wrapper': wrapper },
+		);
+		const root = mount(App, { label: 'x', tick: 0 });
+		try {
+			expect(root.find('b').textContent).toBe('x:a');
+			inner.setValue('b');
+			root.update(App, { label: 'x', tick: 1 });
+			expect(root.find('b').textContent).toBe('x:b');
+			root.update(App, { label: 'y', tick: 2 });
+			expect(root.find('b').textContent).toBe('y:b');
+		} finally {
+			root.unmount();
+		}
+	});
+
+	it('refreshes a memo() context consumer below a cached imported edge', () => {
+		const Theme = createContext('t0');
+		const readerSource = `import { memo, useContext } from 'octane';
+			 import { Theme } from './theme';
+			 function ReaderImpl(props) @{
+				const theme = useContext(Theme);
+				<b>{(props.label + ':' + theme) as string}</b>
+			 }
+			 export const Reader = memo(ReaderImpl);`;
+		const reader = loadImportedModule(readerSource, 'imported-context-reader.tsrx', {
+			'./theme': { Theme },
+		});
+		const wrapperSource = `import { Reader } from './reader';
+			 export function Wrapper(props) @{ <span><Reader label={props.label} /></span> }`;
+		const wrapper = loadImportedModule(wrapperSource, 'imported-context-wrapper.tsrx', {
+			'./reader': reader,
+		});
+		// The bundler's proofs, as built: a memo() export is never lite, so the
+		// Wrapper edge that renders it must keep refreshing context.
+		const readerLite = liteExportsOf(readerSource, 'imported-context-reader.tsrx');
+		const { App } = loadImportedModule(
+			`import { Theme } from './theme';
+			 import { Wrapper } from './wrapper';
+			 export function App(props) @{
+				<Theme value={props.theme}>
+					<p><Wrapper label={props.label} /></p>
+				</Theme>
+			 }`,
+			'imported-context-parent.tsrx',
+			{ './theme': { Theme }, './wrapper': wrapper },
+			{
+				'./wrapper': liteExportsOf(wrapperSource, 'imported-context-wrapper.tsrx', {
+					'./reader': readerLite,
+				}),
+			},
+		);
+		const root = mount(App, { label: 'x', theme: 't1' });
+		try {
+			expect(root.find('b').textContent).toBe('x:t1');
+			root.update(App, { label: 'x', theme: 't2' });
+			expect(root.find('b').textContent).toBe('x:t2');
+		} finally {
+			root.unmount();
+		}
+	});
+
+	it('renders and updates components that recurse across modules', () => {
+		const { App } = loadImportedModule(
+			`import { AutoMemoCycleA } from './cycle';
+			 export function App(props) @{
+				<p data-tick={props.tick}><AutoMemoCycleA depth={2} label={props.label} /></p>
+			 }`,
+			'imported-cycle-parent.tsrx',
+			{ './cycle': { AutoMemoCycleA } },
+		);
+		setAutoMemoCycleValue('v0');
+		const root = mount(App, { label: 'x', tick: 0 });
+		try {
+			expect(root.findAll('.cycle-a')).toHaveLength(3);
+			expect(root.find('.cycle-leaf').textContent).toBe('x:v0');
+			setAutoMemoCycleValue('v1');
+			root.update(App, { label: 'x', tick: 1 });
+			expect(root.find('.cycle-leaf').textContent).toBe('x:v1');
+			root.update(App, { label: 'y', tick: 2 });
+			expect(root.find('.cycle-leaf').textContent).toBe('y:v1');
+		} finally {
+			root.unmount();
+			setAutoMemoCycleValue('v0');
+		}
+	});
+
+	it('runs proven hookless imports through lite edges', () => {
+		const { app, lite } = loadImportedLiteApp();
+		expect(lite).toEqual({
+			'./leaf': { lite: ['Leaf'], anchorless: ['Leaf'] },
+			'./badge': { lite: ['Badge'], anchorless: [] },
+			'./counter': { lite: [], anchorless: [] },
+			'./mid': { lite: ['Mid'], anchorless: ['Mid'] },
+		});
+		const code = compile(IMPORTED_LITE_MODULES.app, 'lite-app.tsrx', liteCompileOptions(lite)).code;
+		expect(code).toMatch(/_\$componentSlotLite\([^;]*, Mid,/);
+		expect(code).not.toMatch(/_\$componentSlotLite\([^;]*, Counter,/);
+
+		let renders = 0;
+		const onRender = () => renders++;
+		const root = mount(app.App, { text: 'a', on: false, tick: 0, onRender });
+		const order = () =>
+			Array.from(
+				root.findAll('.mid > *, .counter'),
+				(child) => child.className + ':' + child.textContent,
+			);
+		const anchored = (host: Element) => [...host.childNodes].some((node) => node.nodeType === 8);
+		try {
+			const leaf = root.find('.leaf');
+			expect(order()).toEqual(['leaf:a', 'leaf:tail', 'counter:a:0']);
+			// Only the proven anchorless call drops its anchor.
+			expect(anchored(root.find('section'))).toBe(false);
+			expect(anchored(root.find('.mid'))).toBe(true);
+			// Equal props: every cached edge hits and the DOM stays in place.
+			root.update(app.App, { text: 'a', on: false, tick: 1, onRender });
+			expect(root.find('.leaf')).toBe(leaf);
+			expect(order()).toEqual(['leaf:a', 'leaf:tail', 'counter:a:0']);
+			// The hookful import owns its state: its update does not re-run App.
+			expect(renders).toBe(2);
+			root.click('.counter');
+			expect(order()).toEqual(['leaf:a', 'leaf:tail', 'counter:a:1']);
+			expect(renders).toBe(2);
+			root.update(app.App, { text: 'a', on: true, tick: 2, onRender });
+			expect(order()).toEqual(['leaf:a', 'badge:on', 'leaf:tail', 'counter:a:1']);
+			root.update(app.App, { text: 'b', on: false, tick: 3, onRender });
+			expect(order()).toEqual(['leaf:b', 'leaf:tail', 'counter:b:1']);
+			root.update(app.App, { text: 'b', on: true, tick: 4, onRender });
+			expect(order()).toEqual(['leaf:b', 'badge:on', 'leaf:tail', 'counter:b:1']);
+			expect(root.find('.leaf')).toBe(leaf);
+		} finally {
+			const container = root.container;
+			root.unmount();
+			expect(container.innerHTML).toBe('');
+		}
+	});
+
+	it('keeps proven hookless panels in order when one empties as another swaps', () => {
+		// Badge is proven lite but not anchorless. Each Panel's @else arm can take
+		// Badge's element as its boundary, in a host whose calls keep no anchors.
+		const badge = IMPORTED_LITE_MODULES.badge;
+		const { Twin } = loadImportedModule(
+			`import { Badge } from './badge';
+			 function Panel(props) @{
+				@if (props.off) {
+					<span class="off">{'off'}</span>
+				} @else {
+					<Badge on={props.on} />
+				}
+			 }
+			 function Tail() @{ <i class="tail">{'tail'}</i> }
+			 export function Twin(props) @{
+				<section><Panel on={props.on} /><Panel off={props.off} /><Tail /></section>
+			 }`,
+			'lite-twin.tsrx',
+			{ './badge': loadImportedModule(badge, 'lite-badge.tsrx') },
+			{ './badge': liteExportsOf(badge, 'lite-badge.tsrx') },
+		);
+		const root = mount(Twin, { on: true, off: false });
+		const order = () => Array.from(root.find('section').children, (child) => child.className);
+		try {
+			expect(order()).toEqual(['badge', 'tail']);
+			root.update(Twin, { on: false, off: true });
+			expect(order()).toEqual(['off', 'tail']);
+			root.update(Twin, { on: true, off: false });
+			expect(order()).toEqual(['badge', 'tail']);
+			root.update(Twin, { on: true, off: true });
+			expect(order()).toEqual(['badge', 'off', 'tail']);
+		} finally {
+			root.unmount();
+		}
+	});
+
+	it('publishes no lite export over a body that renders a prop value', () => {
+		// Such a value may hold a component that reads context, so a cache hit
+		// over the export must keep refreshing it.
+		const shell = (child: string) => `${child}
+			export function Shell(props) @{ <div><Child on={props.on} content={props.content} /></div> }`;
+		const proven = "function Child(props) @{ <i>{props.on ? 'on' : 'off'}</i> }";
+		expect(liteExportsOf(shell(proven), 'lite-shell-text.tsrx').lite).toEqual(['Shell']);
+		for (const child of [
+			'function Child(props) @{ <i>{props.content}</i> }',
+			"function Child(props) { if (props.on) return props.content; return <i>{'off'}</i>; }",
+			'function Child(props) @{ const C = props.content; <C /> }',
+		]) {
+			expect(liteExportsOf(shell(child), 'lite-shell-opaque.tsrx').lite).toEqual([]);
+		}
+	});
+
+	it.each([
+		['a child hole', '<span>{props.content}</span>'],
+		['a host children prop', '<span children={props.content} />'],
+		['a host spread', '<span {...props.host} />'],
+	])('refreshes context below an imported edge that renders %s', (_name, body) => {
+		const Theme = createContext('t0');
+		const slotSource = `export function Slot(props) @{ ${body} }`;
+		const slot = loadImportedModule(slotSource, 'imported-prop-slot.tsrx');
+		const { App, Reader } = loadImportedModule(
+			`import { useContext } from 'octane';
+			 import { Theme } from './theme';
+			 import { Slot } from './slot';
+			 export function Reader(props) @{
+				const theme = useContext(Theme);
+				<b>{(props.label + ':' + theme) as string}</b>
+			 }
+			 export function App(props) @{
+				<Theme value={props.theme}><p><Slot content={props.content} host={props.host} /></p></Theme>
+			 }`,
+			'imported-prop-slot-parent.tsrx',
+			{ './theme': { Theme }, './slot': slot },
+			{ './slot': liteExportsOf(slotSource, 'imported-prop-slot.tsrx') },
+		);
+		// The parent passes the same element down, so the cached edge hits.
+		const content = createElement(Reader, { label: 'x' });
+		const props = { content, host: { children: content } };
+		const root = mount(App, { ...props, theme: 't1' });
+		try {
+			expect(root.find('b').textContent).toBe('x:t1');
+			root.update(App, { ...props, theme: 't2' });
+			expect(root.find('b').textContent).toBe('x:t2');
+		} finally {
+			root.unmount();
+		}
+	});
+
+	it('publishes no lite export from a native-read module', () => {
+		// A native-read body subscribes the Block it renders in; behind a lite
+		// edge that is the importer's region owner, which a cache hit does not
+		// re-run. Its memo proof still stands.
+		const label = `import 'octane/signals';
+			export function Label(props) @{ <span>{props.value$ as string}</span> }`;
+		const result = compile(label, 'native-lite-label.tsrx', liteCompileOptions({})) as {
+			compilerMemoExports?: string[];
+			liteComponentExports?: string[];
+		};
+		expect(result.compilerMemoExports).toEqual(['Label']);
+		expect(result.liteComponentExports).toBeUndefined();
+		expect(
+			liteExportsOf(label.replace("import 'octane/signals';", ''), 'plain-label.tsrx').lite,
+		).toEqual(['Label']);
+	});
+
+	it('hydrates proven hookless imports through lite edges', () => {
+		const server = loadImportedLiteApp('server').app;
+		const { app } = loadImportedLiteApp();
+		let renders = 0;
+		const onRender = () => renders++;
+		const props = { text: 'a', on: true, tick: 0, onRender };
+		const container = document.createElement('div');
+		container.innerHTML = ServerRuntime.renderToString(server.App, props).html;
+		const leaf = container.querySelector('.leaf');
+		const badge = container.querySelector('.badge');
+		const counter = container.querySelector('.counter') as HTMLButtonElement;
+		const order = () =>
+			Array.from(
+				container.querySelectorAll('.mid > *, .counter'),
+				(child) => child.className + ':' + child.textContent,
+			);
+		const root = hydrateRoot(container, app.App, props);
+		try {
+			expect(container.querySelector('.leaf')).toBe(leaf);
+			expect(container.querySelector('.badge')).toBe(badge);
+			expect(container.querySelector('.counter')).toBe(counter);
+			const hydrated = renders;
+			flushSync(() => counter.click());
+			expect(order()).toEqual(['leaf:a', 'badge:on', 'leaf:tail', 'counter:a:1']);
+			expect(renders).toBe(hydrated);
+			flushSync(() => root.render(app.App, { text: 'b', on: false, tick: 1, onRender }));
+			expect(order()).toEqual(['leaf:b', 'leaf:tail', 'counter:b:1']);
+			flushSync(() => root.render(app.App, { text: 'b', on: true, tick: 2, onRender }));
+			expect(order()).toEqual(['leaf:b', 'badge:on', 'leaf:tail', 'counter:b:1']);
+			expect(container.querySelector('.leaf')).toBe(leaf);
+		} finally {
+			root.unmount();
+			expect(container.innerHTML).toBe('');
+		}
+	});
+});
+
+// Strong renders hookful same-module callees through lite edges: a callee's
+// hook cells live in its Scope, and an update re-renders the nearest Block.
+// Counter `a` sits in an arm the parent keeps rendering around; `b` and Panel
+// each guard an effect so a render can skip it, `b` while Panel still reaches
+// its own; `m` reads context below a memo wall. Each scenario runs once per
+// mode, and the two must not differ.
+const STRONG_HOOKFUL_LITE_SOURCE = `"use strong";
+	import { Activity, createContext, memo, useContext, useEffect, useId, useLayoutEffect, useState } from 'octane';
+
+	export const Theme = createContext('light');
+
+	function Counter(props) @{
+		const [count, setCount] = useState(0);
+		const theme = useContext(Theme);
+		const uid = useId();
+		const log = props.log;
+		const name = props.name;
+		useLayoutEffect(() => {
+			log('layout:' + name + count);
+			return () => log('layout-cleanup:' + name + count);
+		});
+		if (props.watch) {
+			useEffect(() => {
+				log('effect:' + name + count);
+				return () => log('cleanup:' + name + count);
+			});
+		}
+		<button id={props.name} data-uid={uid} ref={props.cell} onClick={() => setCount(count + 1)}>
+			{(props.name + ':' + theme + ':' + count) as string}
+		</button>
+	}
+
+	function Panel(props) @{
+		const [tick, setTick] = useState(0);
+		const log = props.log;
+		if (props.watch !== 'none') {
+			useEffect(() => {
+				log('watch:' + tick);
+				return () => log('unwatch:' + tick);
+			});
+		}
+		<section id="panel" data-tick={tick as number}>
+			<button id="tick" onClick={() => setTick(tick + 1)}>{'tick'}</button>
+			@if (props.show) {
+				<Counter name="a" watch={true} log={props.log} cell={props.cell} />
+			}
+			<Counter name="b" watch={props.watch === 'all'} log={props.log} />
+		</section>
+	}
+
+	const Frame = memo(function Frame(props) @{
+		<div id="frame"><Counter name="m" watch={false} log={props.log} /></div>
+	});
+
+	export function App(props) @{
+		<Theme value={props.theme}>
+			<Activity mode={props.mode}>
+				<Panel show={props.show} watch={props.watch} log={props.log} cell={props.cell} />
+			</Activity>
+			<Frame log={props.log} />
+		</Theme>
+	}
+`;
+
+type StrongMode = 'strong' | 'default';
+
+function strongHookfulSource(mode: StrongMode): string {
+	return mode === 'strong'
+		? STRONG_HOOKFUL_LITE_SOURCE
+		: STRONG_HOOKFUL_LITE_SOURCE.replace('"use strong";', '');
+}
+
+function loadStrongHookfulApp(mode: StrongMode, environment: 'client' | 'server' = 'client') {
+	return loadCompiledFixtureSource(strongHookfulSource(mode), {
+		id: `strong-hookful-lite-${mode}.tsrx`,
+		mode: environment,
+		compileOptions: { hmr: false, dev: false },
+	});
+}
+
+describe('Strong hookful lite edges', () => {
+	it('lowers hookful callees to lite edges only in Strong mode', () => {
+		const lite = /_\$componentSlotLite\(\s*__s,\s*\d+,\s*[^,]+,\s*Counter,/g;
+		const strong = compile(strongHookfulSource('strong'), 'strong-hookful.tsrx', {
+			hmr: false,
+			dev: false,
+		}).code;
+		expect(strong.match(lite)).toHaveLength(3);
+		const compatible = compile(strongHookfulSource('default'), 'default-hookful.tsrx', {
+			hmr: false,
+			dev: false,
+		}).code;
+		expect(compatible.match(lite)).toBeNull();
+	});
+
+	function runHookfulScenario(mode: StrongMode): string[] {
+		const client = loadStrongHookfulApp(mode);
+		const log: string[] = [];
+		const cell = (el: Element | null) => log.push('ref:' + (el === null ? null : el.id));
+		const props = {
+			theme: 'light',
+			mode: 'visible',
+			show: true,
+			watch: 'all',
+			log: log.push.bind(log),
+			cell,
+		};
+		const root = mount(client.App, props);
+		const transcript: string[] = [];
+		const step = (label: string) => {
+			flushEffects();
+			const text = root.findAll('button[data-uid]').map((el) => el.textContent);
+			transcript.push(`${label} | ${text.join(' ')} | ${log.splice(0).join(' ')}`);
+		};
+		step('mount');
+		const panel = root.find('#panel');
+		const b = root.find('#b');
+		root.click('#a');
+		step('own update');
+		root.click('#tick');
+		step('parent update');
+		expect(root.find('#b')).toBe(b);
+		root.update(client.App, { ...props, theme: 'dark' });
+		step('context');
+		root.update(client.App, { ...props, theme: 'dark', watch: 'panel' });
+		step('skip child effect');
+		root.update(client.App, { ...props, theme: 'dark', watch: 'none' });
+		step('skip parent effect');
+		root.update(client.App, { ...props, theme: 'dark', watch: 'none', show: false });
+		step('arm off');
+		root.update(client.App, { ...props, theme: 'dark', show: true });
+		step('arm on');
+		root.update(client.App, { ...props, theme: 'dark', mode: 'hidden' });
+		step('hide');
+		root.update(client.App, { ...props, theme: 'dark' });
+		step('reveal');
+		expect(root.find('#panel')).toBe(panel);
+		expect(root.find('#b')).toBe(b);
+		root.unmount();
+		step('unmount');
+		// Passive mount effects are still queued when the root unmounts.
+		const early = mount(client.App, props);
+		early.unmount();
+		step('unmount before passive flush');
+		return transcript;
+	}
+
+	it('keeps state, effects, refs and context of hookful lite callees', () => {
+		const strong = runHookfulScenario('strong');
+		expect(strong).toEqual(runHookfulScenario('default'));
+		expect(strong).toEqual([
+			'mount | a:light:0 b:light:0 m:light:0 | ref:a layout:a0 layout:b0 layout:m0 effect:a0 effect:b0 watch:0',
+			'own update | a:light:1 b:light:0 m:light:0 | layout-cleanup:a0 layout:a1 cleanup:a0 effect:a1',
+			'parent update | a:light:1 b:light:0 m:light:0 | unwatch:0 watch:1',
+			'context | a:dark:1 b:dark:0 m:dark:0 | ',
+			'skip child effect | a:dark:1 b:dark:0 m:dark:0 | cleanup:b0',
+			'skip parent effect | a:dark:1 b:dark:0 m:dark:0 | unwatch:1',
+			'arm off | b:dark:0 m:dark:0 | layout-cleanup:a1 ref:null cleanup:a1',
+			'arm on | a:dark:0 b:dark:0 m:dark:0 | ref:a layout:a0 effect:a0 effect:b0 watch:1',
+			'hide | a:dark:0 b:dark:0 m:dark:0 | unwatch:1 layout-cleanup:a0 cleanup:a0 layout-cleanup:b0 cleanup:b0 ref:null',
+			'reveal | a:dark:0 b:dark:0 m:dark:0 | ref:a layout:a0 layout:b0 effect:a0 effect:b0 watch:1',
+			'unmount |  | layout-cleanup:a0 layout-cleanup:b0 layout-cleanup:m0 ref:null unwatch:1 cleanup:a0 cleanup:b0',
+			'unmount before passive flush |  | ref:a layout:a0 layout:b0 layout:m0 layout-cleanup:a0 layout-cleanup:b0 layout-cleanup:m0 ref:null',
+		]);
+	});
+
+	// Child owns state its parent's stable-hookful region does not witness, so
+	// the region must cover a Block that its own update re-renders directly,
+	// including when a hookless Wrap stands between them.
+	it.each<[StrongMode, boolean]>([
+		['strong', false],
+		['strong', true],
+		['default', false],
+		['default', true],
+	])(
+		'keeps a stable hookful region over a state owner fresh in %s mode (wrapped: %s)',
+		(mode, wrapped) => {
+			const child = wrapped ? '<Wrap label={props.label} />' : '<Child label={props.label} />';
+			const source = `${mode === 'strong' ? '"use strong";' : ''}
+				import { useState } from 'octane';
+				let parentSetter = null;
+				let childSetter = null;
+				export function bumpParent() { parentSetter((value) => value + 1); }
+				export function bumpChild() { childSetter((value) => value + 1); }
+				function Child(props) @{
+					const [own, setOwn] = useState(0);
+					childSetter = setOwn;
+					<b id="stable-child">{(props.label + ':' + own) as string}</b>
+				}
+				function Wrap(props) @{ <i><Child label={props.label} /></i> }
+				function Parent(props) @{
+					const [tick, setTick] = useState(0);
+					parentSetter = setTick;
+					<p id="stable-parent" data-tick={tick as number}>${child}</p>
+				}
+				export function App(props) @{ <Parent label={props.label} /> }`;
+			const options = { hmr: false, dev: false };
+			const parent = compile(source, `stable-hookful-${mode}.tsrx`, options).code;
+			// The region also witnesses the published setter. Only a default-mode
+			// Wrap may stay lite under it: there, Child keeps a Block of its own.
+			const slot = mode === 'default' && wrapped ? 'Lite' : 'Void';
+			expect(parent).toMatch(
+				new RegExp(
+					`\\|\\| _mc\\d+\\[\\d+\\] !== childSetter\\) \\{\\s+_\\$componentSlot${slot}\\(__s, 1,`,
+				),
+			);
+			const client = loadCompiledFixtureSource(source, {
+				id: `stable-hookful-${mode}.tsrx`,
+				mode: 'client',
+				compileOptions: options,
+			});
+			const root = mount(client.App, { label: 'x' });
+			const leaf = root.find('#stable-child');
+			flushSync(() => client.bumpChild());
+			expect(leaf.textContent).toBe('x:1');
+			flushSync(() => client.bumpParent());
+			expect(root.find('#stable-parent').getAttribute('data-tick')).toBe('1');
+			flushSync(() => client.bumpChild());
+			expect(root.find('#stable-child')).toBe(leaf);
+			expect(leaf.textContent).toBe('x:2');
+			// The single-root callee still needs no markers.
+			const html = '<b id="stable-child">x:2</b>';
+			expect(root.find('#stable-parent').innerHTML).toBe(wrapped ? `<i>${html}</i>` : html);
+			root.unmount();
+		},
+	);
+
+	// Reader registers an effect and then suspends through a legacy resource read,
+	// which keeps it lite. The inner boundary must catch it, discard the
+	// uncommitted attempt, and keep Counter's committed state across a re-suspend.
+	async function runSuspenseScenario(mode: StrongMode): Promise<string[]> {
+		const source = `${mode === 'strong' ? '"use strong";' : ''}
+			import { useEffect, useLayoutEffect, useState } from 'octane';
+			function Counter(props) @{
+				const [count, setCount] = useState(0);
+				const log = props.log;
+				useLayoutEffect(() => {
+					log('layout:' + count);
+					return () => log('layout-cleanup:' + count);
+				});
+				useEffect(() => {
+					log('effect:' + count);
+					return () => log('cleanup:' + count);
+				});
+				<button id="suspense-counter" onClick={() => setCount(count + 1)}>
+					{('count:' + count) as string}
+				</button>
+			}
+			function Reader(props) @{
+				const [seen] = useState(() => props.resource.label);
+				const log = props.log;
+				useEffect(() => {
+					log('read:' + seen);
+					return () => log('unread:' + seen);
+				});
+				const value = props.resource.read();
+				<i id="suspense-value">{(seen + '=' + value) as string}</i>
+			}
+			export function App(props) @{
+				@try {
+					<section>
+						@try {
+							<>
+								<Counter log={props.log} />
+								<Reader resource={props.resource} log={props.log} />
+							</>
+						} @pending {
+							<p id="inner-pending">{'inner'}</p>
+						}
+					</section>
+				} @pending {
+					<p id="outer-pending">{'outer'}</p>
+				}
+			}`;
+		const lite = /_\$componentSlotLite\(\s*__s,\s*\d+,\s*[^,]+,\s*(Counter|Reader),/g;
+		const code = compile(source, `suspense-${mode}.tsrx`, { hmr: false, dev: false }).code;
+		expect(code.match(lite)?.length ?? 0).toBe(mode === 'strong' ? 2 : 0);
+		const client = loadCompiledFixtureSource(source, {
+			id: `suspense-${mode}.tsrx`,
+			mode: 'client',
+			compileOptions: { hmr: false, dev: false },
+		});
+		const resource = (label: string) => {
+			let settle!: () => void;
+			const promise = new Promise<void>((resolve) => (settle = resolve));
+			let done = false;
+			return {
+				label,
+				read() {
+					if (!done) throw promise;
+					return 'ready';
+				},
+				async resolve() {
+					done = true;
+					settle();
+					await act(async () => {
+						await promise;
+					});
+				},
+			};
+		};
+		const log: string[] = [];
+		const transcript: string[] = [];
+		const first = resource('first');
+		const root = mount<Record<string, unknown>>(client.App, {
+			resource: first,
+			log: log.push.bind(log),
+		});
+		const step = (label: string) => {
+			flushEffects();
+			const shown = root.findAll('p, button, i').map((el) => el.textContent);
+			transcript.push(`${label} | ${shown.join(' ')} | ${log.splice(0).join(' ')}`);
+		};
+		step('suspended mount');
+		await first.resolve();
+		step('revealed');
+		root.click('#suspense-counter');
+		step('own update');
+		const second = resource('second');
+		root.update(client.App, { resource: second, log: log.push.bind(log) });
+		step('re-suspended');
+		await second.resolve();
+		step('re-revealed');
+		root.unmount();
+		step('unmount');
+		return transcript;
+	}
+
+	it('suspends the nearest boundary from a hookful lite callee', async () => {
+		const strong = await runSuspenseScenario('strong');
+		expect(strong).toEqual(await runSuspenseScenario('default'));
+		expect(strong).toEqual([
+			'suspended mount | count:0 inner | ',
+			'revealed | count:0 first=ready | layout:0 effect:0 read:first',
+			'own update | count:1 first=ready | layout-cleanup:0 layout:1 cleanup:0 effect:1',
+			're-suspended | count:1 first=ready inner | layout-cleanup:1',
+			're-revealed | count:1 first=ready | layout:1 cleanup:1 unread:first effect:1 read:first',
+			'unmount |  | layout-cleanup:1 cleanup:1 unread:first',
+		]);
+	});
+
+	it.each<StrongMode>(['strong', 'default'])(
+		'hydrates hookful lite callees in place in %s mode',
+		(mode) => {
+			const server = loadStrongHookfulApp(mode, 'server');
+			const client = loadStrongHookfulApp(mode);
+			const log: string[] = [];
+			const cell = (el: Element | null) => log.push('ref:' + (el === null ? null : el.id));
+			const props = {
+				theme: 'light',
+				mode: 'visible',
+				show: true,
+				watch: 'all',
+				log: log.push.bind(log),
+				cell,
+			};
+			const container = document.createElement('div');
+			container.innerHTML = ServerRuntime.renderToString(server.App, props).html;
+			expect(log).toEqual([]);
+			const buttons = Array.from(container.querySelectorAll('button[data-uid]'));
+			const ids = buttons.map((el) => el.getAttribute('data-uid'));
+			expect(buttons.map((el) => el.textContent)).toEqual(['a:light:0', 'b:light:0', 'm:light:0']);
+			const root = hydrateRoot(container, client.App, props);
+			flushEffects();
+			const hydrated = Array.from(container.querySelectorAll('button[data-uid]'));
+			expect(hydrated).toHaveLength(3);
+			hydrated.forEach((el, index) => expect(el).toBe(buttons[index]));
+			expect(hydrated.map((el) => el.getAttribute('data-uid'))).toEqual(ids);
+			expect(log.splice(0)).toEqual([
+				'ref:a',
+				'layout:a0',
+				'layout:b0',
+				'layout:m0',
+				'effect:a0',
+				'effect:b0',
+				'watch:0',
+			]);
+			flushSync(() => (buttons[0] as HTMLButtonElement).click());
+			flushSync(() => root.render(client.App, { ...props, theme: 'dark' }));
+			flushEffects();
+			expect(hydrated.map((el) => el.textContent)).toEqual(['a:dark:1', 'b:dark:0', 'm:dark:0']);
+			expect(log.splice(0)).toEqual(['layout-cleanup:a0', 'layout:a1', 'cleanup:a0', 'effect:a1']);
+			root.unmount();
+			expect(container.innerHTML).toBe('');
+		},
+	);
+
+	// Strong modules publish exports whose lite subtree holds hook state on a
+	// list of their own. Only a Strong importer runs them without a Block: a
+	// default importer's Block must not re-render for its child's update.
+	const STRONG_LITE_MODULES = {
+		counter: `"use strong";
+			import { useState } from 'octane';
+			export function Counter(props) @{
+				const [count, setCount] = useState(0);
+				<button class={props.name} onClick={() => setCount(count + 1)}>
+					{(props.name + ':' + count) as string}
+				</button>
+			}
+			export function Shell() @{ <p><Counter name="shell" /></p> }`,
+		// The ref keeps Wrap out of compiler regions, so it can publish a lite proof.
+		wrap: `"use strong";
+			import { Counter } from './counter';
+			export function Wrap(props) @{ <div ref={props.cell}><Counter name="wrapped" /></div> }`,
+		leaf: `"use strong";
+			export function Leaf(props) @{ <span class="leaf">{props.text as string}</span> }`,
+		app: `import { Counter, Shell } from './counter';
+			import { Wrap } from './wrap';
+			import { Leaf } from './leaf';
+			export function App(props) @{
+				props.onRender();
+				<section>
+					<Counter name="direct" />
+					<Shell />
+					<Wrap cell={props.cell} />
+					<Leaf text={props.text} />
+				</section>
+			}`,
+	};
+
+	// Only the pure Leaf publishes a compiler memo proof, as a production build does.
+	type StrongLiteProofs = Readonly<Record<string, readonly string[]>>;
+	function strongLiteOptions(lite: LiteProofs, strongLite: StrongLiteProofs) {
+		return {
+			...liteCompileOptions(lite),
+			isCompilerMemoImport: (request: string) => request === './leaf',
+			isStrongLiteComponentImport: (request: string, imported: string) =>
+				strongLite[request]?.includes(imported) === true,
+		};
+	}
+
+	it.each<StrongMode>(['strong', 'default'])(
+		'runs Strong hookful exports through lite edges only from a %s importer',
+		(mode) => {
+			const sources = STRONG_LITE_MODULES;
+			const listsOf = (
+				source: string,
+				id: string,
+				lite: LiteProofs,
+				strongLite: StrongLiteProofs,
+			) => {
+				const result = compile(source, id, strongLiteOptions(lite, strongLite)) as {
+					liteComponentExports?: string[];
+					strongLiteComponentExports?: string[];
+				};
+				return [result.liteComponentExports ?? [], result.strongLiteComponentExports ?? []];
+			};
+			const [counterLite, counterStrong] = listsOf(sources.counter, 'sl-counter.tsrx', {}, {});
+			expect([counterLite, counterStrong]).toEqual([[], ['Counter', 'Shell']]);
+			// A default module's hookful export keeps its Block, so Shell stays stateless.
+			expect(
+				listsOf(sources.counter.replace('"use strong";', ''), 'sl-counter-default.tsrx', {}, {}),
+			).toEqual([['Shell'], []]);
+			const [leafLite, leafStrong] = listsOf(sources.leaf, 'sl-leaf.tsrx', {}, {});
+			expect([leafLite, leafStrong]).toEqual([['Leaf'], []]);
+			// Shell and Wrap are hookless, but a lite edge to Counter brings its state along.
+			const strongLite = { './counter': counterStrong };
+			expect(listsOf(sources.wrap, 'sl-wrap.tsrx', {}, strongLite)).toEqual([[], ['Wrap']]);
+			const proofs = {
+				lite: { './leaf': { lite: leafLite, anchorless: [] } },
+				strongLite: { ...strongLite, './wrap': ['Wrap'] },
+			};
+			const app = mode === 'strong' ? `"use strong";\n${sources.app}` : sources.app;
+			const code = compile(
+				app,
+				`sl-app-${mode}.tsrx`,
+				strongLiteOptions(proofs.lite, proofs.strongLite),
+			).code;
+			const liteTags = (
+				code.match(/_\$componentSlotLite\(\s*__s,\s*\d+,\s*[^,]+,\s*(\w+),/g) ?? []
+			).map((call: string) => call.match(/(\w+),$/)![1]);
+			expect(liteTags).toEqual(mode === 'strong' ? ['Counter', 'Shell', 'Wrap', 'Leaf'] : ['Leaf']);
+
+			const load = (source: string, id: string, runtimeModules?: Record<string, any>) =>
+				loadCompiledFixtureSource(source, {
+					id,
+					mode: 'client',
+					compileOptions: strongLiteOptions(proofs.lite, proofs.strongLite),
+					runtimeModules,
+				});
+			const counter = load(sources.counter, 'sl-counter.tsrx');
+			const modules = {
+				'./counter': counter,
+				'./wrap': load(sources.wrap, 'sl-wrap.tsrx', { './counter': counter }),
+				'./leaf': load(sources.leaf, 'sl-leaf.tsrx'),
+			};
+			const client = load(app, `sl-app-${mode}.tsrx`, modules);
+			let renders = 0;
+			const cell = () => {};
+			const root = mount(client.App, { text: 'a', cell, onRender: () => renders++ });
+			const leaf = root.find('.leaf');
+			root.click('.direct');
+			root.click('.shell');
+			root.click('.wrapped');
+			root.click('.wrapped');
+			expect(root.find('.direct').textContent).toBe('direct:1');
+			expect(root.find('.shell').textContent).toBe('shell:1');
+			expect(root.find('.wrapped').textContent).toBe('wrapped:2');
+			if (mode === 'default') expect(renders).toBe(1);
+			root.update(client.App, { text: 'b', cell, onRender: () => renders++ });
+			expect(root.find('.leaf')).toBe(leaf);
+			expect(leaf.textContent).toBe('b');
+			expect(root.find('.wrapped').textContent).toBe('wrapped:2');
+			root.unmount();
+		},
+	);
+
+	// Compiles a scenario in `mode` and names the callees it lowered to lite
+	// edges, so each parity scenario proves that Strong really ran them lite.
+	function loadLiteScenario(source: string, mode: StrongMode, id: string) {
+		const authored = mode === 'strong' ? `"use strong";\n${source}` : source;
+		const options = { hmr: false, dev: false };
+		const code = compile(authored, `${id}-${mode}.tsrx`, options).code;
+		const lite = (code.match(/_\$componentSlotLite\(\s*__s,\s*\d+,\s*[^,]+,\s*\w+,/g) ?? []).map(
+			(call: string) => call.match(/(\w+),$/)![1],
+		);
+		const client = loadCompiledFixtureSource(authored, {
+			id: `${id}-${mode}.tsrx`,
+			mode: 'client',
+			compileOptions: options,
+		});
+		return { client, lite };
+	}
+
+	// Two Probe instances share one owner Block, so a cell or handle keyed on that
+	// Block instead of the lite Scope collides between them.
+	const EFFECT_HOOKS_SOURCE = `
+		import { Activity, useEffect, useEffectEvent, useImperativeHandle, useInsertionEffect, useLayoutSnapshot, useLazyRef, useState } from 'octane';
+
+		function Probe(props) @{
+			const [count, setCount] = useState(0);
+			const log = props.log;
+			const name = props.name;
+			const clicks = useLazyRef(() => ({ name, total: 0 }));
+			useInsertionEffect(() => {
+				log('insert:' + name + count);
+				return () => log('uninsert:' + name + count);
+			});
+			const report = useEffectEvent(() => log('event:' + name + count));
+			useEffect(() => {
+				if (props.ping > 0) report();
+			});
+			useImperativeHandle(props.handle, () => ({ read: () => name + count }));
+			const shown = useLayoutSnapshot(() => props.measure(name), { initial: '-' });
+			<button
+				id={props.prefix + name}
+				data-shown={shown}
+				onClick={() => {
+					clicks.current.total++;
+					log('click:' + clicks.current.name + clicks.current.total);
+					setCount(count + 1);
+				}}
+			>
+				{(name + ':' + count) as string}
+			</button>
+		}
+
+		export function App(props) @{
+			<Activity mode={props.mode}>
+				<section>
+					<Probe name="a" prefix={props.prefix} ping={props.ping} log={props.log} handle={props.handles.a} measure={props.measure} />
+					<Probe name="b" prefix={props.prefix} ping={props.ping} log={props.log} handle={props.handles.b} measure={props.measure} />
+					@if (props.showC) {
+						<Probe name="c" prefix={props.prefix} ping={props.ping} log={props.log} handle={props.handles.c} measure={props.measure} />
+					}
+				</section>
+			</Activity>
+		}
+	`;
+
+	function runEffectHooksScenario(mode: StrongMode): string[] {
+		const { client, lite } = loadLiteScenario(EFFECT_HOOKS_SOURCE, mode, 'lite-effect-hooks');
+		expect(lite).toEqual(mode === 'strong' ? ['Probe', 'Probe', 'Probe'] : []);
+		const prefix = `effect-hooks-${mode}-`;
+		const log: string[] = [];
+		const handles = {
+			a: { current: null as { read(): string } | null },
+			b: { current: null as { read(): string } | null },
+			c: { current: null as { read(): string } | null },
+		};
+		const props = {
+			prefix,
+			mode: 'visible',
+			ping: 0,
+			showC: true,
+			log: log.push.bind(log),
+			handles,
+			measure: (name: string) => document.getElementById(prefix + name)?.textContent ?? '?',
+		};
+		const root = mount(client.App, props);
+		const transcript: string[] = [];
+		const step = (label: string) => {
+			flushEffects();
+			const shown = root
+				.findAll('button')
+				.map((el) => `${el.textContent}[${el.getAttribute('data-shown')}]`);
+			const read = Object.entries(handles).map(
+				([name, ref]) => `${name}=${ref.current === null ? null : ref.current.read()}`,
+			);
+			transcript.push(
+				`${label} | ${shown.join(' ')} | ${read.join(' ')} | ${log.splice(0).join(' ')}`,
+			);
+		};
+		step('mount');
+		root.click(`#${prefix}a`);
+		step('own update');
+		root.update(client.App, { ...props, ping: 1 });
+		step('effect event');
+		root.click(`#${prefix}b`);
+		root.update(client.App, { ...props, ping: 2 });
+		step('sibling update');
+		root.update(client.App, { ...props, ping: 2, showC: false });
+		step('arm off');
+		root.update(client.App, { ...props, ping: 2, showC: false, mode: 'hidden' });
+		step('hide');
+		root.update(client.App, { ...props, ping: 2, showC: false });
+		step('reveal');
+		root.click(`#${prefix}a`);
+		step('update after reveal');
+		root.unmount();
+		step('unmount');
+		return transcript;
+	}
+
+	it('keeps lazy refs, insertion effects, Effect Events, handles and snapshots per lite callee', () => {
+		const strong = runEffectHooksScenario('strong');
+		expect(strong).toEqual(runEffectHooksScenario('default'));
+		expect(strong).toEqual([
+			'mount | a:0[a:0] b:0[b:0] c:0[c:0] | a=a0 b=b0 c=c0 | insert:a0 insert:b0 insert:c0',
+			'own update | a:1[a:1] b:0[b:0] c:0[c:0] | a=a1 b=b0 c=c0 | click:a1 uninsert:a0 insert:a1',
+			'effect event | a:1[a:1] b:0[b:0] c:0[c:0] | a=a1 b=b0 c=c0 | event:a1 event:b0 event:c0',
+			'sibling update | a:1[a:1] b:1[b:1] c:0[c:0] | a=a1 b=b1 c=c0 | click:b1 uninsert:b0 insert:b1 event:a1 event:b1 event:c0',
+			'arm off | a:1[a:1] b:1[b:1] | a=a1 b=b1 c=null | uninsert:c0',
+			'hide | a:1[a:1] b:1[b:1] | a=null b=null c=null | ',
+			'reveal | a:1[a:1] b:1[b:1] | a=a1 b=b1 c=null | event:a1 event:b1',
+			'update after reveal | a:2[a:2] b:1[b:1] | a=a2 b=b1 c=null | click:a2 uninsert:a1 insert:a2',
+			'unmount |  | a=null b=null c=null | uninsert:a2 uninsert:b1',
+		]);
+	});
+
+	// Each Mirror subscribes to its own store and links an editable draft to the
+	// store's value; the conditional one unsubscribes when its arm turns off.
+	const STORE_HOOKS_SOURCE = `
+		import { useLinkedState, useSyncExternalStore } from 'octane';
+
+		function Mirror(props) @{
+			const value = useSyncExternalStore(props.store.subscribe, props.store.read, props.store.server);
+			const [draft, setDraft] = useLinkedState(value, (source) => source * 10);
+			<button class={props.name} onClick={() => setDraft((current) => current + 1)}>
+				{(props.name + ':' + value + '/' + draft) as string}
+			</button>
+		}
+
+		export function App(props) @{
+			<section>
+				<Mirror name="a" store={props.stores.a} />
+				<Mirror name="b" store={props.stores.b} />
+				@if (props.showC) {
+					<Mirror name="c" store={props.stores.c} />
+				}
+			</section>
+		}
+	`;
+
+	function testStore<T = number>(name: string, log: string[], value = 0 as T, server = value) {
+		const listeners = new Set<() => void>();
+		return {
+			read: () => value,
+			server: () => server,
+			subscribe(listener: () => void) {
+				listeners.add(listener);
+				log.push('subscribe:' + name);
+				return () => {
+					listeners.delete(listener);
+					log.push('unsubscribe:' + name);
+				};
+			},
+			set(next: T) {
+				value = next;
+				listeners.forEach((listener) => listener());
+			},
+		};
+	}
+
+	function runStoreHooksScenario(mode: StrongMode): string[] {
+		const { client, lite } = loadLiteScenario(STORE_HOOKS_SOURCE, mode, 'lite-store-hooks');
+		expect(lite).toEqual(mode === 'strong' ? ['Mirror', 'Mirror', 'Mirror'] : []);
+		const log: string[] = [];
+		const stores = { a: testStore('a', log), b: testStore('b', log), c: testStore('c', log) };
+		const props = { stores, showC: true };
+		const root = mount(client.App, props);
+		const transcript: string[] = [];
+		const step = (label: string) => {
+			flushEffects();
+			const shown = root.findAll('button').map((el) => el.textContent);
+			transcript.push(`${label} | ${shown.join(' ')} | ${log.splice(0).join(' ')}`);
+		};
+		step('mount');
+		stores.a.set(1);
+		step('store a');
+		root.click('.a');
+		step('edit a');
+		root.click('.b');
+		root.click('.b');
+		step('edit b');
+		stores.b.set(2);
+		step('store b relinks');
+		root.click('.c');
+		stores.c.set(3);
+		step('store c');
+		root.update(client.App, { ...props, showC: false });
+		step('arm off');
+		stores.c.set(4);
+		step('store c after unmount');
+		root.unmount();
+		step('unmount');
+		return transcript;
+	}
+
+	it('keeps external-store subscriptions and linked state per lite callee', () => {
+		const strong = runStoreHooksScenario('strong');
+		expect(strong).toEqual(runStoreHooksScenario('default'));
+		expect(strong).toEqual([
+			'mount | a:0/0 b:0/0 c:0/0 | subscribe:a subscribe:b subscribe:c',
+			'store a | a:1/10 b:0/0 c:0/0 | ',
+			'edit a | a:1/11 b:0/0 c:0/0 | ',
+			'edit b | a:1/11 b:0/2 c:0/0 | ',
+			'store b relinks | a:1/11 b:2/20 c:0/0 | ',
+			'store c | a:1/11 b:2/20 c:3/30 | ',
+			'arm off | a:1/11 b:2/20 | unsubscribe:c',
+			'store c after unmount | a:1/11 b:2/20 | ',
+			'unmount |  | unsubscribe:a unsubscribe:b',
+		]);
+	});
+
+	// The server renders each store's server snapshot. Hydration adopts that DOM,
+	// then the commit-time store check moves every Mirror to its client value.
+	it.each<StrongMode>(['strong', 'default'])(
+		'hydrates external-store and linked-state lite callees in %s mode',
+		(mode) => {
+			const authored =
+				mode === 'strong' ? `"use strong";\n${STORE_HOOKS_SOURCE}` : STORE_HOOKS_SOURCE;
+			const load = (environment: 'client' | 'server') =>
+				loadCompiledFixtureSource(authored, {
+					id: `lite-store-hydrate-${mode}.tsrx`,
+					mode: environment,
+					compileOptions: { hmr: false, dev: false },
+				});
+			const log: string[] = [];
+			const stores = {
+				a: testStore('a', log, 7, 5),
+				b: testStore('b', log, 5, 5),
+				c: testStore('c', log, 7, 5),
+			};
+			const props = { stores, showC: true };
+			const container = document.createElement('div');
+			container.innerHTML = ServerRuntime.renderToString(load('server').App, props).html;
+			const buttons = Array.from(container.querySelectorAll('button'));
+			expect(buttons.map((el) => el.textContent)).toEqual(['a:5/50', 'b:5/50', 'c:5/50']);
+			const root = hydrateRoot(container, load('client').App, props);
+			flushEffects();
+			const hydrated = Array.from(container.querySelectorAll('button'));
+			expect(hydrated).toHaveLength(3);
+			hydrated.forEach((el, index) => expect(el).toBe(buttons[index]));
+			expect(hydrated.map((el) => el.textContent)).toEqual(['a:7/70', 'b:5/50', 'c:7/70']);
+			expect(log.splice(0)).toEqual(['subscribe:a', 'subscribe:b', 'subscribe:c']);
+			flushSync(() => (buttons[1] as HTMLButtonElement).click());
+			stores.a.set(8);
+			flushEffects();
+			expect(hydrated.map((el) => el.textContent)).toEqual(['a:8/80', 'b:5/51', 'c:7/70']);
+			root.unmount();
+			expect(log).toEqual(['unsubscribe:a', 'unsubscribe:b', 'unsubscribe:c']);
+		},
+	);
+
+	// Panel keeps a Block because it calls use(), so lite Probe's Effect Event
+	// versions Panel. Panel and Reader update from their own stores in one flush:
+	// Panel completes with a new event body, then Reader suspends the shared
+	// boundary. Until it reveals, the event keeps its committed body even when
+	// called from outside the hidden primary.
+	const HIDDEN_EFFECT_EVENT_SOURCE = `
+		import { use, useEffectEvent, useLayoutEffect, useSyncExternalStore } from 'octane';
+
+		function Probe(props) @{
+			const report = useEffectEvent(() => props.log('event:' + props.label));
+			useLayoutEffect(() => {
+				props.expose(report);
+			});
+			<b>{props.label as string}</b>
+		}
+
+		function Panel(props) @{
+			const suffix = use(props.ready);
+			const label = useSyncExternalStore(props.labels.subscribe, props.labels.read);
+			<div>
+				<Probe label={label + suffix} log={props.log} expose={props.expose} />
+			</div>
+		}
+
+		function Reader(props) @{
+			const promise = useSyncExternalStore(props.promises.subscribe, props.promises.read);
+			const value = use(promise);
+			<i>{value as string}</i>
+		}
+
+		export function App(props) @{
+			@try {
+				<section>
+					<Panel ready={props.ready} labels={props.labels} log={props.log} expose={props.expose} />
+					<Reader promises={props.promises} />
+				</section>
+			} @pending {
+				<p>{'pending'}</p>
+			}
+		}
+	`;
+
+	async function runHiddenEffectEventScenario(mode: StrongMode): Promise<string[]> {
+		const { client, lite } = loadLiteScenario(
+			HIDDEN_EFFECT_EVENT_SOURCE,
+			mode,
+			'lite-hidden-event',
+		);
+		expect(lite).toEqual(mode === 'strong' ? ['Probe'] : []);
+		const settled = (value: string) =>
+			Object.assign(Promise.resolve(value), { status: 'fulfilled', value });
+		const log: string[] = [];
+		let report = () => {};
+		const labels = testStore('labels', [], 'a');
+		const promises = testStore<Promise<string>>('promises', [], settled('one'));
+		const props = {
+			ready: settled('!'),
+			labels,
+			promises,
+			log: log.push.bind(log),
+			expose: (fn: () => void) => (report = fn),
+		};
+		const root = mount(client.App, props);
+		const transcript: string[] = [];
+		const step = (label: string) => {
+			flushEffects();
+			report();
+			const shown = root.findAll('b, i, p').map((el) => el.textContent);
+			transcript.push(`${label} | ${shown.join(' ')} | ${log.splice(0).join(' ')}`);
+		};
+		step('mount');
+		let resolve!: (value: string) => void;
+		labels.set('b');
+		promises.set(new Promise<string>((done) => (resolve = done)));
+		step('hidden update');
+		await act(async () => resolve('two'));
+		step('revealed');
+		root.unmount();
+		return transcript;
+	}
+
+	it('keeps a lite Effect Event body parked while its boundary hides the primary', async () => {
+		const strong = await runHiddenEffectEventScenario('strong');
+		expect(strong).toEqual(await runHiddenEffectEventScenario('default'));
+		expect(strong).toEqual([
+			'mount | a! one | event:a!',
+			'hidden update | b! one pending | event:a!',
+			'revealed | b! two | event:b!',
+		]);
+	});
+
+	// Status reads the <form> its owner renders around it, while Todo never sees
+	// the form it renders itself. Each Todo owns its Action queue, optimistic
+	// count, transition and deferred query.
+	const ACTION_HOOKS_SOURCE = `
+		import { useActionState, useDeferredValue, useFormState, useFormStatus, useOptimistic, useTransition } from 'octane';
+
+		function Status(props) @{
+			const status = useFormStatus();
+			<i class={'status-' + props.name}>{(status.pending ? 'pending' : 'idle') as string}</i>
+		}
+
+		function Todo(props) @{
+			const [saved, save, saving] = useActionState(async (count, step) => {
+				await props.gate();
+				return count + step;
+			}, 0);
+			const [shown, addOptimistic] = useOptimistic(saved, (count, step) => count + step);
+			const [busy, start] = useTransition();
+			const query = useDeferredValue(props.query);
+			const own = useFormStatus();
+			const [resets, reset] = useFormState((count) => count + 1, 0);
+			<form
+				class={'form-' + props.name}
+				action={() => {
+					addOptimistic(1);
+					return save(1);
+				}}
+			>
+				<Status name={props.name} />
+				<b>
+					{(props.name + ':' + shown + '/' + saved + (saving ? ' saving' : '') + (busy ? ' busy' : '') + (own.pending ? ' own' : '') + ' r=' + resets + ' q=' + query) as string}
+				</b>
+				<button class={'go-' + props.name} type="button" onClick={() => start(async () => { await props.gate(); })}>
+					{'go'}
+				</button>
+				<button class={'reset-' + props.name} type="button" onClick={() => reset()}>
+					{'reset'}
+				</button>
+			</form>
+		}
+
+		export function App(props) @{
+			<section>
+				<Todo name="a" gate={props.gate} query={props.query} />
+				<Todo name="b" gate={props.gate} query={props.query + '!'} />
+			</section>
+		}
+	`;
+
+	async function runActionHooksScenario(mode: StrongMode): Promise<string[]> {
+		const { client, lite } = loadLiteScenario(ACTION_HOOKS_SOURCE, mode, 'lite-action-hooks');
+		expect(lite).toEqual(mode === 'strong' ? ['Status', 'Todo', 'Todo'] : []);
+		const gates: Array<() => void> = [];
+		const gate = () => new Promise<void>((resolve) => gates.push(resolve));
+		const props = { gate, query: 'x' };
+		const root = mount(client.App, props);
+		const transcript: string[] = [];
+		const step = async (label: string) => {
+			await act(async () => {});
+			flushEffects();
+			const shown = root.findAll('i, b').map((el) => el.textContent);
+			transcript.push(`${label} | ${shown.join(' ')}`);
+		};
+		await step('mount');
+		flushSync(() =>
+			root
+				.find('.form-a')
+				.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true })),
+		);
+		await step('submit a');
+		gates.shift()!();
+		await step('saved a');
+		root.click('.go-b');
+		await step('transition b');
+		gates.shift()!();
+		await step('transition b done');
+		root.click('.reset-b');
+		await step('form state b');
+		root.update(client.App, { ...props, query: 'y' });
+		const stale = root.findAll('b').map((el) => el.textContent);
+		transcript.push(`urgent query | ${stale.join(' ')}`);
+		await step('deferred query');
+		root.unmount();
+		return transcript;
+	}
+
+	it('keeps Actions, optimistic state, transitions, deferred values and form status per lite callee', async () => {
+		const strong = await runActionHooksScenario('strong');
+		expect(strong).toEqual(await runActionHooksScenario('default'));
+		expect(strong).toEqual([
+			'mount | idle a:0/0 r=0 q=x idle b:0/0 r=0 q=x!',
+			'submit a | pending a:1/0 saving r=0 q=x idle b:0/0 r=0 q=x!',
+			'saved a | idle a:1/1 r=0 q=x idle b:0/0 r=0 q=x!',
+			'transition b | idle a:1/1 r=0 q=x idle b:0/0 busy r=0 q=x!',
+			'transition b done | idle a:1/1 r=0 q=x idle b:0/0 r=0 q=x!',
+			'form state b | idle a:1/1 r=0 q=x idle b:0/0 r=1 q=x!',
+			'urgent query | a:1/1 r=0 q=x b:0/0 r=1 q=x!',
+			'deferred query | idle a:1/1 r=0 q=y idle b:0/0 r=1 q=y!',
+		]);
+	});
+
+	// use() stores thenables by call order on the rendering Block. Maybe calls it
+	// only while its store is on. A resume that lands in the same task as the
+	// store turning off replays Later's use() first in the sequence, where a
+	// shared sequence would still hold Maybe's promise.
+	const USE_SEQUENCE_SOURCE = `
+		import { use, useLayoutEffect, useSyncExternalStore } from 'octane';
+
+		function Maybe(props) @{
+			const on = useSyncExternalStore(props.toggle.subscribe, props.toggle.read);
+			const label = on ? use(props.promise) : 'off';
+			useLayoutEffect(() => {
+				props.log('maybe:' + label);
+			});
+			<i>{('maybe:' + label) as string}</i>
+		}
+
+		function Later(props) @{
+			const label = use(props.promise);
+			useLayoutEffect(() => {
+				props.log('later:' + label);
+			});
+			<b>{('later:' + label) as string}</b>
+		}
+
+		export function App(props) @{
+			@try {
+				<section>
+					<Maybe promise={props.first} toggle={props.toggle} log={props.log} />
+					<Later promise={props.second} log={props.log} />
+				</section>
+			} @pending {
+				<p>{'pending'}</p>
+			}
+		}
+	`;
+
+	async function runUseSequenceScenario(mode: StrongMode): Promise<string[]> {
+		const { client } = loadLiteScenario(USE_SEQUENCE_SOURCE, mode, 'lite-use-sequence');
+		const pending = () => {
+			let resolve!: (value: string) => void;
+			const promise = new Promise<string>((done) => (resolve = done));
+			return { promise, resolve };
+		};
+		const log: string[] = [];
+		const toggle = testStore('toggle', [], 1);
+		const first = pending();
+		const second = pending();
+		const props = {
+			first: first.promise,
+			second: second.promise,
+			toggle,
+			log: log.push.bind(log),
+		};
+		const root = mount(client.App, props);
+		const transcript: string[] = [];
+		const step = (label: string) => {
+			flushEffects();
+			const shown = root.findAll('i, b, p').map((el) => el.textContent);
+			transcript.push(`${label} | ${shown.join(' ')} | ${log.splice(0).join(' ')}`);
+		};
+		await act(async () => first.resolve('one'));
+		await act(async () => second.resolve('two'));
+		step('mount');
+		const third = pending();
+		root.update(client.App, { ...props, second: third.promise });
+		step('suspended update');
+		await act(async () => {
+			third.resolve('three');
+			toggle.set(0);
+		});
+		step('resolved while turning off');
+		root.unmount();
+		return transcript;
+	}
+
+	it('keeps use() callees on their own thenable sequence across a resume', async () => {
+		const strong = await runUseSequenceScenario('strong');
+		expect(strong).toEqual(await runUseSequenceScenario('default'));
+		expect(strong).toEqual([
+			'mount | maybe:one later:two | maybe:one later:two',
+			'suspended update | maybe:one later:two pending | ',
+			'resolved while turning off | maybe:off later:three | maybe:off later:three',
+		]);
+	});
+
+	// use(Context) reads exactly as useContext does, so a callee whose use() calls
+	// all take a proven module context stays lite. Dynamic's argument could be a
+	// thenable, so it keeps its Block. Frame's memo wall has no props: only the
+	// context reads of the lite callees inside it re-render it.
+	const USE_CONTEXT_SOURCE = `
+		import { createContext, memo, use, useState } from 'octane';
+
+		const Theme = createContext('light');
+
+		function Label(props) @{
+			const theme = use(Theme);
+			<i>{(props.name + ':' + theme) as string}</i>
+		}
+
+		function Counter(props) @{
+			const theme = use(Theme);
+			const [count, setCount] = useState(0);
+			<button id={props.name} onClick={() => setCount(count + 1)}>
+				{(props.name + ':' + theme + ':' + count) as string}
+			</button>
+		}
+
+		function Dynamic(props) @{
+			const theme = use(props.usable);
+			<b>{('dynamic:' + theme) as string}</b>
+		}
+
+		const Frame = memo(function Frame() @{
+			<div><Label name="m" /><Counter name="m" /></div>
+		});
+
+		export function App(props) @{
+			<Theme value={props.theme}>
+				<Label name="a" />
+				<Counter name="a" />
+				<Dynamic usable={Theme} />
+				<Frame />
+			</Theme>
+		}
+	`;
+
+	function runUseContextScenario(mode: StrongMode, hydrate: boolean): string[] {
+		const { client, lite } = loadLiteScenario(USE_CONTEXT_SOURCE, mode, 'lite-use-context');
+		expect(lite).toEqual(mode === 'strong' ? ['Label', 'Counter', 'Label', 'Counter'] : []);
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const props = { theme: 'light' };
+		let root;
+		if (hydrate) {
+			const server = loadCompiledFixtureSource(
+				mode === 'strong' ? `"use strong";\n${USE_CONTEXT_SOURCE}` : USE_CONTEXT_SOURCE,
+				{
+					id: `lite-use-context-${mode}.tsrx`,
+					mode: 'server',
+					compileOptions: { hmr: false, dev: false },
+				},
+			);
+			container.innerHTML = ServerRuntime.renderToString(server.App, props).html;
+			root = hydrateRoot(container, client.App, props);
+		} else {
+			root = createRoot(container);
+			root.render(client.App, props);
+		}
+		flushSync(() => {});
+		const m = container.querySelector('#m') as HTMLButtonElement;
+		const transcript: string[] = [];
+		const step = (label: string) => {
+			const shown = Array.from(container.querySelectorAll('i, button, b'), (el) => el.textContent);
+			transcript.push(`${label} | ${shown.join(' ')}`);
+		};
+		step('mount');
+		flushSync(() => (container.querySelector('#a') as HTMLButtonElement).click());
+		flushSync(() => m.click());
+		step('own updates');
+		flushSync(() => root.render(client.App, { theme: 'dark' }));
+		step('dark');
+		flushSync(() => root.render(client.App, { theme: 'light' }));
+		step('light');
+		expect(container.querySelector('#m')).toBe(m);
+		root.unmount();
+		container.remove();
+		return transcript;
+	}
+
+	it.each([false, true])(
+		'keeps use(Context) callees lite and current through a memo wall (hydrate: %s)',
+		(hydrate) => {
+			const strong = runUseContextScenario('strong', hydrate);
+			expect(strong).toEqual(runUseContextScenario('default', hydrate));
+			expect(strong).toEqual([
+				'mount | a:light a:light:0 dynamic:light m:light m:light:0',
+				'own updates | a:light a:light:1 dynamic:light m:light m:light:1',
+				'dark | a:dark a:dark:1 dynamic:dark m:dark m:dark:1',
+				'light | a:light a:light:1 dynamic:light m:light m:light:1',
+			]);
+		},
+	);
+
+	// Each read below may reach a thenable, which use() stores on the Block.
+	it.each([
+		'const theme = use(props.usable);',
+		'const theme = use(Theme, props.usable);',
+		'const theme = use?.(Theme);',
+		'const read = use; const theme = read(props.usable);',
+		'const theme = use(Imported);',
+	])('keeps a Block for a Strong callee that runs %s', (read) => {
+		const source = `"use strong";
+			import { createContext, use } from 'octane';
+			import { Imported } from './theme';
+			const Theme = createContext('light');
+			function Reader(props) @{
+				${read}
+				<i>{theme as string}</i>
+			}
+			export function App(props) @{ <Theme value="dark"><Reader usable={props.usable} /></Theme> }`;
+		const code = compile(source, 'use-thenable-reader.tsrx', { hmr: false, dev: false }).code;
+		expect(code).not.toMatch(/_\$componentSlotLite\(\s*__s,\s*\d+,\s*[^,]+,\s*Reader,/);
+		expect(code).toMatch(/_\$componentSlotVoid\(\s*__s,\s*\d+,\s*[^,]+,\s*Reader,/);
 	});
 });
 
@@ -1543,6 +3623,503 @@ describe('compiler-owned component-region memoization', () => {
 		root.unmount();
 	});
 
+	const CONTEXT_READER = `import { useContext, useState } from 'octane';
+		 import { Theme } from './theme';
+		 export function Reader(props) @{
+			const theme = useContext(Theme);
+			<b>{(props.label + ':' + theme) as string}</b>
+		 }`;
+
+	// A component a body names through a binding, or returns from its props, is
+	// unknown to the cache over that body, so it must still see a Provider change.
+	it.each([
+		['a local', `function Tag(props) @{ const C = props.comp; <i><C label="tag" /></i> }`],
+		['a destructured prop', `function Tag({ comp: C }) @{ <i><C label="tag" /></i> }`],
+		[
+			'a local at the body root',
+			`function Tag(props) @{ const C = props.comp; <C label="tag" /> }`,
+		],
+		[
+			'a local inside @if',
+			`function Tag(props) @{ const C = props.comp; <i>@if (C) { <C label="tag" /> }</i> }`,
+		],
+		[
+			'a returned prop value',
+			`function Tag(props) { if (props.content) return props.content; return <i>{'off'}</i>; }`,
+		],
+		[
+			'a @switch case hole',
+			`function Tag(props) @{ <i>@switch (props.content ? 'shown' : 'hidden') { @case 'shown': { {props.content} } @default: { <s /> } }</i> }`,
+		],
+	])('refreshes a context consumer a cached callee renders through %s', (shape, tag) => {
+		const { App, Reader } = loadCompiledFixtureSource(
+			`${CONTEXT_READER}
+			 ${tag}
+			 export function App(props) @{
+				<Theme value={props.theme}><p><Tag comp={props.comp} content={props.content} /></p></Theme>
+			 }`,
+			{
+				id: `auto-memo-bound-tag-${shape.replaceAll(' ', '-')}.tsrx`,
+				mode: 'client',
+				compileOptions: { hmr: false, dev: false },
+				runtimeModules: { './theme': { Theme: createContext('t0') } },
+			},
+		);
+		const content = createElement(Reader, { label: 'tag' });
+		const root = mount(App, { comp: Reader, content, theme: 't1' });
+		try {
+			expect(root.find('b').textContent).toBe('tag:t1');
+			root.update(App, { comp: Reader, content, theme: 't2' });
+			expect(root.find('b').textContent).toBe('tag:t2');
+		} finally {
+			root.unmount();
+		}
+	});
+
+	it('refreshes a context consumer an imported cached callee renders through a local tag', () => {
+		const tag = loadImportedModule(
+			`export function Tag(props) @{ const C = props.comp; <i><C label="tag" /></i> }`,
+			'imported-bound-tag.tsrx',
+		);
+		const { App, Reader } = loadImportedModule(
+			`${CONTEXT_READER}
+			 import { Tag } from './tag';
+			 export function App(props) @{
+				<Theme value={props.theme}><p><Tag comp={props.comp} /></p></Theme>
+			 }`,
+			'imported-bound-tag-parent.tsrx',
+			{ './tag': tag, './theme': { Theme: createContext('t0') } },
+		);
+		const root = mount(App, { comp: Reader, theme: 't1' });
+		try {
+			expect(root.find('b').textContent).toBe('tag:t1');
+			root.update(App, { comp: Reader, theme: 't2' });
+			expect(root.find('b').textContent).toBe('tag:t2');
+		} finally {
+			root.unmount();
+		}
+	});
+
+	// The hook keeps List itself uncached, so only its whole-list cache, or the
+	// row cache under an iterable the list cannot cache, skips the rows.
+	it.each([
+		[
+			'a row local tag',
+			'props.items',
+			'',
+			`const C = item.comp; <li><C label={item.label} /></li>`,
+		],
+		[
+			'a parent local tag',
+			'props.items',
+			'const C = props.comp;',
+			`<li><C label={item.label} /></li>`,
+		],
+		['a value hole', 'props.items', '', `<li>{item.content}</li>`],
+		[
+			'a parent local tag in uncached rows',
+			'props.items.filter(Boolean)',
+			'const C = props.comp;',
+			`<li><C label={item.label} /></li>`,
+		],
+	])(
+		'refreshes a context consumer cached list rows render through %s',
+		(shape, iterable, setup, row) => {
+			const { App, Reader } = loadCompiledFixtureSource(
+				`${CONTEXT_READER}
+			 function List(props) @{
+				const [count] = useState(0);
+				${setup}
+				<ul data-count={count as number}>
+					@for (const item of ${iterable}; key item.id) { ${row} }
+				</ul>
+			 }
+			 export function App(props) @{
+				<Theme value={props.theme}><List comp={props.comp} items={props.items} /></Theme>
+			 }`,
+				{
+					id: `auto-memo-bound-row-${shape.replaceAll(' ', '-')}.tsrx`,
+					mode: 'client',
+					compileOptions: { hmr: false, dev: false },
+					runtimeModules: { './theme': { Theme: createContext('t0') } },
+				},
+			);
+			const items = [
+				{ id: 1, label: 'row', comp: Reader, content: createElement(Reader, { label: 'row' }) },
+			];
+			const root = mount(App, { comp: Reader, items, theme: 't1' });
+			try {
+				expect(root.find('b').textContent).toBe('row:t1');
+				root.update(App, { comp: Reader, items, theme: 't2' });
+				expect(root.find('b').textContent).toBe('row:t2');
+			} finally {
+				root.unmount();
+			}
+		},
+	);
+
+	// The owner's own update clears its context aggregate, then hits the cache.
+	// The hit must restore the skipped consumer's reads, or the next Provider
+	// change lets the owner's memo wall bail over it.
+	it.each([
+		[
+			'a list row hole',
+			`@for (const item of props.items; key item.id) { <li>{item.content}</li> }`,
+		],
+		[
+			'a list row tag',
+			`@for (const item of props.items; key item.id) { const C = item.comp; <li><C label="r" /></li> }`,
+		],
+		['a callee hole', `<Slot content={props.content} />`],
+		['a callee local tag', `<Tag comp={props.comp} />`],
+		['a memo() consumer below a callee', `<Wrapper label={props.content} />`],
+	])(
+		'refreshes context below a cache hit inside a re-rendered memo() owner through %s',
+		(shape, body) => {
+			const { App, Reader } = loadCompiledFixtureSource(
+				`import { memo } from 'octane';
+			 ${CONTEXT_READER}
+			 const MemoReader = memo(Reader);
+			 function Slot(props) @{ <span>{props.content}</span> }
+			 function Tag(props) @{ const C = props.comp; <span><C label="r" /></span> }
+			 function Wrapper(props) @{ <span><MemoReader label="r" /></span> }
+			 function List(props) @{
+				const [tick, setTick] = useState(0);
+				<ul data-tick={tick as number} onClick={() => setTick(tick + 1)}>${body}</ul>
+			 }
+			 const MemoList = memo(List);
+			 export function App(props) @{
+				<Theme value={props.theme}><MemoList items={props.items} content={props.content} comp={props.comp} /></Theme>
+			 }`,
+				{
+					id: `auto-memo-owner-hit-${shape.replaceAll(' ', '-').replace(/[()]/g, '')}.tsrx`,
+					mode: 'client',
+					compileOptions: { hmr: false, dev: false },
+					runtimeModules: { './theme': { Theme: createContext('t0') } },
+				},
+			);
+			const content = createElement(Reader, { label: 'r' });
+			const props = { items: [{ id: 1, comp: Reader, content }], content, comp: Reader };
+			const root = mount(App, { ...props, theme: 't1' });
+			try {
+				root.click('ul');
+				expect(root.find('ul').getAttribute('data-tick')).toBe('1');
+				expect(root.find('b').textContent).toBe('r:t1');
+				root.update(App, { ...props, theme: 't2' });
+				expect(root.find('b').textContent).toBe('r:t2');
+			} finally {
+				root.unmount();
+			}
+		},
+	);
+
+	it('refreshes hydrated context consumers behind cached local tags and returns', () => {
+		const source = `${CONTEXT_READER}
+			 function Tag(props) @{ const C = props.comp; <i><C label="tag" /></i> }
+			 function Returned(props) { if (props.content) return props.content; return <i>{'off'}</i>; }
+			 function List(props) @{
+				const [count] = useState(0);
+				<ul data-count={count as number}>
+					@for (const item of props.items; key item.id) {
+						const C = item.comp;
+						<li><C label={item.label} /></li>
+					}
+				</ul>
+			 }
+			 export function App(props) @{
+				<Theme value={props.theme}>
+					<p><Tag comp={props.comp} /></p>
+					<List items={props.items} />
+					<p><Returned content={props.content} /></p>
+				</Theme>
+			 }`;
+		const id = 'auto-memo-bound-tag-hydration.tsrx';
+		const server = loadCompiledFixtureSource(source, {
+			id,
+			mode: 'server',
+			compileOptions: { hmr: false, dev: false },
+			runtimeModules: { './theme': { Theme: ServerRuntime.createContext('t0') } },
+		});
+		const client = loadCompiledFixtureSource(source, {
+			id,
+			mode: 'client',
+			compileOptions: { hmr: false, dev: false },
+			runtimeModules: { './theme': { Theme: createContext('t0') } },
+		});
+		const props = (Reader: any, theme: string) => ({
+			comp: Reader,
+			content: createElement(Reader, { label: 'returned' }),
+			items: [{ id: 1, label: 'row', comp: Reader }],
+			theme,
+		});
+		const container = document.createElement('div');
+		container.innerHTML = ServerRuntime.renderToString(server.App, props(server.Reader, 't1')).html;
+		const consumers = Array.from(container.querySelectorAll('b'));
+		const clientProps = props(client.Reader, 't1');
+		const root = hydrateRoot(container, client.App, clientProps);
+		const texts = () =>
+			Array.from(container.querySelectorAll('b'), (node, index) => {
+				expect(node).toBe(consumers[index]);
+				return node.textContent;
+			});
+		try {
+			expect(texts()).toEqual(['tag:t1', 'row:t1', 'returned:t1']);
+			flushSync(() => root.render(client.App, { ...clientProps, theme: 't2' }));
+			expect(texts()).toEqual(['tag:t2', 'row:t2', 'returned:t2']);
+		} finally {
+			root.unmount();
+		}
+	});
+
+	it('keeps a pure callee lite inside its cache unless the cache must refresh context', () => {
+		const code = compile(LITE_CALLEE_REGION_SOURCE, 'lite-callee-region.tsrx', {
+			hmr: false,
+			dev: false,
+		}).code;
+		const middle = code.slice(code.indexOf('function Middle('), code.indexOf('const Themed'));
+		expectCompilerRegion(middle);
+		expect(middle).toContain('_$componentSlotLite(__s, 1, _b.a, Leaf,');
+		const shell = code.slice(code.indexOf('function Shell('), code.indexOf('function App('));
+		expect(shell).toMatch(/_\$componentSlotVoid\(__s, \d+, [^,]+, Frame,/);
+		expect(shell).toContain('_$compilerCacheContext(');
+
+		const client = loadCompiledFixtureSource(LITE_CALLEE_REGION_SOURCE, {
+			id: 'lite-callee-region.tsrx',
+			mode: 'client',
+			compileOptions: { hmr: false, dev: false },
+		});
+		const root = mount(client.App, { label: 'a', theme: 'light', tick: 0, on: false });
+		const leaf = root.find('#lite-region-leaf');
+		const counter = root.find('#lite-region-counter');
+		const themed = root.find('#lite-region-themed');
+		const middleChildren = () =>
+			Array.from(root.find('#lite-region-middle').children, (child) => child.id);
+		expect(middleChildren()).toEqual(['lite-region-leaf', 'lite-region-counter']);
+		expect(leaf.textContent).toBe('a');
+		expect(counter.textContent).toBe('a/0:0');
+		expect(themed.textContent).toBe('light');
+
+		// Middle re-renders while its cache over Leaf hits.
+		root.update(client.App, { label: 'a', theme: 'light', tick: 1, on: false });
+		expect(root.find('#lite-region-leaf')).toBe(leaf);
+		expect(leaf.textContent).toBe('a');
+		expect(root.find('#lite-region-counter')).toBe(counter);
+		expect(counter.textContent).toBe('a/1:0');
+
+		root.click('#lite-region-counter');
+		expect(counter.textContent).toBe('a/1:1');
+		root.update(client.App, { label: 'a', theme: 'light', tick: 2, on: false });
+		expect(counter.textContent).toBe('a/2:1');
+		expect(root.find('#lite-region-leaf')).toBe(leaf);
+
+		root.update(client.App, { label: 'b', theme: 'light', tick: 2, on: false });
+		expect(root.find('#lite-region-leaf')).toBe(leaf);
+		expect(leaf.textContent).toBe('b');
+		expect(counter.textContent).toBe('b/2:1');
+
+		root.update(client.App, { label: 'b', theme: 'light', tick: 2, on: true });
+		expect(middleChildren()).toEqual([
+			'lite-region-leaf',
+			'lite-region-badge',
+			'lite-region-counter',
+		]);
+		root.update(client.App, { label: 'b', theme: 'light', tick: 3, on: true });
+		expect(middleChildren()).toEqual([
+			'lite-region-leaf',
+			'lite-region-badge',
+			'lite-region-counter',
+		]);
+		root.update(client.App, { label: 'b', theme: 'light', tick: 3, on: false });
+		expect(middleChildren()).toEqual(['lite-region-leaf', 'lite-region-counter']);
+		expect(root.find('#lite-region-leaf')).toBe(leaf);
+		expect(root.find('#lite-region-counter')).toBe(counter);
+
+		// Frame's cache hits, so only its context refresh reaches the memo wall.
+		root.update(client.App, { label: 'b', theme: 'dark', tick: 3, on: false });
+		expect(root.find('#lite-region-themed')).toBe(themed);
+		expect(themed.textContent).toBe('dark');
+		expect(leaf.textContent).toBe('b');
+
+		const container = root.container;
+		root.unmount();
+		expect(container.innerHTML).toBe('');
+	});
+
+	it('hydrates a pure callee kept lite inside its cache', () => {
+		const id = 'lite-callee-region-hydration.tsrx';
+		const server = loadCompiledFixtureSource(LITE_CALLEE_REGION_SOURCE, {
+			id,
+			mode: 'server',
+			compileOptions: { hmr: false, dev: false },
+		});
+		const client = loadCompiledFixtureSource(LITE_CALLEE_REGION_SOURCE, {
+			id,
+			mode: 'client',
+			compileOptions: { hmr: false, dev: false },
+		});
+		const props = { label: 'a', theme: 'light', tick: 0, on: true };
+		const container = document.createElement('div');
+		container.innerHTML = ServerRuntime.renderToString(server.App, props).html;
+		const leaf = container.querySelector('#lite-region-leaf');
+		const counter = container.querySelector('#lite-region-counter') as HTMLButtonElement;
+		const themed = container.querySelector('#lite-region-themed');
+		const root = hydrateRoot(container, client.App, props);
+		expect(container.querySelector('#lite-region-leaf')).toBe(leaf);
+		expect(container.querySelector('#lite-region-counter')).toBe(counter);
+		expect(container.querySelector('#lite-region-themed')).toBe(themed);
+		const badge = container.querySelector('#lite-region-badge');
+		expect(badge?.previousElementSibling).toBe(leaf);
+		expect(badge?.nextElementSibling).toBe(counter);
+
+		flushSync(() => root.render(client.App, { ...props, tick: 1 }));
+		expect(container.querySelector('#lite-region-badge')).toBe(badge);
+		flushSync(() => counter.click());
+		expect(counter.textContent).toBe('a/1:1');
+		expect(container.querySelector('#lite-region-leaf')).toBe(leaf);
+
+		flushSync(() => root.render(client.App, { label: 'b', theme: 'dark', tick: 1, on: false }));
+		expect(container.querySelector('#lite-region-badge')).toBe(null);
+		expect(container.querySelector('#lite-region-leaf')).toBe(leaf);
+		expect(leaf?.textContent).toBe('b');
+		expect(counter.textContent).toBe('b/1:1');
+		expect(themed?.textContent).toBe('dark');
+		root.unmount();
+		expect(container.innerHTML).toBe('');
+	});
+
+	it('refreshes a context consumer a cached callee renders from a prop', () => {
+		const Theme = createContext('t0');
+		const { App, Reader } = loadCompiledFixtureSource(
+			`import { useContext } from 'octane';
+			 import { Theme } from './theme';
+			 export function Reader(props) @{
+				const theme = useContext(Theme);
+				<b>{(props.label + ':' + theme) as string}</b>
+			 }
+			 function Slot(props) @{ <span>{props.content}</span> }
+			 export function App(props) @{
+				<Theme value={props.theme}><p><Slot content={props.content} /></p></Theme>
+			 }`,
+			{
+				id: 'auto-memo-prop-renderable.tsrx',
+				mode: 'client',
+				compileOptions: { hmr: false, dev: false },
+				runtimeModules: { './theme': { Theme } },
+			},
+		);
+		// The parent passes the same element down, so Slot's cache hits.
+		const content = createElement(Reader, { label: 'slot' });
+		const root = mount(App, { content, theme: 't1' });
+		try {
+			expect(root.find('b').textContent).toBe('slot:t1');
+			root.update(App, { content, theme: 't2' });
+			expect(root.find('b').textContent).toBe('slot:t2');
+		} finally {
+			root.unmount();
+		}
+	});
+
+	// Each list skips its unchanged rows, and a filtered iterable or a selection
+	// change keeps any whole-list cache from covering them. Only that skip can
+	// then refresh a consumer a row renders from a value hole.
+	const FILTERED = '@for (const item of props.items.filter(Boolean); key item.id)';
+	const KEYED_ROWS = `@for (const item of props.items; key item.id) {
+		<li class={selected === item.id ? 'on' : ''}>{item.content}</li>
+	}`;
+	const MAPPED_ROWS = `{props.items.filter(Boolean).map((item) => <li key={item.id}>{item.content}</li>)}`;
+	function loadSkippedRows(shape: string, source: string) {
+		return loadCompiledFixtureSource(
+			`import { memo, useContext, useState } from 'octane';
+			 import { Theme } from './theme';
+			 export function Reader(props) @{
+				const theme = useContext(Theme);
+				<b>{(props.label + ':' + theme) as string}</b>
+			 }
+			 ${source}`,
+			{
+				id: `auto-memo-skipped-${shape.replaceAll(' ', '-')}.tsrx`,
+				mode: 'client',
+				compileOptions: { hmr: false, dev: false },
+				runtimeModules: { './theme': { Theme: createContext('t0') } },
+			},
+		);
+	}
+
+	it.each([
+		['item-only @for rows', `${FILTERED} { <li>{item.content}</li> }`],
+		[
+			'@for rows with a parent capture',
+			`${FILTERED} { <li data-count={count}>{item.content}</li> }`,
+		],
+		['component @for rows', `${FILTERED} { <Row content={item.content} /> }`],
+		['keyed selection rows', KEYED_ROWS],
+		['mapped rows', MAPPED_ROWS],
+	])('refreshes context consumers skipped %s render from value holes', (shape, rows) => {
+		const { App, Reader } = loadSkippedRows(
+			shape,
+			`function Row(props) @{ <li>{props.content}</li> }
+			 function List(props) @{
+				const [count] = useState(0);
+				const selected = props.selected;
+				<ul data-count={count as number}>${rows}</ul>
+			 }
+			 export function App(props) @{
+				<Theme value={props.theme}><List items={props.items} selected={props.selected} /></Theme>
+			 }`,
+		);
+		const items = [1, 2, 3].map((id) => ({
+			id,
+			content: createElement(Reader, { label: 'r' + id }),
+		}));
+		const root = mount(App, { items, selected: 1, theme: 't1' });
+		const texts = () =>
+			Array.from(root.container.querySelectorAll('b'), (node) => node.textContent);
+		try {
+			expect(texts()).toEqual(['r1:t1', 'r2:t1', 'r3:t1']);
+			root.update(App, { items, selected: 2, theme: 't2' });
+			expect(texts()).toEqual(['r1:t2', 'r2:t2', 'r3:t2']);
+		} finally {
+			root.unmount();
+		}
+	});
+
+	// A memoized owner's own update clears the context reads it recorded while
+	// every consumer row is skipped. Unless the skipped rows restore them, the
+	// owner's later bail on a Provider change strands the consumer.
+	it.each([
+		['@for rows', `${FILTERED} { <li>{item.content}</li> }`],
+		['keyed selection rows', KEYED_ROWS],
+		['mapped rows', MAPPED_ROWS],
+	])('refreshes consumers in skipped %s below a locally updated memo owner', (shape, rows) => {
+		const { App, Reader } = loadSkippedRows(
+			`memo-owner ${shape}`,
+			`function List(props) @{
+				const [selected, setSelected] = useState(1);
+				<ul onClick={() => setSelected(3 - selected)}>${rows}</ul>
+			 }
+			 const MemoList = memo(List);
+			 export function App(props) @{
+				<Theme value={props.theme}><MemoList items={props.items} /></Theme>
+			 }`,
+		);
+		// Only the third row holds a consumer, so selecting the first two rows
+		// never renders it.
+		const items = [1, 2, 3].map((id) => ({
+			id,
+			content: id === 3 ? createElement(Reader, { label: 'r3' }) : 'r' + id,
+		}));
+		const root = mount(App, { items, theme: 't1' });
+		try {
+			root.click('ul');
+			root.click('ul');
+			expect(root.find('b').textContent).toBe('r3:t1');
+			root.update(App, { items, theme: 't2' });
+			expect(root.find('b').textContent).toBe('r3:t2');
+		} finally {
+			root.unmount();
+		}
+	});
+
 	it('preserves dependency, context, child-state, and custom-comparator behavior', () => {
 		const root = mount(AutoMemoApp);
 		const initialOpaqueVersion = trailingVersion(root.find('.opaque').textContent);
@@ -2169,6 +4746,89 @@ describe('compiler-owned component-region memoization', () => {
 		expect(effects.filter((event) => event === 'cleanup:2')).toHaveLength(2);
 	});
 
+	// A custom map can turn a keyed host row into a component. A row first mounted
+	// as host markup is its own range; a row that replaced a component sits in the
+	// component's range. A held root render keeps the committed host row until the
+	// component can commit.
+	it.each([
+		{ firstRows: 'host', hold: false },
+		{ firstRows: 'host', hold: true },
+		{ firstRows: 'components', hold: true },
+	])(
+		'replaces a keyed custom-map host row with a component (first rows: $firstRows, held: $hold)',
+		async ({ firstRows, hold }) => {
+			const items = [
+				{ id: 1, label: 'first' },
+				{ id: 2, label: 'second' },
+			];
+			let open!: (value: string) => void;
+			const gate = new Promise<string>((resolve) => {
+				open = resolve;
+			});
+			const Gate = (props: { gate: Promise<string> }) => {
+				use(props.gate);
+				return null;
+			};
+			const effects: string[] = [];
+			const mixedRows = {
+				map<T>(callback: (item: (typeof items)[number], index: number) => T): T[] {
+					return [
+						callback(items[0]!, 0),
+						createElement('li', { key: 2, 'data-mixed': 'host' }, 'host') as T,
+					];
+				},
+			};
+			const componentRows = {
+				map<T>(callback: (item: (typeof items)[number], index: number) => T): T[] {
+					const rows = [callback(items[0]!, 0), callback(items[1]!, 1)];
+					if (hold) rows.push(createElement(Gate, { key: 3, gate }) as T);
+					return rows;
+				},
+			};
+			const onEffect = (event: string) => effects.push(event);
+			const onItem = (_id: number, index: number): string => String(index);
+			const props = { prefix: 'mixed', theme: 't0', onEffect, onItem };
+			const root = mount(TsxMappedComponentApp, {
+				...props,
+				rows: firstRows === 'host' ? mixedRows : items,
+			});
+			if (firstRows === 'components')
+				root.update(TsxMappedComponentApp, { ...props, rows: mixedRows });
+			flushEffects();
+			const first = root.find('.tracked-own-1');
+			root.click('.tracked-own-1');
+			const host = root.find('[data-mixed="host"]');
+			const committed = effects.length;
+
+			root.update(TsxMappedComponentApp, {
+				...props,
+				rows: componentRows,
+				prefix: 'components',
+				theme: 't1',
+			});
+			flushEffects();
+			if (hold) {
+				expect(root.find('[data-mixed="host"]')).toBe(host);
+				expect(first.textContent).toBe('t0:mixed:0:first:1');
+				expect(root.findAll('.tracked-own-2')).toHaveLength(0);
+				expect(effects.slice(committed)).toEqual([]);
+				open('ready');
+				await gate;
+				await Promise.resolve();
+				flushEffects();
+			}
+			expect(host.isConnected).toBe(false);
+			expect(root.find('.tracked-own-1')).toBe(first);
+			expect(first.textContent).toBe('t1:components:0:first:1');
+			expect(root.find('.tracked-own-2').textContent).toBe('t1:components:1:second:0');
+			expect(effects.slice(committed)).toEqual(['mount:2']);
+
+			root.unmount();
+			flushEffects();
+			expect(effects.slice(committed + 1).toSorted()).toEqual(['cleanup:1', 'cleanup:2']);
+		},
+	);
+
 	it.each([
 		{ serverReceiver: 'native', clientReceiver: 'custom' },
 		{ serverReceiver: 'custom', clientReceiver: 'native' },
@@ -2775,6 +5435,95 @@ describe('compiler-owned component-region memoization', () => {
 		} finally {
 			Array.prototype.map = originalMap;
 			root.unmount();
+		}
+	});
+
+	// Octane recognizes the native map by the intrinsics present when it loaded.
+	// A replacement installed afterwards, even before anything has rendered, is
+	// user code that every render must call.
+	it('calls an Array.prototype.map replacement installed before the first mapped render', async () => {
+		const { server, client, ClientRuntime, ServerRuntime } = await loadFreshMappedRuntimes();
+		const events: string[] = [];
+		const rows = [
+			{ id: 1, label: 'first' },
+			{ id: 2, label: 'second' },
+		];
+		const onItem = (id: number, index: number): string => `${id}:${index}`;
+		const originalMap = Array.prototype.map;
+		Array.prototype.map = function <Item, Result>(
+			this: Item[],
+			callback: (item: Item, index: number, items: Item[]) => Result,
+			thisArg?: unknown,
+		): Result[] {
+			if ((this as unknown) === rows) events.push('prototype:map');
+			return originalMap.call(this, callback, thisArg) as Result[];
+		};
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const root = ClientRuntime.createRoot(container);
+		try {
+			const { html } = ServerRuntime.renderToString(server.App, { rows, prefix: 'server', onItem });
+			expect(events).toEqual(['prototype:map']);
+			expect(mappedRowTexts(html)).toEqual(['server:0:first', 'server:1:second']);
+
+			events.length = 0;
+			root.render(client.App as any, { rows, prefix: 'client', onItem });
+			expect(events).toEqual(['prototype:map']);
+			expect(mappedRowTexts(container.innerHTML)).toEqual(['client:0:first', 'client:1:second']);
+		} finally {
+			Array.prototype.map = originalMap;
+			root.unmount();
+			container.remove();
+		}
+	});
+
+	it('consults an Array[Symbol.species] replacement installed before the first mapped render', async () => {
+		const { server, client, ClientRuntime, ServerRuntime } = await loadFreshMappedRuntimes();
+		const events: string[] = [];
+		// Only the authored map's ArraySpeciesCreate step reads the receiver's
+		// constructor and then its species, so record the species lookup that
+		// follows that read rather than every array the renderers create.
+		let afterConstructor = false;
+		const rows = new Proxy(
+			[
+				{ id: 1, label: 'first' },
+				{ id: 2, label: 'second' },
+			],
+			{
+				get(target, key, receiver) {
+					if (key === 'constructor') afterConstructor = true;
+					return Reflect.get(target, key, receiver);
+				},
+			},
+		);
+		const onItem = (id: number, index: number): string => `${id}:${index}`;
+		const nativeSpecies = Object.getOwnPropertyDescriptor(Array, Symbol.species)!;
+		Object.defineProperty(Array, Symbol.species, {
+			...nativeSpecies,
+			get(this: unknown) {
+				if (afterConstructor) {
+					afterConstructor = false;
+					events.push('species:get');
+				}
+				return this;
+			},
+		});
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const root = ClientRuntime.createRoot(container);
+		try {
+			const { html } = ServerRuntime.renderToString(server.App, { rows, prefix: 'server', onItem });
+			expect(events).toEqual(['species:get']);
+			expect(mappedRowTexts(html)).toEqual(['server:0:first', 'server:1:second']);
+
+			events.length = 0;
+			root.render(client.App as any, { rows, prefix: 'client', onItem });
+			expect(events).toEqual(['species:get']);
+			expect(mappedRowTexts(container.innerHTML)).toEqual(['client:0:first', 'client:1:second']);
+		} finally {
+			Object.defineProperty(Array, Symbol.species, nativeSpecies);
+			root.unmount();
+			container.remove();
 		}
 	});
 
@@ -4715,7 +7464,7 @@ describe('compiler-owned component-region memoization', () => {
 	it('emits the full memo boundary by default only for a production-safe call', () => {
 		const source = `
 			function Rows(props) @{
-				<ul>@for (const item of props.items; key item.id) { <li>{item.label}</li> }</ul>
+				<ul>@for (const item of props.items; key item.id) { <li>{item.label as string}</li> }</ul>
 			}
 			function Returned(props) { return <p>{props.label}</p>; }
 			export function App(props) @{ <><Rows items={props.items} /><Returned label={props.label} /></> }
@@ -4745,13 +7494,14 @@ describe('compiler-owned component-region memoization', () => {
 		}).code;
 
 		expectCompilerRegion(defaultBuild);
-		expect(defaultBuild).toContain('componentSlotVoid as');
+		// Rows is hookless and cannot read context, so its cache keeps it lite.
+		expect(defaultBuild).toContain('componentSlotLite as');
 		expect(defaultBuild).toContain('componentSlot as');
 		expect(defaultBuild).toMatch(/const __memoDep[\w$]* = \(?props\.items\)?;/);
 		expect(defaultBuild).toMatch(/const __memoDep[\w$]* = \(?props\.label\)?;/);
 		expect(defaultBuild).not.toMatch(/const __memoDep[\w$]* = \(?props\)?;/);
 		expect(defaultBuild).toMatch(
-			/if \([^{}]*!_\$hookMemoEqual\(__memoCache[\w$]*\[\d+\], __memoDep[\w$]*\)\) \{\s*_\$componentSlotVoid\([^;]*, Rows,/,
+			/if \([^{}]*!_\$hookMemoEqual\(__memoCache[\w$]*\[\d+\], __memoDep[\w$]*\)\) \{\s*_\$componentSlotLite\([^;]*, Rows,/,
 		);
 		expect(defaultBuild).toMatch(
 			/if \([^{}]*!_\$hookMemoEqual\(__memoCache[\w$]*\[\d+\], __memoDep[\w$]*\)\) \{\s*_\$componentSlot\([^;]*, Returned,/,
@@ -5306,18 +8056,72 @@ describe('compiler-owned component-region memoization', () => {
 		}
 	});
 
-	it('re-enters a cached region when an imported component it renders is not memo-stable', () => {
-		// The imported component's own memo contract is unknown at compile time, so
-		// the cached region must consult it on entry rather than trust its snapshot.
-		const code = compile(
+	it('re-enters a keyed survivor whose cache a held root update rolled back', async () => {
+		const client = loadCompiledFixtureSource(
+			`import { use } from 'octane';
+			 function Item(props) @{ <li>{props.value + ':' + props.label}</li> }
+			 function Reader(props) @{
+				const value = use(props.promise);
+				<output>{value as string}</output>
+			 }
+			 export function App(props) @{
+				<main>
+					<ul>
+						@for (const item of props.items; key item) {
+							<Item value={item} label={props.label} />
+						}
+					</ul>
+					<Reader promise={props.promise} />
+				</main>
+			 }`,
+			{
+				id: 'held-root-survivor.tsrx',
+				mode: 'client',
+				compileOptions: { hmr: false, dev: false },
+			},
+		);
+		const first = Promise.resolve('first');
+		const root = mount(client.App, {
+			label: 'previous',
+			items: ['remove', 'keep'],
+			promise: first,
+		});
+		await act(() => first);
+		let resolve!: (value: string) => void;
+		const next = new Promise<string>((done) => (resolve = done));
+		await act(() =>
+			root.root.render(client.App, { label: 'next', items: ['add', 'keep'], promise: next }),
+		);
+		expect(root.findAll('li').map((li) => li.textContent)).toEqual([
+			'remove:previous',
+			'keep:previous',
+		]);
+
+		await act(() => resolve('second'));
+		expect(root.find('output').textContent).toBe('second');
+		expect(root.findAll('li').map((li) => li.textContent)).toEqual(['add:next', 'keep:next']);
+		root.unmount();
+	});
+
+	it('keeps an unproven imported component live when parent props are unchanged', () => {
+		let label = 'first';
+		const client = loadCompiledFixtureSource(
 			`import { Icon } from './icon';
 			 function Child(props) @{ <span>{props.v}<Icon /></span> }
 			 export function App(props) @{ <Child v={props.v} /> }`,
-			'auto-memo-witness.tsrx',
-			{ hmr: false, autoMemo: true },
-		).code;
-		expect(code).toContain('__memoCommitted');
-		expect(code).toMatch(/Icon\.__memo !== true \|\| Icon\.__compare !== undefined/);
+			{
+				id: 'auto-memo-witness.tsrx',
+				mode: 'client',
+				compileOptions: { hmr: false, dev: false },
+				runtimeModules: { './icon': { Icon: () => label } },
+			},
+		);
+		const root = mount(client.App, { v: 'label:' });
+		expect(root.find('span').textContent).toBe('label:first');
+		label = 'second';
+		root.update(client.App, { v: 'label:' });
+		expect(root.find('span').textContent).toBe('label:second');
+		root.unmount();
 	});
 
 	it('rejects a callback that reads a ref through a binding pattern', () => {

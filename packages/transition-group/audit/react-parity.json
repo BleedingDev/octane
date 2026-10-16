@@ -34,9 +34,9 @@
       "node": ">=22",
       "platform": "any",
       "arch": "any",
-      "packageManager": "pnpm@11.15.1",
+      "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "91136aca7e454123147ee81e429398d60a872288b7ce288a72b4cfbf3c038dc2"
+      "lockfileSha256": "6df573d6aa854c122b0cea3e8c3be46fb67e3debe9ce0f329a773850bbd87706"
     }
   },
   "lanes": [
@@ -138,12 +138,12 @@
         {
           "path": "packages/transition-group/audit/adapted-evidence.SHA256SUMS",
           "role": "support",
-          "sha256": "24fb18b6cc131bcdcbcccfa0533ba4482f26c0db3c570bf7363e5128f572628e"
+          "sha256": "15ebc3e15be642b668afd992a5c905ed7a30e5b298ddddc09a3eecd7fcfc99bf"
         },
         {
           "path": "packages/transition-group/audit/adapted-case-contracts.json",
           "role": "support",
-          "sha256": "aed00ae890e8be96c0800a598df2a0d212c32e917c1e44aad6565b715f5d3c16"
+          "sha256": "80dafd67c8cfd106bc8408d1cdfa98d7d320b28b7a36a51cee556c13a5f4a2df"
         },
         {
           "path": "packages/transition-group/audit/upstream.lock.json",
@@ -251,7 +251,7 @@
         {
           "path": "scripts/react-parity/react-transition-group-types-lib.mjs",
           "role": "support",
-          "sha256": "282ae8c5f62df139b077c948b68caaf81321e56f2183cfd528ce086595c3095a"
+          "sha256": "fff4bd6e80b5f01cfea5f04cf5debfa994b0b8073c600297d5131bd03150f778"
         }
       ]
     },
@@ -299,7 +299,7 @@
         {
           "path": "scripts/react-parity/react-transition-group-types-lib.mjs",
           "role": "support",
-          "sha256": "282ae8c5f62df139b077c948b68caaf81321e56f2183cfd528ce086595c3095a"
+          "sha256": "fff4bd6e80b5f01cfea5f04cf5debfa994b0b8073c600297d5131bd03150f778"
         }
       ]
     }

@@ -2,8 +2,9 @@
 name: performance-audit
 description: >-
   Audit or defend Octane performance. Use when a change can affect per-render,
-  per-node, compiler-output, SSR, hydration, or bundle cost, or when asked
-  whether something is fast enough.
+  per-node, scheduling, compiler-output, SSR, hydration, or bundle cost, or when
+  asked whether something is fast enough. Holds the V8-shape, DOM, and
+  scheduling rules hot-path code must follow.
 ---
 # Skill: Octane performance audit
 
@@ -14,6 +15,39 @@ Use this to investigate performance regressions, benchmark results, scheduler/re
 - Benchmark README in the affected `benchmarks/*` directory
 - `packages/octane/src/runtime.ts` comments for runtime-level changes
 - Existing benchmark scripts in `benchmarks/*/package.json` and `run.mjs`
+- The discipline reference for each dimension the change touches:
+  [V8 shapes and allocation](references/v8-shapes.md),
+  [DOM work](references/dom-work.md), and
+  [scheduling](references/scheduling.md)
+
+## Hot-path discipline
+
+These rules apply to code that runs per render, node, item, event, signal
+notification, or server request. Each reference cites the runtime code that
+already follows the rule.
+
+- **Shapes:** allocate hot records from one constructor or one literal site with
+  every field present, in a fixed order, as `BlockImpl` and the `bagN` factories
+  do. No `delete`, conditional keys, runtime class fields on hot classes, or
+  per-instance freezing. Keep call sites and return shapes monomorphic, numeric
+  fields integral, and arrays packed. Do not allocate closures, literals, rest
+  arrays, or iterators per item.
+- **Reachability:** never name a heavy function from a hot compiled path. Put
+  feature-only code behind the capability or driver that owns it.
+- **Member reads:** look for repeated property reads and member-chain prefixes in
+  hot code and emitted JS. Prefer a local `const` for a stable value used more
+  than once; follow [Reuse stable member reads](#reuse-stable-member-reads).
+- **DOM:** read geometry before writing, never in the render walk, and never
+  interleaved with writes in a loop. Insert built subtrees once. Keep events
+  native and delegated. Write from resize callbacks only through
+  `createResizeObserver`.
+- **Scheduling:** a microtask, `await` of a settled value, or
+  `requestAnimationFrame` is not a yield. Do not add a render or commit per
+  microtask hop. Coalesce first, then yield by posting a task through an existing
+  poster. Leave the documented scheduler contract to issue #1864.
+
+Run the `perf-review` skill on the diff before handoff. It applies these rules
+to the change and lists the evidence each finding needs.
 
 ## Workflow
 
@@ -25,7 +59,15 @@ Use this to investigate performance regressions, benchmark results, scheduler/re
      proves both candidates perform the same work.
 
 2. **Choose harness**
-   - Existing benchmarks: `benchmarks/news`, `js-framework`, `recursive-context`, `signal-favoring`, `dbmon`.
+   - Existing benchmarks: `node benchmarks/bench.mjs --list` names every suite.
+     Common ones are `js-framework`, `dbmon`, `news`, `recursive-context`,
+     `signal-favoring`, and `todomvc`.
+   - Object shapes: `benchmarks/runtime-object-shapes` gates one map per record
+     family with `%HaveSameMap`. Tier and deopt traces:
+     `benchmarks/client-hot-paths/functions.mjs`.
+   - Scheduling: `scheduler-responsiveness`, `passive-scheduling`,
+     `effect-scheduling`, and the marker-task commit count in
+     [scheduling](references/scheduling.md).
    - Micro regression: focused Vitest with counters/logging.
    - Compiler output: inspect emitted JS from `compile.js`/Vite transform.
    - Browser-only perf: use Playwright or benchmark harness if available.
@@ -39,6 +81,10 @@ Use this to investigate performance regressions, benchmark results, scheduler/re
      a quick smoke result with a full result.
    - Treat a delta inside observed variance as inconclusive. Prefer ratio guards
      and deterministic counters when wall-clock noise is larger than the claim.
+   - The pull request benchmark gates js-framework production calls and DOM
+     mutations per operation against the merge commit's first parent: any
+     increase fails it. Wall time there is a paired report, called slower or
+     faster only when its 95% interval lies beyond ±3%.
 
 4. **Diagnose**
    - Runtime hot paths: scheduler queues, effect flushing, keyed reconciliation, event delegation, context propagation, refs.
@@ -59,6 +105,79 @@ Use this to investigate performance regressions, benchmark results, scheduler/re
    - Re-run the final candidate after self-review changes. Never report a stale
      intermediate measurement as the final result.
 
+## Reuse stable member reads
+
+Repeated `node.firstChild`, `node.nextSibling`, `record.field`, or `object[key]`
+reads can repeat accessor work and duplicate property names in emitted code.
+Cache a reused value in a local declaration at its first needed read, in the
+smallest scope covering its uses. Prefer this simple reuse over a persistent
+cache or a new helper abstraction; do not alias every one-off property read.
+
+For a native DOM node with no intervening tree mutation:
+
+```ts
+// Before: read the same first child up to three times.
+if (node.firstChild !== null && node.firstChild.nodeType === 3) {
+  return node.firstChild;
+}
+
+// After: read once and reuse the result.
+const firstChild = node.firstChild;
+if (firstChild !== null && firstChild.nodeType === 3) {
+  return firstChild;
+}
+```
+
+- Prove the receiver, computed key, and value stay stable across all uses. A
+  getter or proxy may have observable effects or return a different value on
+  each read; evaluating the receiver or coercing the key can also have effects.
+  Reducing these evaluations is not automatically equivalent.
+- Preserve evaluation order, null guards, and short-circuit behavior. Do not
+  hoist a read onto a path that previously skipped it or before its guard.
+- Re-read after DOM or state mutation, callbacks or reentrant calls, and
+  `await`/yield boundaries that can invalidate the value. In loops, cache per
+  iteration unless stability across iterations is established; a removal loop
+  must observe the new `firstChild` after each removal.
+- Keep Octane's existing access semantics: where code uses `getFirstChild`,
+  `getNextSibling`, or staged DOM views, reuse that result instead of switching
+  to a raw native read. Compiled template walks can reuse stable chain prefixes
+  without routing every access through a shared helper.
+- Check the emitted and minified JS, including raw and compressed size, before
+  claiming a size win. A local declaration can cost more than it saves, and a
+  JIT or minifier may already eliminate some repeated reads. Use the owning
+  benchmark for runtime claims and relevant correctness checks when changing
+  code; fewer source-level reads alone do not establish a speedup.
+
+## Bundle bytes
+
+- There are no committed byte budgets, and no check fails on bytes. The pull
+  request benchmark report lists every byte change; read the rows your change
+  moved and justify any growth in the pull request description.
+- Keep growth small anyway: move hydration-only or feature-only code behind the
+  capability that owns it. Judge growth by raw and gzip; brotli can grow when
+  code is removed.
+- Measure while iterating with `node benchmarks/bundle-size/run-minimal.mjs
+  [scenario...]` and `node benchmarks/bundle-size/run.mjs octane-tsrx
+  octane-jsx`.
+
+## Evidence required for hot-path changes
+
+| Change | Evidence |
+| --- | --- |
+| Any runtime, compiler-output, or binding hot path | The pull request benchmark report (`.github/workflows/pr-bench.yml`): byte changes, reported only, and js-framework production calls and DOM mutations per operation, where any increase fails. |
+| Bundle bytes | `node benchmarks/bundle-size/run-minimal.mjs <scenario>` and `run.mjs octane-tsrx octane-jsx` while iterating. CI's report rows are authoritative: brotli, and occasionally gzip or raw for path-dependent scenarios, can differ locally. |
+| A hot record's shape | `%HaveSameMap` across every construction mode, as `benchmarks/runtime-object-shapes` does, and `perf-review-scan` clean. |
+| Allocation or tiering | A scratch harness on the production bundle: pinned semi-space for bytes per call, `%GetOptimizationStatus` and `--trace-deopt` for tiers. |
+| Scheduling, commits, or effect timing | The marker-task commit count from [scheduling](references/scheduling.md), plus the relevant scheduling suite. |
+| User-visible latency claims | Event Timing in Chromium, maximum duration per `interactionId`, against React on the same app. Long-task entries are not evidence. |
+| Optimization claims in general | `node benchmarks/bench.mjs <suite> --ratios` for the suite that owns the scenario. |
+
+Run locally only the suite or scratch probe that owns the scenario, one suite at
+a time (`--quick` while iterating). Leave wide runs to CI: the full `pnpm test`,
+the full benchmark sweep, and end-to-end or browser suites. Parallel agent
+sessions share one machine, and a wide local run makes every timing on it
+noise.
+
 ## Report template
 
 ```md
@@ -70,6 +189,7 @@ Use this to investigate performance regressions, benchmark results, scheduler/re
 
 ## Findings
 - ...
+- `perf-review` result: ...
 
 ## Recommendation
 - ...
@@ -86,6 +206,10 @@ Use this to investigate performance regressions, benchmark results, scheduler/re
 ## Common pitfalls
 
 - jsdom is poor for layout/paint measurements.
+- A microtask-level change can look free in a benchmark that awaits each
+  operation, and still add a commit per hop under a burst. Count commits before
+  a marker task.
+- V8 trace flags piped to a busy parent lose records. Write traces to a file.
 - Differential `innerHTML` tests prove correctness, not performance.
 - React and Octane may perform different physical DOM move sets while producing identical final DOM.
 - Compiler output changes can shift runtime cost; inspect both layers.

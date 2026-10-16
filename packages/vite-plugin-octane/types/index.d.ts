@@ -11,6 +11,8 @@ import type {
 export * from '@octanejs/app-core';
 
 export interface OctanePluginOptions {
+	/** Compile through a typed intermediate; Vite emits JavaScript and composed maps. */
+	output?: OctaneVitePluginOptions['output'];
 	/** Override the client HMR default (on in serve mode, off for SSR). */
 	hmr?: boolean;
 	/** Enable component profiling in client transforms. */
@@ -23,6 +25,8 @@ export interface OctanePluginOptions {
 	knownAttributeSpreads?: OctaneVitePluginOptions['knownAttributeSpreads'];
 	/** Opt in to fixed primitive child props by name; keep text and IDs live for sharing. */
 	domBindingFixedProps?: OctaneVitePluginOptions['domBindingFixedProps'];
+	/** Bind signal handles in opaque holes of modules that do not import `octane/signals`. */
+	opaqueSignalHandles?: OctaneVitePluginOptions['opaqueSignalHandles'];
 	/**
 	 * Path fragments the compiler's plain `.ts`/`.js` hook-slotting pass must
 	 * skip. Prefer package manifest `octane.hookSlots.manual` declarations.

@@ -6,7 +6,11 @@ import {
 	getSignalScope,
 } from './engine.js';
 import { createDeclaredDerivedCell } from './computations.js';
-import { resolveCurrentSignalHandle, resolveSignalHandleForOwner } from './facade.js';
+import {
+	resolveCurrentSignalHandle,
+	resolveSignalHandleForOwner,
+	resolveUnlessRetired,
+} from './facade.js';
 import {
 	ScopedNode,
 	assertWritable,
@@ -22,6 +26,7 @@ import {
 	SIGNAL_HANDLE,
 	SIGNAL_BINDING_READ,
 	SIGNAL_BINDING_SUBSCRIBE,
+	SIGNAL_BINDING_RETIRED,
 	SIGNAL_BINDING_IDENTITY,
 	SIGNAL_OWNER_RESOLVE,
 	type ActionOperation,
@@ -29,7 +34,7 @@ import {
 	type OptimisticOptions,
 	type OptimisticSignal,
 	type OwnerBoundSignal,
-	type Scope,
+	type OwnerScope,
 	type SignalAction,
 	type SignalHandle,
 	type SignalOwner,
@@ -52,7 +57,7 @@ const managers = new WeakMap<ScopedNode, OptimisticManager<unknown>>();
 
 class OptimisticManager<T> {
 	compareAuthority: OptimisticOptions<T>['compareAuthority'];
-	readonly owner: Scope;
+	readonly owner: OwnerScope;
 	readonly version$: OptimisticSignal<number>;
 	readonly view$: SignalHandle<T>;
 	readonly overlays: Overlay<T>[] = [];
@@ -245,7 +250,7 @@ class OptimisticDescriptor<T> implements OptimisticSignal<T>, OwnerBoundSignal<T
 		this.key = `optimistic:${source$.key}`;
 	}
 
-	[SIGNAL_OWNER_RESOLVE](owner: Scope): SignalHandle<T> {
+	[SIGNAL_OWNER_RESOLVE](owner: OwnerScope): SignalHandle<T> {
 		return this.manager(owner).view$;
 	}
 
@@ -270,6 +275,12 @@ class OptimisticDescriptor<T> implements OptimisticSignal<T>, OwnerBoundSignal<T
 			forwardNativeTransitionConsumer(notify, () => run(notify)),
 			onRetire === undefined ? undefined : () => run(onRetire),
 		);
+	}
+
+	[SIGNAL_BINDING_RETIRED](): boolean {
+		// The view lives in its source's scope; resolve that source, never a manager.
+		const source = resolveUnlessRetired(() => resolveCurrentSignalHandle(this.source$));
+		return source === undefined || source[SIGNAL_BINDING_RETIRED]?.() === true;
 	}
 
 	[SIGNAL_BINDING_IDENTITY]() {

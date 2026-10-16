@@ -1,10 +1,11 @@
+import { yieldForHostBudget } from '../host-budget.js';
+import { publishNativeProducer } from './read-protocol.js';
 import { formatClientError } from '../error-codes.client.generated.js';
 import { decodeSignalValue, encodeSignalValue } from './encoding.js';
 import { createResourceCellWith } from './engine.js';
 import { SignalStreamError } from './errors.js';
 import {
 	ScopedNode,
-	CandidateUnsupportedError,
 	assertAlive,
 	assertWritable,
 	createDeclarationView,
@@ -27,10 +28,11 @@ import {
 	untrack,
 	untrackCommitted,
 	type GraphOwner,
-	type CandidateProducer,
 	type NodeState,
 } from './graph.js';
 import { RedeclarableBinding } from './redeclaration.js';
+import { candidateHooks } from './transition-state.js';
+import { installResourceCandidates } from '#octane/signal-actions/bindings';
 import {
 	QUERY_REQUEST,
 	skip,
@@ -68,11 +70,13 @@ interface RetainedRequestIdentity {
 interface RequestOwner extends GraphOwner {
 	requests: Map<string, RequestEntry> | undefined;
 	queryDefinitions: Map<string, QueryDefinition> | undefined;
-	readonly streams?: {
-		readonly selections: Map<string, StreamFrameIdentity>;
-		selectionReady(binding: ResourceBinding): void;
-		discardCompleted(identity: StreamFrameIdentity): void;
-	};
+	readonly streams?:
+		| {
+				readonly selections: Map<string, StreamFrameIdentity>;
+				selectionReady(binding: ResourceBinding): void;
+				discardCompleted(identity: StreamFrameIdentity): void;
+		  }
+		| undefined;
 }
 
 class Request<T> implements QueryRequest<T> {
@@ -298,60 +302,6 @@ export class RequestEntry {
 		return true;
 	}
 
-	acceptStreamed(frame: StreamedSignalResultFrame): boolean {
-		const attempt = this.attempt;
-		if (
-			!attempt?.streamed ||
-			attempt.generation !== frame.identity.attempt ||
-			frame.sequence !== attempt.sequence ||
-			currentEntry(attempt) !== this
-		) {
-			return false;
-		}
-		attempt.sequence++;
-		signalBatch(() => {
-			if (frame.kind === 'open') return;
-			if (frame.kind === 'value') {
-				attempt.hasYielded = true;
-				this.state = readyState(decodeSignalValue(frame.value), {
-					requestKey: this.request.identity,
-					connection: this.request.definition.kind === 'stream' ? 'open' : 'none',
-					complete: false,
-				});
-				this.deliver();
-				return;
-			}
-			if (frame.kind === 'error') {
-				this.state = errorState(
-					new SignalStreamError(frame.code),
-					this.request.definition.kind === 'stream' ? 'closed' : 'none',
-					this.request.identity,
-				);
-				completeAttempt(attempt);
-				this.deliver();
-				return;
-			}
-			if (!attempt.hasYielded || this.state.snapshot.status !== 'ready') {
-				this.state = errorState(
-					new Error(formatClientError(197)),
-					this.request.definition.kind === 'stream' ? 'closed' : 'none',
-					this.request.identity,
-				);
-				completeAttempt(attempt);
-				this.deliver();
-				return;
-			}
-			this.state = readyState(this.state.snapshot.value, {
-				requestKey: this.request.identity,
-				connection: this.request.definition.kind === 'stream' ? 'closed' : 'none',
-				complete: true,
-			});
-			completeAttempt(attempt);
-			this.deliver();
-		});
-		return true;
-	}
-
 	deliver(): void {
 		for (const consumer of this.consumers) consumer.deliver();
 	}
@@ -402,24 +352,33 @@ function completeAttempt(attempt: Attempt): void {
 
 function observePromise(attempt: Attempt, result: unknown): void {
 	Promise.resolve(result).then(
-		(value) => {
-			const entry = currentEntry(attempt);
-			if (!entry) return;
-			signalBatch(() => {
-				entry.state = readyState(value, { requestKey: entry.request.identity });
-				completeAttempt(attempt);
-				entry.deliver();
-			});
-		},
+		(value) => receivePromiseValue(attempt, value),
 		(error) => failAttempt(attempt, error),
 	);
+}
+
+function receivePromiseValue(attempt: Attempt, value: unknown): void {
+	const entry = currentEntry(attempt);
+	if (!entry) return;
+	// Independent ready promises share the stream/read budget too. Coalescing
+	// their component renders does not bound synchronous subscriber work.
+	const wait = yieldForHostBudget();
+	if (wait !== undefined) {
+		wait.then(() => receivePromiseValue(attempt, value));
+		return;
+	}
+	publishNativeProducer(() => {
+		entry.state = readyState(value, { requestKey: entry.request.identity });
+		completeAttempt(attempt);
+		entry.deliver();
+	});
 }
 
 function failAttempt(attempt: Attempt, error: unknown): void {
 	const entry = currentEntry(attempt);
 	if (!entry) return;
 	attempt.observations?.fail(error);
-	signalBatch(() => {
+	publishNativeProducer(() => {
 		const iterator = attempt.iterator;
 		entry.state = errorState(
 			error,
@@ -483,6 +442,11 @@ function observeStream(attempt: Attempt, result: unknown): void {
 
 function nextStreamStep(attempt: Attempt): void {
 	if (!currentEntry(attempt) || !attempt.iterator) return;
+	const wait = yieldForHostBudget();
+	if (wait !== undefined) {
+		wait.then(() => nextStreamStep(attempt));
+		return;
+	}
 	let step: PromiseLike<IteratorResult<unknown>> | IteratorResult<unknown>;
 	try {
 		step = untrack(() => signalBatch(() => attempt.iterator!.next()));
@@ -501,6 +465,11 @@ function nextStreamStep(attempt: Attempt): void {
 function receiveStreamStep(attempt: Attempt, result: IteratorResult<unknown>): void {
 	let entry = currentEntry(attempt);
 	if (!entry) return;
+	const wait = yieldForHostBudget();
+	if (wait !== undefined) {
+		wait.then(() => receiveStreamStep(attempt, result));
+		return;
+	}
 	if (!result || (typeof result !== 'object' && typeof result !== 'function')) {
 		failAttempt(attempt, new TypeError(formatClientError(114)));
 		return;
@@ -528,7 +497,7 @@ function receiveStreamStep(attempt: Attempt, result: IteratorResult<unknown>): v
 			failAttempt(attempt, new Error(formatClientError(115)));
 			return;
 		}
-		signalBatch(() => {
+		publishNativeProducer(() => {
 			accepted.state = readyState((accepted.state.snapshot as { value: unknown }).value, {
 				connection: 'closed',
 				complete: true,
@@ -540,7 +509,7 @@ function receiveStreamStep(attempt: Attempt, result: IteratorResult<unknown>): v
 		return;
 	}
 	attempt.hasYielded = true;
-	signalBatch(() => {
+	publishNativeProducer(() => {
 		accepted.state = readyState(value, {
 			connection: 'open',
 			complete: false,
@@ -564,29 +533,32 @@ interface ResourceView<T> {
 type Describe<T> = () => QueryRequest<T> | typeof skip;
 
 export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
-	declare private candidate?: true;
+	// Members that are not private are also used by an Action frame's producer
+	// (candidate-producers.ts), which forks this binding and publishes its selection.
+	declare candidate?: true;
 	/** Only a cell that a later render declared again with a new selection has a view. */
-	declare private view?: ResourceView<T>;
+	declare private view?: ResourceView<T> | undefined;
 	/** A render's description that selected the committed request, and what it read. */
-	declare private probed?: { readonly describe: Describe<T>; readonly reads: ScopedNode[] };
+	declare private probed?:
+		{ readonly describe: Describe<T>; readonly reads: ScopedNode[] } | undefined;
 	/** The query definition this binding last selected, exempt from the conflict check. */
-	private queryDefinition: QueryDefinition | undefined = undefined;
-	private selected: RequestEntry | undefined;
-	private selectedIdentity: RetainedRequestIdentity | undefined;
-	private retainedRequest: RetainedRequestIdentity | undefined;
-	private seeded: { entry: SignalSeedEntry; value: unknown } | undefined;
-	private describedAttempt: Attempt | undefined;
-	private observedAttempt: Attempt | undefined;
-	private pendingObserver: (<V>(callback: () => V) => V) | undefined;
-	private pendingPromise: PromiseLike<unknown> | undefined;
-	private resolvePending: (() => void) | undefined;
-	private streamedSelection: StreamFrameIdentity | undefined;
-	private selectionAuthority: object = {};
+	queryDefinition: QueryDefinition | undefined = undefined;
+	selected: RequestEntry | undefined;
+	selectedIdentity: RetainedRequestIdentity | undefined;
+	retainedRequest: RetainedRequestIdentity | undefined;
+	seeded: { entry: SignalSeedEntry; value: unknown } | undefined;
+	describedAttempt: Attempt | undefined;
+	observedAttempt: Attempt | undefined;
+	pendingObserver: (<V>(callback: () => V) => V) | undefined;
+	pendingPromise: PromiseLike<unknown> | undefined;
+	resolvePending: (() => void) | undefined;
+	streamedSelection: StreamFrameIdentity | undefined;
+	selectionAuthority: object = {};
 
 	constructor(
 		readonly owner: RequestOwner,
 		readonly node: ScopedNode<T>,
-		private describe: Describe<T> | undefined,
+		public describe: Describe<T> | undefined,
 		seed?: { entry: SignalSeedEntry; value: unknown },
 		retained = seed,
 	) {
@@ -653,7 +625,7 @@ export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
 		}
 		this.releaseView();
 		const node: ScopedNode<T> = createDeclarationView(this.node, (target) =>
-			binding.forkCandidate(target),
+			candidateHooks.resource!.call(binding, target),
 		);
 		const binding: ResourceBinding<T> = new ResourceBinding(this.owner, node, describe);
 		// A view is private like a candidate fork: it never owns receiver streams.
@@ -736,94 +708,6 @@ export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
 		if (this.streamedSelection === streamed) streams!.selections.delete(this.node.key);
 		else if (streamed.selectionKey !== identity) streams!.discardCompleted(streamed);
 		this.streamedSelection = undefined;
-	}
-
-	forkCandidate(target: ScopedNode<T>): CandidateProducer {
-		if (this.streamedSelection || this.owner.streams?.selections.has(this.node.key)) {
-			throw new CandidateUnsupportedError(formatClientError(201));
-		}
-		const fork = new ResourceBinding(this.owner, target, this.describe);
-		fork.candidate = true;
-		fork.queryDefinition = this.queryDefinition;
-		// Retained data belongs to its last successful request, not necessarily
-		// the current selection. A different query family must still clear it.
-		fork.retainedRequest = this.retainedRequest;
-		return {
-			dispose: () => fork.dispose(),
-			prepare: () => {
-				if (this.streamedSelection || this.owner.streams?.selections.has(this.node.key))
-					return { status: 'invalid' };
-				const entry = fork.selected;
-				const attempt = entry?.attempt;
-				if (entry) {
-					// Receiver-owned channels need their own adoption authority, even
-					// when another resource selected this canonical request first.
-					if (attempt?.streamed) return { status: 'invalid' };
-					const snapshot = entry.state.snapshot;
-					if (
-						attempt &&
-						(entry.request.definition.kind !== 'stream' || snapshot.status !== 'ready')
-					)
-						return { status: 'pending', waiting: target.state?.waiting ?? attempt.settled };
-					if (!(
-						(snapshot.status === 'ready' &&
-							(snapshot.complete || entry.request.definition.kind === 'stream')) ||
-						snapshot.status === 'error'
-					))
-						return { status: 'invalid' };
-				} else if (target.state?.snapshot.status !== 'idle') {
-					// Only an explicit skip has no selection. A description failure
-					// is not a completed request and cannot grant publication authority.
-					const state = target.state;
-					if (state?.snapshot.status === 'error')
-						return { status: 'error', error: state.snapshot.error };
-					if (state?.waiting) return { status: 'pending', waiting: state.waiting };
-					return { status: 'invalid' };
-				}
-				const state = entry?.state;
-				const authority = this.selectionAuthority;
-				const forkAuthority = fork.selectionAuthority;
-				return {
-					status: 'ready',
-					receipt: {
-						validate: () =>
-							!this.streamedSelection &&
-							!this.owner.streams?.selections.has(this.node.key) &&
-							this.selectionAuthority === authority &&
-							fork.selectionAuthority === forkAuthority &&
-							fork.selected === entry &&
-							(entry
-								? entry.state === state && entry.attempt === attempt && entry.consumers.has(fork)
-								: target.state?.snapshot.status === 'idle'),
-						publish: () => {
-							const previous = this.selected;
-							const resolve = this.resolvePending;
-							// Install the accepted consumer before releasing either lease. No
-							// selector, loader or abort callback executes in this phase.
-							entry?.consumers.add(this);
-							entry?.consumers.delete(fork);
-							this.selected = entry;
-							this.selectedIdentity = fork.selectedIdentity;
-							this.retainedRequest = fork.retainedRequest;
-							this.describedAttempt = fork.describedAttempt;
-							this.observedAttempt = fork.observedAttempt;
-							this.selectionAuthority = fork.selectionAuthority;
-							this.pendingObserver = undefined;
-							this.pendingPromise = undefined;
-							this.resolvePending = undefined;
-							this.seeded = undefined;
-							fork.selected = undefined;
-							return () => {
-								resolve?.();
-								// Acceptance or earlier abort cleanup can select the old request
-								// again. Its new current lease is not this retired selection.
-								if (previous !== entry && previous !== this.selected) previous?.remove(this);
-							};
-						},
-					},
-				};
-			},
-		};
 	}
 
 	private compute(): NodeState<T> {
@@ -975,70 +859,6 @@ export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
 		if (this.selected!.observe(this.node.key) === attempt) this.observedAttempt = attempt;
 	}
 
-	get authority(): object | undefined {
-		return this.selected ? this.selectionAuthority : undefined;
-	}
-
-	isStreamedSelectionReady(identity: StreamFrameIdentity): boolean {
-		return (
-			this.streamedSelection === identity &&
-			this.selected?.request.identity === identity.selectionKey
-		);
-	}
-
-	bindStreamedSelection(identity: StreamFrameIdentity): boolean {
-		assertAlive(this.owner);
-		const entry = this.selected;
-		if (identity.nodeKey !== this.node.key) return false;
-		if (!entry || entry.request.identity !== identity.selectionKey) {
-			// The receiver may publish the new generation immediately before the
-			// source write that makes its selection current. compute() consumes the
-			// owner registration after that synchronous selection transition.
-			this.streamedSelection = undefined;
-			return true;
-		}
-		if (!entry.startStreamed(identity)) return false;
-		this.streamedSelection = identity;
-		entry.deliver();
-		return true;
-	}
-
-	acceptStreamed(frame: StreamedSignalResultFrame): boolean {
-		const identity = this.streamedSelection;
-		const entry = this.selected;
-		if (
-			!identity ||
-			!entry ||
-			identity.nodeKey !== frame.identity.nodeKey ||
-			identity.selectionKey !== frame.identity.selectionKey ||
-			identity.selectionGeneration !== frame.identity.selectionGeneration ||
-			identity.attempt !== frame.identity.attempt ||
-			(frame.kind === 'open' && frame.resource !== entry.request.definition.kind)
-		) {
-			return false;
-		}
-		return entry.acceptStreamed(frame);
-	}
-
-	failStreamed(identity: StreamFrameIdentity, error: Error): boolean {
-		const streamed = this.streamedSelection;
-		const entry = this.selected;
-		if (
-			!streamed ||
-			!entry ||
-			streamed.nodeKey !== identity.nodeKey ||
-			streamed.selectionKey !== identity.selectionKey ||
-			streamed.selectionGeneration !== identity.selectionGeneration ||
-			streamed.attempt !== identity.attempt ||
-			entry.attempt?.generation !== identity.attempt ||
-			!entry.attempt.streamed
-		) {
-			return false;
-		}
-		failAttempt(entry.attempt, error);
-		return true;
-	}
-
 	retry(options?: { pending?: boolean }): void {
 		assertAlive(this.owner);
 		assertWritable();
@@ -1060,24 +880,6 @@ export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
 			if (this.selected === previous) this.selected.start(options?.pending === true);
 			this.observeSelectedAttempt();
 		});
-	}
-
-	adopt(requestKey: string | undefined, value: T): boolean {
-		assertAlive(this.owner);
-		assertWritable();
-		const entry = this.selected;
-		if (!entry || entry.request.identity !== requestKey) return false;
-		const streaming = entry.request.definition.kind === 'stream';
-		// A receipt reconciles the selected value, not the lifetime of its watch.
-		// Later server yields still own authoritative progress and completion.
-		if (!streaming) entry.stopAttempt();
-		entry.state = readyState(value, {
-			requestKey: entry.request.identity,
-			connection: streaming ? entry.state.snapshot.connection : 'none',
-			complete: streaming ? entry.state.snapshot.complete : true,
-		});
-		entry.deliver();
-		return true;
 	}
 
 	seedRequest(retained = false): SignalSeedEntry['request'] {
@@ -1126,5 +928,138 @@ export function initializeResource<T>(
 	seed?: { entry: SignalSeedEntry; value: unknown },
 	retained = seed,
 ): ResourceBinding<T> {
+	// Only a bundle that creates resources carries their candidate producer.
+	installResourceCandidates();
 	return new ResourceBinding(owner, node, describe, seed, retained);
+}
+
+// Stream ingress owns these operations so ordinary resource consumers can remove them.
+function acceptRequestStreamedResult(
+	entry: RequestEntry,
+	frame: StreamedSignalResultFrame,
+): boolean {
+	const attempt = entry.attempt;
+	if (
+		!attempt?.streamed ||
+		attempt.generation !== frame.identity.attempt ||
+		frame.sequence !== attempt.sequence ||
+		currentEntry(attempt) !== entry
+	) {
+		return false;
+	}
+	attempt.sequence++;
+	signalBatch(() => {
+		if (frame.kind === 'open') return;
+		if (frame.kind === 'value') {
+			attempt.hasYielded = true;
+			entry.state = readyState(decodeSignalValue(frame.value), {
+				requestKey: entry.request.identity,
+				connection: entry.request.definition.kind === 'stream' ? 'open' : 'none',
+				complete: false,
+			});
+			entry.deliver();
+			return;
+		}
+		if (frame.kind === 'error') {
+			entry.state = errorState(
+				new SignalStreamError(frame.code),
+				entry.request.definition.kind === 'stream' ? 'closed' : 'none',
+				entry.request.identity,
+			);
+			completeAttempt(attempt);
+			entry.deliver();
+			return;
+		}
+		if (!attempt.hasYielded || entry.state.snapshot.status !== 'ready') {
+			entry.state = errorState(
+				new Error(formatClientError(197)),
+				entry.request.definition.kind === 'stream' ? 'closed' : 'none',
+				entry.request.identity,
+			);
+			completeAttempt(attempt);
+			entry.deliver();
+			return;
+		}
+		entry.state = readyState(entry.state.snapshot.value, {
+			requestKey: entry.request.identity,
+			connection: entry.request.definition.kind === 'stream' ? 'closed' : 'none',
+			complete: true,
+		});
+		completeAttempt(attempt);
+		entry.deliver();
+	});
+	return true;
+}
+
+export function isResourceStreamedSelectionReady(
+	binding: ResourceBinding,
+	identity: StreamFrameIdentity,
+): boolean {
+	return (
+		binding.streamedSelection === identity &&
+		binding.selected?.request.identity === identity.selectionKey
+	);
+}
+
+export function bindResourceStreamedSelection(
+	binding: ResourceBinding,
+	identity: StreamFrameIdentity,
+): boolean {
+	assertAlive(binding.owner);
+	const entry = binding.selected;
+	if (identity.nodeKey !== binding.node.key) return false;
+	if (!entry || entry.request.identity !== identity.selectionKey) {
+		// The receiver may publish the new generation immediately before the
+		// source write that makes its selection current. compute() consumes the
+		// owner registration after that synchronous selection transition.
+		binding.streamedSelection = undefined;
+		return true;
+	}
+	if (!entry.startStreamed(identity)) return false;
+	binding.streamedSelection = identity;
+	entry.deliver();
+	return true;
+}
+
+export function acceptResourceStreamedResult(
+	binding: ResourceBinding,
+	frame: StreamedSignalResultFrame,
+): boolean {
+	const identity = binding.streamedSelection;
+	const entry = binding.selected;
+	if (
+		!identity ||
+		!entry ||
+		identity.nodeKey !== frame.identity.nodeKey ||
+		identity.selectionKey !== frame.identity.selectionKey ||
+		identity.selectionGeneration !== frame.identity.selectionGeneration ||
+		identity.attempt !== frame.identity.attempt ||
+		(frame.kind === 'open' && frame.resource !== entry.request.definition.kind)
+	) {
+		return false;
+	}
+	return acceptRequestStreamedResult(entry, frame);
+}
+
+export function failResourceStreamedResult(
+	binding: ResourceBinding,
+	identity: StreamFrameIdentity,
+	error: Error,
+): boolean {
+	const streamed = binding.streamedSelection;
+	const entry = binding.selected;
+	if (
+		!streamed ||
+		!entry ||
+		streamed.nodeKey !== identity.nodeKey ||
+		streamed.selectionKey !== identity.selectionKey ||
+		streamed.selectionGeneration !== identity.selectionGeneration ||
+		streamed.attempt !== identity.attempt ||
+		entry.attempt?.generation !== identity.attempt ||
+		!entry.attempt.streamed
+	) {
+		return false;
+	}
+	failAttempt(entry.attempt, error);
+	return true;
 }

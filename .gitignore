@@ -13,8 +13,11 @@ coverage
 .vite
 *.log
 
-# Project-local scoped-typecheck configs can remain after an interrupted run.
+# Project-local scoped-typecheck configs can remain after an interrupted run,
+# as can the sibling wrappers octane-tsc and the react-port type evidence write.
 **/.typecheck-files-*/
+.octane-tsc-*
+.type-evidence-*
 
 # Example-app browser and TSRX tooling outputs
 **/test-results/
@@ -23,6 +26,9 @@ examples/**/*.d.tsrx.ts
 
 # Vercel Build Output (@octanejs/adapter-vercel writes {root}/.vercel/output on build)
 .vercel/
+
+# Wrangler's local dev state and deploy redirect
+.wrangler/
 
 # Throwaway test project directories staged inside the workspace instead of
 # os.tmpdir() — `createTempProject(prefix, { insideWorkspace: true })`. Only the
@@ -84,8 +90,6 @@ packages/*/.pristine-upstream-*/
 # convention, so this stays generic like the scratch-copy pattern above.
 packages/*/.upstream-vitest-cache/
 packages/*/.pristine-vitest-cache/
-# Pristine vitest cache for tanstack-hotkeys upstream suite
-packages/tanstack-hotkeys/.vite-pristine/
 
 # Resumable React-library port evidence and one-writer batch state.
 .react-port-work/

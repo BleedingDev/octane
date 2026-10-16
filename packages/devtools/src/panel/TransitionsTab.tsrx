@@ -1,3 +1,5 @@
+'use strong';
+
 // The Transitions & Suspense tab: subscribes to the app-side bridge's `transition`
 // event (startBridge, which reads the devtools hook's getTransitionState() per
 // flush) and renders the live pending-transition count plus each Suspense boundary's
@@ -20,24 +22,27 @@ export function TransitionsTab(props: { client: OctaneDevtoolsEventClient }): Oc
 
 	useEffect(() => {
 		const off = client.on('transition', (e) => setSnapshot(e.payload));
+		client.emit('refresh', {});
 		return () => off();
 	});
 
-	return <div>
-		<div class="odt-stat">Pending transitions: {snapshot.pendingCount}</div>
-		<div class="odt-h">Suspense boundaries</div>
-		@if (snapshot.boundaries.length === 0) {
-			<div class="odt-empty">No Suspense boundaries.</div>
-		} @else {
-			@for (const b of snapshot.boundaries; index i) {
-				<div class="odt-boundary">
-					<span class={stateClass(b)}>{b.state}</span>
-					<span>{b.label}</span>
-					@if (b.hasResolved && b.state !== 'resolved') {
-						<span class="odt-muted">resolved once</span>
-					}
-				</div>
+	return (
+		<div>
+			<div class="odt-stat">Pending transitions: {snapshot.pendingCount}</div>
+			<div class="odt-h">Suspense boundaries</div>
+			@if (snapshot.boundaries.length === 0) {
+				<div class="odt-empty">No Suspense boundaries.</div>
+			} @else {
+				@for (const b of snapshot.boundaries; index i) {
+					<div class="odt-boundary">
+						<span class={stateClass(b)}>{b.state}</span>
+						<span>{b.label}</span>
+						@if (b.hasResolved && b.state !== 'resolved') {
+							<span class="odt-muted">resolved once</span>
+						}
+					</div>
+				}
 			}
-		}
-	</div>;
+		</div>
+	);
 }
