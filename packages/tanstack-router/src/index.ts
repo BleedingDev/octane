@@ -122,8 +122,8 @@ export type {
 } from './routeHookTypes';
 export { useAwaited } from './useAwaited';
 export type { AwaitOptions } from './useAwaited';
-export { useLinkProps, createLink, linkOptions } from './link';
-export type { LinkOptionsFn, LinkOptionsFnOptions } from './link';
+export { useLinkProps, createLink, linkOptions } from './linkApi';
+export type { LinkOptionsFn, LinkOptionsFnOptions } from './linkApi';
 export type {
 	ActiveLinkOptionProps,
 	ActiveLinkOptions,
