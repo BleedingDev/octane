@@ -27,11 +27,12 @@ jobs:
   publish:
     name: Publish validated SHA
     if: >-
+      github.repository == 'octanejs/octane' && (
       github.event_name == 'workflow_dispatch' ||
       (
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.event == 'push'
-      )
+      ))
     # Keep this job on a GitHub-hosted runner: npm trusted publishing only
     # accepts OIDC tokens whose `runner_environment` is `github-hosted`, so
     # provenance (and therefore `changeset:publish`) fails on self-hosted

@@ -1330,6 +1330,9 @@ jobs:
         env:
           OCTANE_PACK_ARTIFACT_DIR: ${{ runner.temp }}/octane-compiler-cohort
 
+      - name: Test maintained-fork artifact publication
+        run: node --test scripts/ultramodern-native-release.test.mjs
+
       - name: Retain accepted runtime, router and compiler archives
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
