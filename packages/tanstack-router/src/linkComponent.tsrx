@@ -11,7 +11,7 @@
 // no forwardRef); `disabled` renders without an href + role="link" (upstream
 // drops the anchor's disabled attribute; the aria props carry the state).
 import { isChildrenBlock } from 'octane';
-import type { useLinkProps as UseLinkProps } from './link';
+import type { useLinkProps as UseLinkProps } from './linkApi';
 import type { AnyRouter, RegisteredRouter } from '@tanstack/router-core';
 import type { LinkComponentProps, OctaneAnchorProps, UseLinkPropsOptions } from './linkTypes';
 
