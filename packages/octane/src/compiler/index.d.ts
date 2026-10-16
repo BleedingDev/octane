@@ -2,6 +2,7 @@ import type { CodeInformation, Mapping } from '@volar/language-core';
 import type { TextTypeFacts } from './typescript.js';
 
 export type { TextTypeFacts } from './typescript.js';
+export type { ValdiAdapter, ValdiHookSlot, ValdiWriter } from './valdi.js';
 
 export interface CompileRenderer {
 	id: string;
@@ -74,6 +75,8 @@ export interface KnownAttributeSpread {
 }
 
 export interface CompileOptions {
+	/** Preserve TypeScript syntax and declaration comments for DOM/SSR and Valdi. */
+	output?: 'js' | 'ts';
 	mode?: 'client' | 'server';
 	hmr?: boolean | 'vite' | 'webpack';
 	dev?: boolean;
@@ -93,6 +96,16 @@ export interface CompileOptions {
 	knownAttributeSpreads?: readonly KnownAttributeSpread[];
 	/** Opt in to fixed primitive child props by name. Keep text and IDs live to share extracted programs. */
 	domBindingFixedProps?: readonly string[];
+	/**
+	 * Bind signal handles that reach opaque holes, such as `{row.label as string}`,
+	 * in every module. By default only modules with an import from
+	 * `octane/signals` (a type-only `SignalHandle` import is enough), and
+	 * `$`-named expressions anywhere, bind handles, so plain apps do not ship the
+	 * signal binding runtime. Enable it for untyped components that render
+	 * handles from a lazily loaded signals engine.
+	 * @default false
+	 */
+	opaqueSignalHandles?: boolean;
 	/** Optional exact attribute-expression proofs; used only by the Valdi target. */
 	valdiWriterFacts?: ValdiWriterFacts;
 	/**
@@ -120,6 +133,14 @@ export interface CompileOptions {
 	universalRuntime?: { runtime: string; thread: 'background' | 'main-thread' };
 	clientOnlyImports?: readonly unknown[];
 	isVoidComponentImport?: (request: string, imported: string) => boolean;
+	/** Whether an imported component's module published a compiler memo proof for it. */
+	isCompilerMemoImport?: (request: string, imported: string) => boolean;
+	/** Whether an imported component's module published it as a lite export. */
+	isLiteComponentImport?: (request: string, imported: string) => boolean;
+	/** Whether a Strong module published an export whose lite subtree holds hook state. */
+	isStrongLiteComponentImport?: (request: string, imported: string) => boolean;
+	/** Whether a lite import's module also published its body root as anchorless-safe. */
+	isAnchorlessComponentImport?: (request: string, imported: string) => boolean;
 	isDescriptorChildrenImport?: (request: string, imported: string) => boolean;
 	/** Preserve the compiler's existing experimental integration options. */
 	[option: string]: unknown;
@@ -131,6 +152,31 @@ export interface CompilePosition {
 	column: number;
 }
 
+/** A source replacement, as offsets into the module text the compiler received. */
+export interface CompileEdit {
+	start: number;
+	end: number;
+	text: string;
+}
+
+/**
+ * How to resolve a diagnostic. `edits` are applied together, or not at all;
+ * a suggestion without them names the replacement in `message` only.
+ */
+export interface CompileSuggestion {
+	message: string;
+	/** The Octane hook the replacement uses, such as `useLazyRef`. */
+	hook?: string;
+	edits?: readonly CompileEdit[];
+}
+
+/** Rename an event attribute, such as a native text `onChange` to `onInput`. */
+export interface CompileAttributeSuggestion {
+	start: CompilePosition;
+	end: CompilePosition;
+	attribute: string;
+}
+
 export interface CompileDiagnostic {
 	code: string;
 	severity: 'warning' | 'error' | 'hint';
@@ -138,11 +184,7 @@ export interface CompileDiagnostic {
 	filename: string;
 	start: CompilePosition;
 	end: CompilePosition;
-	suggestions?: readonly {
-		start: CompilePosition;
-		end: CompilePosition;
-		attribute: string;
-	}[];
+	suggestions?: readonly (CompileSuggestion | CompileAttributeSuggestion)[];
 }
 
 export interface CompileSourceMap {
@@ -229,12 +271,16 @@ export interface CompileInspection {
 
 export interface CompileResult {
 	code: string;
+	/** Present for output: 'ts'. Templates are lowered; no JSX remains. */
+	lang?: 'ts';
 	map: CompileSourceMap;
 	diagnostics: readonly CompileDiagnostic[];
 	inspect?: CompileInspection;
 	universalRuntime?: CompileOptions['universalRuntime'];
 	/** This module contains compiler-proven signal declarations or native reads. */
 	streamedSignals?: true;
+	/** Exports carrying a production compiler memo proof; build-time adapter metadata. */
+	compilerMemoExports?: readonly string[];
 	/** Production client constants used by compiled binding views; build-time adapter metadata. */
 	bindingConstants?: {
 		version: 1;
@@ -243,7 +289,7 @@ export interface CompileResult {
 	};
 }
 
-/** Compile authored TSRX/JSX to Octane client or server JavaScript. */
+/** Compile authored TSRX/JSX to JavaScript, or TypeScript for DOM/SSR and Valdi. */
 export function compile(
 	source: string,
 	filename: string,
@@ -251,13 +297,30 @@ export function compile(
 ): CompileResult & { inspect: CompileInspection };
 export function compile(source: string, filename: string, options?: CompileOptions): CompileResult;
 
-/** Produce typed virtual TSX and authored-source mappings for language tooling. */
+/**
+ * Every diagnostic a module produces, where `compile()` throws the first error.
+ * Strong violations are all reported, with their suggestions. `error` is any
+ * other compilation failure; code generation did not run, so diagnostics only
+ * it would raise are absent.
+ */
+export function collectDiagnostics(
+	source: string,
+	filename: string,
+	options?: CompileOptions,
+): { diagnostics: CompileDiagnostic[]; error: unknown };
+
+/**
+ * Produce typed virtual TSX and authored-source mappings for language tooling.
+ * `intrinsics` selects its JSX type namespace independently of the runtime
+ * renderer and any authored pragma.
+ */
 export function compileToVolarMappings(
 	source: string,
 	filename?: string,
 	options?: {
 		loose?: boolean;
 		renderers?: unknown;
+		intrinsics?: string;
 		strong?: boolean;
 		knownAttributeSpreads?: readonly KnownAttributeSpread[];
 	},

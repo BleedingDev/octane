@@ -75,11 +75,13 @@ filename; source drift during a run fails instead of publishing mixed evidence.
 
 ## Signal-valued DOM styles
 
-`run-dom-bindings.mjs` compiles and bundles three production components through the
+`run-dom-bindings.mjs` compiles and bundles four production components through the
 public entries. All update two CSS properties and preserve a child node. One
 passes signal handles directly; another samples them with `.get()` in setup.
 The plain-props lane uses numeric expressions in the same signal-capable module.
-Every sample checks the resulting CSS, host and child identity, and teardown.
+The forwarded lane passes the whole style as a string prop to the host and leaves
+the child's forwarded style unset, as components that forward an optional `style`
+do. Every sample checks the resulting CSS, host and child identity, and teardown.
 
 ```bash
 node benchmarks/bench.mjs --quick signal-dom-bindings
@@ -89,8 +91,9 @@ node benchmarks/scoped-signals/run-dom-bindings.mjs --quick --fault-component-re
 
 The ratio guards require zero component-setup calls for direct signal updates;
 the sampled control must execute setup for every update. The fault command
-deliberately adds component reads and must fail. Plain fixed-property styles must
-allocate no native presentation blocks or run native style update bodies. A
+deliberately adds component reads and must fail. Plain fixed-property styles, and
+forwarded string or unset styles, must allocate no native presentation blocks or
+run native style update bodies. A
 separate observed production bundle counts those sites after compilation; the
 direct-handle lane must exercise both observers. Its CSS and text must match the
 clean bundle, and both retain host/child identity and detach on unmount. Observed
@@ -101,7 +104,7 @@ supplemental: they exclude browser layout/paint and have no hard speed threshold
 ## Graph engine comparison
 
 This suite compares the experimental `octane/signals` engine with the exact
-Alien Signals 3.2.0 dependency selected by `packages/octane`. It never resolves
+Alien Signals 3.2.1 comparator declared by this benchmark package. It never resolves
 the old binding's 1.0.4 catalog entry as the raw comparator. Both APIs are
 bundled with identical production options and execute the same graph builder
 and operations. The result records the resolved version, revision, lockfile and
@@ -140,11 +143,12 @@ cannot be installed:
 node benchmarks/scoped-signals/run.mjs --quick --tooling-root=/absolute/path/to/tooling-package
 ```
 
-That directory must resolve `esbuild` and the exact `alien-signals@3.2.0` package
-from its `node_modules`. Both measured APIs use that same Alien installation;
-the scoped API still comes from the real `octane/signals` package export.
+That directory must resolve `esbuild` and the exact `alien-signals@3.2.1` package
+from its `node_modules`. The raw comparator and archived external engines use
+that installation. Vendored Octane must exclude Alien inputs and include its own
+graph source; the scoped API still comes from the real `octane/signals` export.
 No renderer or compiler is loaded. Results distinguish this mode from a normal
-workspace installation and record the actual dependency paths, versions, entry
+benchmark package installation and record the actual dependency paths, versions, entry
 and manifest hashes, runner hash, and hashes of every bundled input. This is a
 dependency-resolution override, not a substitute engine or an installation step.
 
@@ -164,7 +168,9 @@ node benchmarks/bench.mjs --quick --ratios scoped-signals-trace
 
 The timing is normalized to nanoseconds per retained event. Same-run ratios compare the
 wrapped maximum budget with the unfilled maximum-budget control; they do not claim
-renderer or application-wide gains.
+renderer or application-wide gains. Here "budget" is the scope's trace retention
+limit (`debug.traceLimit`), not a committed CI ceiling: the guard compares two
+configurations measured in the same run.
 
 ## Baseline versus candidate owner reads
 
@@ -299,12 +305,12 @@ package directory and the same revision:
 BENCH_JSON=/private/tmp/scoped-signals-bundles.json node benchmarks/scoped-signals/run-bundles.mjs \
   --baseline-ref=<git-commit> \
   --baseline-package=/absolute/path/to/baseline/packages/octane \
-  --tooling-root=/absolute/path/to/current/packages/octane
+  --tooling-root=/absolute/path/to/current/benchmarks/scoped-signals
 node --test benchmarks/scoped-signals/bundle-boundaries.test.mjs
 ```
 
 The same optional `--tooling-root` mode can supply `esbuild`, Alien Signals
-3.2.0, and `devalue` from an existing isolated installation. It does not install
+3.2.1, and `devalue` from an existing isolated installation. It does not install
 anything. The runner verifies that every bundled dependency uses the selected
 installation. Baseline and candidate builds use identical options for each
 entry, with ambient TypeScript configuration disabled. Results record raw,
@@ -322,8 +328,9 @@ or DevTools. The compiled plain-state and automatic stream-bootstrap entries
 have the same resolved-graph prohibition, including renderer imports that emit
 zero bytes after tree shaking. This prevents an apparently small export-only
 measurement from hiding a renderer dependency introduced by compilation or
-automatic owner initialization. Native hook entries must include the correct runtime and Alien
-3.2.0. Early signal and binding entries also reject a resolved transition-frame
+automatic owner initialization. Native hook entries must include their correct runtime
+and graph source. Archived external engines also require Alien Signals 3.2.1; vendored
+engines reject Alien inputs. Early signal and binding entries also reject a resolved transition-frame
 module, even if it emits zero bytes: a split-chunk application's recursive module
 group can otherwise hoist the deferred renderer's frame into startup. The report
 records this check for both revisions and gates the candidate; a historical
@@ -528,7 +535,6 @@ controls in `inspect-async-retainers.test.mjs`. Reports preserve known scope
 labels, object counts, paths, snapshot hashes, and the source/toolchain inputs.
 Heap-byte deltas are diagnostic only and are not a leak criterion.
 
-
 ## Immutable primitive setup values
 
 `primitive-local-values.test.mjs` is part of `ci:workflow:test`. It checks matched
@@ -565,3 +571,9 @@ value entry made inside each control adapter. Real handles remain a separate
 positive control. Clean and instrumented public results must agree exactly;
 instrumented bundles never contribute byte measurements. No timing threshold
 or budget changes are added.
+
+The benchmark package owns its build, compiler, DOM and raw Alien comparator dependencies.
+Default tooling resolution starts here; `--tooling-root` selects another existing installation.
+Each source manifest explicitly selects the external or vendored graph boundary. Archived
+external engines require the selected Alien 3.2.1 package; vendored engines reject it and
+require their own graph source. Ordinary and graph-free resolved-input exclusions are unchanged.

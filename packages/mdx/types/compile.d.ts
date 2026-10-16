@@ -1,7 +1,12 @@
 // Hand-written declarations for src/compile.js (authored in `.js` so the vite
 // entry's import chain loads under Node's native ESM loader — same convention
 // as @octanejs/vite-plugin's types/). Keep in lockstep with the implementation.
-import type { CompileOptions } from '@mdx-js/mdx';
+// This exported compile-only entry avoids the root's evaluation types, which
+// require a global JSX namespace. Keep the upstream options without that global.
+import type { createFormatAwareProcessors } from '@mdx-js/mdx/internal-create-format-aware-processors';
+
+type CompilerInput = NonNullable<Parameters<typeof createFormatAwareProcessors>[0]>;
+type CompileOptions = { -readonly [K in keyof CompilerInput]: CompilerInput[K] };
 
 export interface CompileMdxResult {
 	code: string;
@@ -38,11 +43,19 @@ export interface CompileMdxOptions {
 	dev?: boolean;
 	/** octane compiler profiling metadata (client only). */
 	profile?: boolean;
+	/** Apply Octane Strong diagnostics to the generated document and authored JavaScript. */
+	strong?: boolean;
+	/**
+	 * Generated host tags that may be replaced through component mappings.
+	 * Omit to keep every generated host overridable; [] makes them all native.
+	 * Named components and layouts retain their existing mapping behavior.
+	 */
+	overridableTags?: readonly string[];
 	/**
 	 * Module the emitted document reads the provider mapping from
 	 * (`useMDXComponents`). Defaults per mode — `'@octanejs/mdx'` (client) /
 	 * `'@octanejs/mdx/server'` (server), so each runtime reads ITS OWN context
-	 * store (they are disjoint; see src/server.ts). Pass `null` to disable the
+	 * store (they are disjoint; see src/server.tsrx). Pass `null` to disable the
 	 * provider wiring entirely (only `props.components` applies).
 	 */
 	providerImportSource?: string | null;

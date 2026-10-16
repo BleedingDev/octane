@@ -118,10 +118,25 @@ Chrome timeline measurements.
 
 Output is a table of median + min millis per operation: `run`, `replace`,
 `add`, `update`, `select`, `swap`, `remove`, `runlots`, `select_lots`, `clear`.
+Local `select`, `swap`, and `select_lots` samples use the paired PR harness's
+bounded calibration to target about 20 ms per batch, followed by untimed
+per-operation warmup. Durations are divided by the number of committed clicks.
+This moves these short operations away from Chromium's 0.1 ms clock quantum.
+Selection alternates rows; swaps use an odd count so a no-op cannot pass the
+identity gate. Every click retains its adapter's synchronous or awaited commit.
+JSON includes `repeat` and `sampleMs` to expose the batch size and median duration.
+
+Only these reversible operations are batched locally. Repeating `remove` shrinks
+the table, and repeating `update` grows labels, so their work would depend on the
+target's calibrated batch size. They and the other operations retain single-click
+samples. The paired PR harness still shares its counts across base/head, keeping
+its existing protocol. Re-record local selection/swap timing baselines after this
+change; warm batch averages are a different measurement from isolated clicks.
+
 The harness uses `page.evaluate(el.click)` to fire clicks synchronously inside
 the page — avoids per-click CDP IPC overhead (~10ms each on Chromium) so the
 numbers reflect the renderer's wall time, not Playwright transport. Each timed
-click also verifies its DOM change immediately after its timer ends, before
+sample also verifies its DOM change immediately after its timer ends, before
 another scheduler turn can commit. Before warmup, each target receives the same
 seeded `Math.random` stream so generated label lengths and allocation patterns
 cannot drift between dialects.
@@ -463,13 +478,18 @@ change; see [browser sample preparation](../README.md#browser-sample-preparation
 
 - **Inner-loop timing.** The tiny ops (rotate / displace_k / remove\*) are far
   below `performance.now()` resolution for a single click, so each timed
-  sample loops N clicks and divides: N=20 for displace/rotate/remove, N=4 for
-  reverse/shuffle (reverse is self-inverse; shuffle reseeds per click, so
-  repeated clicks are valid work), N=1 for the 100-row inserts. Caveat:
-  `removeevery10` decays 1000 → ~122 rows across its 20 clicks, so its number
-  is the mean over that decaying sequence — comparable across targets, not to
-  a single 1000-row click. Every sample starts from a fresh 1k `#run` (reset
-  outside the timed window).
+  sample loops N clicks and divides. The length-preserving ops (reverse,
+  shuffle, rotate, displace) calibrate N per target until a sample takes about
+  20 ms (reverse is self-inverse; shuffle reseeds per click, so repeated clicks
+  are valid work); `meta.clicksPerSample` records each N. The remove ops keep
+  N=20 and the 100-row inserts N=1. Caveat: `removeevery10` decays 1000 → ~122
+  rows across its 20 clicks, so its number is the mean over that decaying
+  sequence — comparable across targets, not to a single 1000-row click. Every
+  sample starts from a fresh 1k `#run` (reset outside the timed window).
+- **Paired targets.** Every target's page stays open in one browser, each in
+  its own context, and each sample round visits all targets in a rotating
+  order. The two sides of a ratio guard are measured within the same round, so
+  runner drift moves both.
 - **Identity gate** (uibench-style), run once per op outside the timed loop:
   every `<tr>` is stamped with `tr.__benchId = <row id>` before the op; after
   one click the harness asserts every surviving row id is rendered by the

@@ -9,13 +9,14 @@ import {
 	type Root,
 	type ViewTransitionInstance,
 } from '../src/index.js';
-import { act } from './_helpers';
+import { act, nextTask } from './_helpers';
 import {
 	installViewTransitionMocks,
 	type ViewTransitionMocks,
 } from './conformance/_helpers/view-transition-mocks';
 import {
 	ScopedEffectsApp,
+	CommittedScopedApp,
 	ScopeShapeApp,
 	ScopedPortalApp,
 	ScopedImageApp,
@@ -123,6 +124,7 @@ describe('element-scoped ViewTransition commit lifetimes', () => {
 		else Reflect.deleteProperty(Element.prototype, 'startViewTransition');
 		mocks.restore();
 		vi.restoreAllMocks();
+		vi.useRealTimers();
 	});
 
 	const text = (id: string) => container.querySelector('[data-value="' + id + '"]')!.textContent;
@@ -338,14 +340,23 @@ describe('element-scoped ViewTransition commit lifetimes', () => {
 	});
 
 	it('commits without animation when a pre-render passive adds urgent sibling work', async () => {
+		// Hold the frame clock so the passive stays pending until the transition
+		// drains it before rendering. A frame that lands first, as on a loaded
+		// host, drains it earlier, and the transition then animates.
+		vi.useFakeTimers({
+			toFake: ['setTimeout', 'clearTimeout', 'requestAnimationFrame', 'cancelAnimationFrame'],
+		});
 		onEffect = (id, value) => {
 			if (id === 'right' && value === 'trigger') controls.right('urgent from effect');
 		};
 		flushSync(() => controls.right('trigger'));
 		startTransition(() => controls.left('left changed'));
 		await Promise.resolve();
-		expect(captures).toEqual([]);
+		// The transition waits for its own host task (#1864).
+		expect(text('left')).toBe('initial');
+		await nextTask();
 		expect(text('left')).toBe('left changed');
+		expect(captures).toEqual([]);
 		expect(text('right')).toBe('urgent from effect');
 	});
 
@@ -373,6 +384,43 @@ describe('element-scoped ViewTransition commit lifetimes', () => {
 		expect(right.skipped).toBe(false);
 		await vi.waitFor(() => expect(events).toContain('left:urgent left'));
 		expect(events).not.toContain('right:right changed');
+	});
+
+	it('commits binding state before its callback during an unfinished capture', async () => {
+		let left!: Capture;
+		const observed: unknown[] = [];
+		await act(() =>
+			root.render(CommittedScopedApp, {
+				controls,
+				events,
+				afterCommit: () => observed.push([text('left'), left.skipped]),
+			}),
+		);
+		startTransition(() => controls.left('captured'));
+		left = await nextCapture('left');
+		(container.querySelector('[data-value="left"]') as HTMLButtonElement).click();
+		expect(observed).toEqual([['committed', true]]);
+	});
+
+	it('commits binding state before its callback while skipping only the affected animating scope', async () => {
+		let left!: Capture;
+		let right!: Capture;
+		const observed: unknown[] = [];
+		await act(() =>
+			root.render(CommittedScopedApp, {
+				controls,
+				events,
+				afterCommit: () => observed.push([text('left'), left.skipped, right.skipped]),
+			}),
+		);
+		startTransition(() => controls.left('captured'));
+		left = await nextCapture('left');
+		await updateAndReady(left);
+		startTransition(() => controls.right('captured'));
+		right = await nextCapture('right');
+		await updateAndReady(right);
+		(container.querySelector('[data-value="left"]') as HTMLButtonElement).click();
+		expect(observed).toEqual([['committed', true, false]]);
 	});
 	it('reveals resolved Suspense in a sibling scope while the first scope animates', async () => {
 		let resolve!: (value: string) => void;
@@ -509,6 +557,26 @@ describe('element-scoped ViewTransition commit lifetimes', () => {
 			left.ready.resolve();
 		},
 	);
+
+	it('does not wait for an image whose onLoad the app handles', async () => {
+		// The app reacts to the load itself, so the snapshot must not hold for it.
+		// Regression (#1882): the skip read the old `$load` slot after delegated
+		// slots moved to `$o<type>`, so these images held the snapshot again.
+		vi.spyOn(HTMLImageElement.prototype, 'complete', 'get').mockReturnValue(false);
+		const onLoad = () => {};
+		await act(() => root.render(ScopedImageApp, { value: 'initial', inside: true, onLoad }));
+		startTransition(() => root.render(ScopedImageApp, { value: 'changed', inside: true, onLoad }));
+		const left = await nextCapture('left');
+		let updated = false;
+		const updating = Promise.resolve(left.update()).then(() => {
+			updated = true;
+		});
+		await act(async () => {});
+		expect(container.querySelector('img')!.getAttribute('src')).toBe('changed.png');
+		expect(updated).toBe(true);
+		await updating;
+		left.ready.resolve();
+	});
 
 	it('keeps the outgoing ref and callback on its old scope when a portal moves', async () => {
 		const refs: Array<ViewTransitionInstance | null> = [];

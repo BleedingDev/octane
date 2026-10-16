@@ -1,13 +1,10 @@
 import { formatClientError } from '../error-codes.client.generated.js';
 import { decodeSignalValue } from '../data-encoding.js';
+import { postHostTask } from '../host-task.js';
 import type { ScopeSeed, SignalOwner, SignalRendererOwnerIdentity } from '../signals/types.js';
 import { captureInitialDocumentSignals } from '../signals/native-read-seeds.js';
 import {
 	HYDRATE_ID_ATTR,
-	HYDRATE_IDLE_TIMEOUT_ATTR,
-	HYDRATE_MEDIA_ATTR,
-	HYDRATE_VISIBLE_MARGIN_ATTR,
-	HYDRATE_VISIBLE_THRESHOLD_ATTR,
 	HYDRATE_WHEN_ATTR,
 	HYDRATE_INDEPENDENT_ATTR,
 	INDEPENDENT_HYDRATE_MANIFEST_ATTR,
@@ -30,10 +27,8 @@ import {
 	type HydrationReplayIntent,
 } from './event-capture.js';
 import { isHydrationLifecycleEvent } from './interaction-config.js';
-import { idle } from './idle.js';
-import { media } from './media.js';
+import { getNativeHydrationDOM } from './native-intent.js';
 import type { HydrationStrategy } from './types.js';
-import { visible } from './visible.js';
 
 export interface IndependentHydrateActivationContext {
 	readonly element: Element;
@@ -49,9 +44,24 @@ export type IndependentHydrateActivator = (
 	context: IndependentHydrateActivationContext,
 ) => void | { unmount(): void } | Promise<void | { unmount(): void }>;
 
+/**
+ * Rebuilds each automatic strategy an independent wrapper can serialize, from
+ * that wrapper's attributes. `octane/hydration/independent-strategies` exports
+ * the built-in implementation.
+ */
+export type IndependentHydrateStrategies = Readonly<
+	Record<'idle' | 'visible' | 'media', (element: Element) => HydrationStrategy>
+>;
+
 export interface IndependentHydrateRegistration {
 	readonly load: () => Promise<Record<string, unknown>>;
 	readonly loadStyles: (styles: readonly string[]) => void | Promise<void>;
+	/**
+	 * Arms an `idle`, `visible` or `media` trigger during registration. When it is
+	 * omitted, such an island loads the built-in strategies and arms once they
+	 * resolve, so a page without such islands never ships them.
+	 */
+	readonly strategies?: IndependentHydrateStrategies;
 	readonly signalOwner?: SignalOwner;
 	/** Initial document history shared with the matching server renderer. */
 	readonly initialDocumentSignals?: ScopeSeed;
@@ -63,34 +73,12 @@ export interface IndependentHydrateBootstrapOptions {
 	readonly buildId?: string;
 	readonly loadModule: (moduleId: string) => Promise<Record<string, unknown>>;
 	readonly loadStyles: (styles: readonly string[]) => void | Promise<void>;
+	/** See {@link IndependentHydrateRegistration.strategies}. */
+	readonly strategies?: IndependentHydrateStrategies;
 	readonly signalOwner?: SignalOwner;
 	/** Initial document history shared with the matching server renderer. */
 	readonly initialDocumentSignals?: ScopeSeed;
 	readonly onError?: (error: unknown) => void;
-}
-
-/**
- * Rebuild the built-in automatic strategy the server serialized for this
- * boundary. The lexical parent that evaluated `when` never runs here, so the
- * server encodes each strategy's `_p` parameters on the wrapper. `interaction` is
- * owned by pre-root capture and `never` stays inert; the server and compiler
- * reject `condition` and function-form `when` for independent boundaries.
- */
-function automaticStrategy(element: Element, when: string | null): HydrationStrategy | null {
-	if (when === 'idle') {
-		const timeout = element.getAttribute(HYDRATE_IDLE_TIMEOUT_ATTR);
-		return idle(timeout === null ? {} : { timeout: Number(timeout) });
-	}
-	if (when === 'visible') {
-		const rootMargin = element.getAttribute(HYDRATE_VISIBLE_MARGIN_ATTR);
-		const threshold = element.getAttribute(HYDRATE_VISIBLE_THRESHOLD_ATTR);
-		return visible({
-			...(rootMargin === null ? {} : { rootMargin }),
-			...(threshold === null ? {} : { threshold: threshold.split(',').map(Number) }),
-		});
-	}
-	if (when === 'media') return media(element.getAttribute(HYDRATE_MEDIA_ATTR) ?? '');
-	return null;
 }
 
 export interface IndependentHydrateLifecycle {
@@ -99,9 +87,55 @@ export interface IndependentHydrateLifecycle {
 	resume(): void;
 }
 
+/** One island's claim on its document's next activation task. */
+interface ActivationTurn {
+	/** Captured input outranks automatic triggers; read whenever a turn is chosen. */
+	readonly urgent: () => boolean;
+	/** Activates, or returns false when the attempt no longer activates. */
+	readonly run: () => boolean;
+}
+
+// A document with an entry has activated an island in the current task. The
+// entry holds the islands waiting for later tasks.
+let activationQueues: WeakMap<Document, ActivationTurn[]> | undefined;
+
+function takeActivationTurn(ownerDocument: Document, waiting: ActivationTurn[]): void {
+	while (waiting.length !== 0) {
+		const urgent = waiting.findIndex((turn) => turn.urgent());
+		if (waiting.splice(urgent < 0 ? 0 : urgent, 1)[0].run()) {
+			postHostTask(() => takeActivationTurn(ownerDocument, waiting));
+			return;
+		}
+	}
+	activationQueues!.delete(ownerDocument);
+}
+
+/**
+ * Activate at most one island per task in each document. Ready islands converge
+ * in one microtask checkpoint: repeated instances share a module, a shared
+ * stylesheet fires one `load`, and a back/forward-cache restore resumes them all.
+ * The first to arrive in a task runs at once; each later one gets its own task,
+ * captured input first, so the browser can deliver input and paint in between.
+ */
+function enterActivationGate(ownerDocument: Document, turn: ActivationTurn): void {
+	const queues = (activationQueues ??= new WeakMap());
+	const queue = queues.get(ownerDocument);
+	if (queue !== undefined) {
+		queue.push(turn);
+		return;
+	}
+	const waiting: ActivationTurn[] = [];
+	queues.set(ownerDocument, waiting);
+	// A stale or expired attempt does not use up this task.
+	if (turn.run() || waiting.length !== 0) {
+		postHostTask(() => takeActivationTurn(ownerDocument, waiting));
+	} else queues.delete(ownerDocument);
+}
+
 /**
  * Register one compiler/bundler-proven island with the pre-root intent capture.
  * Loading this island never evaluates its lexical parent or a sibling module.
+ * Islands in one document that become ready together activate one per task.
  */
 export function registerIndependentHydrationIsland(
 	element: Element,
@@ -114,7 +148,7 @@ export function registerIndependentHydrationIsland(
 	if (element.getAttribute(HYDRATE_ID_ATTR) !== manifest.boundaryId) {
 		throw new Error(formatClientError(216));
 	}
-	const { load, loadStyles, signalOwner, onError } = registration;
+	const { load, loadStyles, strategies, signalOwner, onError } = registration;
 	let initialDocumentSignals =
 		registration.initialDocumentSignals === undefined
 			? undefined
@@ -134,7 +168,10 @@ export function registerIndependentHydrationIsland(
 	let root: { unmount(): void } | undefined;
 	const intents: HydrationReplayIntent[] = takePendingHydrationIntents(element) ?? [];
 	const when = element.getAttribute(HYDRATE_WHEN_ATTR);
-	const strategy = automaticStrategy(element, when);
+	// `interaction` is owned by pre-root capture and `never` stays inert; the
+	// server and compiler reject `condition` and function-form `when` here.
+	const automatic = when === 'idle' || when === 'visible' || when === 'media';
+	let strategy = automatic ? strategies?.[when](element) : undefined;
 	// A fired automatic strategy is a standing activation request, like a
 	// retained intent: pause defers it and resume honors it without re-arming.
 	let triggered = when === 'load';
@@ -176,31 +213,53 @@ export function registerIndependentHydrationIsland(
 				if (typeof candidate !== 'function') {
 					throw new TypeError(formatClientError(217));
 				}
-				const replays = intents.splice(0);
-				const nativeAuthority =
-					replays.length !== 0 && replays.every((intent) => intent.current !== undefined);
-				for (let index = replays.length - 1; index >= 0; index--) {
-					if (
-						!isHydrationSelectionIntentCurrent(replays[index]) ||
-						!isNativeHydrationIntentCurrent(replays[index])
-					)
-						replays.splice(index, 1);
-				}
-				// An expired native command cannot complete activation or retire the
-				// island. Automatic triggers and ordinary selection behavior remain
-				// independent; a future valid command can start another attempt.
-				if (nativeAuthority && replays.length === 0 && !triggered) {
-					active = false;
-					return;
-				}
-				replayReady = true;
-				return (candidate as IndependentHydrateActivator)({
-					element,
-					manifest,
-					captures: manifest.captures.map((value) => decodeSignalValue(value)),
-					intents: replays,
-					...(signalOwner === undefined ? {} : { signalOwner }),
-					...(initialDocumentSignals === undefined ? {} : { initialDocumentSignals }),
+				// Wait for this document's activation turn while still loading. Until
+				// `replayReady`, input keeps joining `intents`, pause and dispose still
+				// cancel, and the `active` latch keeps a re-trigger from starting over.
+				return new Promise<Awaited<ReturnType<IndependentHydrateActivator>>>((resolve, reject) => {
+					enterActivationGate(element.ownerDocument, {
+						urgent: () => intents.length !== 0,
+						run: () => {
+							if (disposed || generation !== attempt) {
+								resolve();
+								return false;
+							}
+							try {
+								const replays = intents.splice(0);
+								const nativeAuthority =
+									replays.length !== 0 && replays.every((intent) => intent.current !== undefined);
+								for (let index = replays.length - 1; index >= 0; index--) {
+									if (
+										!isHydrationSelectionIntentCurrent(replays[index]) ||
+										!isNativeHydrationIntentCurrent(replays[index])
+									)
+										replays.splice(index, 1);
+								}
+								// An expired native command cannot complete activation or retire the
+								// island. Automatic triggers and ordinary selection behavior remain
+								// independent; a future valid command can start another attempt.
+								if (nativeAuthority && replays.length === 0 && !triggered) {
+									active = false;
+									resolve();
+									return false;
+								}
+								replayReady = true;
+								resolve(
+									(candidate as IndependentHydrateActivator)({
+										element,
+										manifest,
+										captures: manifest.captures.map((value) => decodeSignalValue(value)),
+										intents: replays,
+										...(signalOwner === undefined ? {} : { signalOwner }),
+										...(initialDocumentSignals === undefined ? {} : { initialDocumentSignals }),
+									}),
+								);
+							} catch (error) {
+								reject(error);
+							}
+							return true;
+						},
+					});
 				});
 			})
 			.then((value) => {
@@ -244,6 +303,20 @@ export function registerIndependentHydrationIsland(
 	};
 	registerHydrationIntentBoundary(element, boundary);
 	arm();
+	if (automatic && !strategies) {
+		// Most islands pages never need the strategies, so they load on demand. Arm
+		// once they resolve, unless disposed; resume arms a paused island. A failed
+		// load or arm reports like one during registration would have.
+		import('./independent-strategies.js')
+			.then((module) => {
+				if (disposed) return;
+				strategy = module.independentHydrationStrategies[when](element);
+				if (!paused) arm();
+			})
+			.catch((error) => {
+				if (!disposed) onError?.(error);
+			});
+	}
 	if (intents.length !== 0 || triggered) activate();
 	return Object.assign(
 		() => {
@@ -288,7 +361,7 @@ export function bootstrapIndependentHydration(
 	root: ParentNode,
 	options: IndependentHydrateBootstrapOptions,
 ): IndependentHydrateLifecycle {
-	const { buildId, loadModule, loadStyles, signalOwner, onError } = options;
+	const { buildId, loadModule, loadStyles, strategies, signalOwner, onError } = options;
 	let initialDocumentSignals =
 		options.initialDocumentSignals === undefined
 			? undefined
@@ -300,6 +373,8 @@ export function bootstrapIndependentHydration(
 	const cleanups = new Map<Element, IndependentHydrateLifecycle>();
 	const selector = `script[type="application/json"][${INDEPENDENT_HYDRATE_MANIFEST_ATTR}]`;
 	const ownerDocument = root.nodeType === 9 ? (root as Document) : root.ownerDocument!;
+	// Mutated nodes can be forms, whose named controls shadow element methods.
+	const dom = getNativeHydrationDOM(ownerDocument);
 	initializeIndependentHydrationEventCapture(ownerDocument);
 	let disposed = false;
 	let paused = false;
@@ -335,6 +410,7 @@ export function bootstrapIndependentHydration(
 				registerIndependentHydrationIsland(element, manifest, {
 					load: () => loadModule(manifest.moduleId),
 					loadStyles,
+					...(strategies === undefined ? {} : { strategies }),
 					...(signalOwner === undefined ? {} : { signalOwner }),
 					...(initialDocumentSignals === undefined ? {} : { initialDocumentSignals }),
 					...(onError === undefined ? {} : { onError }),
@@ -346,10 +422,9 @@ export function bootstrapIndependentHydration(
 		}
 	};
 	const scan = (node: Node): void => {
-		if (node.nodeType !== 1) return;
-		const element = node as Element;
-		if (element.matches(selector)) register(element);
-		else for (const sidecar of element.querySelectorAll(selector)) register(sidecar);
+		if (!dom.element(node)) return;
+		if (dom.matches(node, selector)) register(node);
+		else for (const sidecar of dom.query(node, selector)) register(sidecar);
 	};
 	// Pay for observation only in the independent bootstrap. Streaming can add a
 	// sidecar after its boundary (and its first interaction) is already visible.
@@ -360,15 +435,15 @@ export function bootstrapIndependentHydration(
 			for (const record of records) {
 				if (record.type === 'characterData') {
 					const parent = record.target.parentElement;
-					if (parent?.matches(selector)) register(parent);
+					if (parent !== null && dom.matches(parent, selector)) register(parent);
 					continue;
 				}
-				if (record.target.nodeType === 1 && (record.target as Element).matches(selector)) {
-					register(record.target as Element);
+				if (dom.element(record.target) && dom.matches(record.target, selector)) {
+					register(record.target);
 				}
 				for (const node of record.addedNodes) scan(node);
 				for (const node of record.removedNodes) {
-					if (node.nodeType === 1 && !(node as Element).matches(selector)) removedBoundary = true;
+					if (dom.element(node) && !dom.matches(node, selector)) removedBoundary = true;
 				}
 			}
 			if (removedBoundary) {

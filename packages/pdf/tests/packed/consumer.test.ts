@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { build, createServer } from 'vite';
@@ -66,7 +66,7 @@ describe('@octanejs/pdf packed consumer', () => {
 			`import '@octanejs/pdf/dist/Page/AnnotationLayer.css';
 import '@octanejs/pdf/dist/Page/TextLayer.css';
 import { Document, Page, pdfjs } from '@octanejs/pdf';
-import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 export const view = <Document file="document.pdf"><Page pageNumber={1} /></Document>;
 `,

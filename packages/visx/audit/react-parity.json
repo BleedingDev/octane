@@ -39,9 +39,9 @@
       "node": ">=22",
       "platform": "any",
       "arch": "any",
-      "packageManager": "pnpm@11.15.1",
+      "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "91136aca7e454123147ee81e429398d60a872288b7ce288a72b4cfbf3c038dc2"
+      "lockfileSha256": "6df573d6aa854c122b0cea3e8c3be46fb67e3debe9ce0f329a773850bbd87706"
     }
   },
   "lanes": [
@@ -104,7 +104,7 @@
         {
           "path": "scripts/react-parity/visx-types-lib.mjs",
           "role": "support",
-          "sha256": "81ce68b746a4d516c8e1c2d3e9072f0ebbd910c297de09996ee28cf14b6f94ed"
+          "sha256": "61bd68479c782cc4a5265f2ab466b6e48844d84dc68686f61a427e55065dfc75"
         },
         {
           "path": "scripts/react-parity/visx-types-lib.test.mjs",
@@ -172,7 +172,7 @@
         {
           "path": "scripts/react-parity/visx-types-lib.mjs",
           "role": "support",
-          "sha256": "81ce68b746a4d516c8e1c2d3e9072f0ebbd910c297de09996ee28cf14b6f94ed"
+          "sha256": "61bd68479c782cc4a5265f2ab466b6e48844d84dc68686f61a427e55065dfc75"
         },
         {
           "path": "scripts/react-parity/visx-types-lib.test.mjs",

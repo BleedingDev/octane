@@ -139,7 +139,7 @@ pnpm dlx @octanejs/cli init
 Or do it by hand:
 
 ```bash
-pnpm add octane @octanejs/vite-plugin
+pnpm add octane @octanejs/vite-plugin @tsrx/oxc@0.20.0
 ```
 
 ```ts
@@ -241,6 +241,8 @@ Octane itself. Good places to start:
   for SPA compilation and full-stack SSR.
 - [TSRX vs TSX/JSX](https://octanejs.dev/docs/tsrx-vs-tsx): when to reach for
   each dialect and what TSRX unlocks.
+- [Strong mode](https://octanejs.dev/docs/strong-mode): the opt-in pure-render
+  contract, how to adopt it, and every diagnostic it reports.
 - [Differences from React](https://octanejs.dev/docs/differences-from-react): the
   deliberate divergences, and why everything else matching React is the point.
 - [Publishing libraries](https://octanejs.dev/docs/publishing-libraries): package
@@ -264,6 +266,8 @@ In this repository:
   [deferred hydration](./docs/deferred-hydration.md): the full references.
 - [Differences from React](./docs/differences-from-react.md): the divergence
   contract.
+- [Strong compiler checks](./docs/strong-compiler-checks.md): every Strong-mode
+  diagnostic, its replacement, and the coverage baseline.
 - [ReactCompat](./docs/react-compat.md): React inside Octane, including compiler
   ownership, context mapping, boundaries, SSR, and hydration; links to the
   opposite `OctaneCompat` direction.
@@ -279,7 +283,8 @@ generated inventory; the shape of it is:
   rendering, the hook API, the server (SSR) and client (hydration) entry points,
   and the compiler itself, exposed at `octane/compiler` with bundler adapters at
   `octane/compiler/vite` and `octane/compiler/bundler`. Custom Node build pipelines
-  can opt into [type-aware text compilation](./docs/compiler-text-inference.md).
+  can opt into [type-aware text compilation](./docs/compiler-text-inference.md)
+  and [TypeScript output](./docs/compiler-typescript-output.md).
 - The app layer: [`@octanejs/app-core`](./packages/app-core) holds the
   bundler-neutral config, routing, SSR, hydration codegen, and production
   handler, and the [Vite](./packages/vite-plugin-octane),
@@ -300,7 +305,7 @@ generated inventory; the shape of it is:
   routing (tanstack-query, apollo-client, tanstack-router, remix-router), UI
   (radix, base-ui, aria, shadcn, motion, dnd-kit, sonner, floating-ui, lucide),
   forms and content (hook-form, tanstack-form, lexical, tiptap, mdx, i18next),
-  data-heavy screens (tanstack-table, tanstack-virtual, recharts, visx), 3D
+  data-heavy screens (tanstack-virtual, recharts, visx), 3D
   (three), Web3 (wagmi, rainbowkit), and more.
 
 Parity varies by package. Some are behaviorally complete, others are explicitly

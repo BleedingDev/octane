@@ -1,4 +1,8 @@
 export { trustHTML, type TrustedHTML } from '../trusted-html.js';
+export type {
+	LayoutSnapshotOptions,
+	LayoutSnapshotOptionsWithInitial,
+} from '../layout-snapshot-types.js';
 export { createResizeObserver } from '../resize-observer.js';
 /**
  * `octane/server` — server-rendering entry.
@@ -55,6 +59,7 @@ export {
 	retireSignalOwnerIdentity,
 } from '../signals/owner-context.js';
 export type { SignalOwner, SignalOwnerEnvironment } from '../signals/types.js';
+export type { CompiledComponent } from '../runtime.js';
 export {
 	__registerServerFunction,
 	__serverCall,
@@ -96,6 +101,7 @@ export {
 	type NativeSignalReference,
 	type RenderOptions,
 	type ServerRenderNode,
+	type ShellWitness,
 	type StreamOptions,
 	type StreamInjectionSource,
 	setSsrSuspenseTimeout,
@@ -107,6 +113,7 @@ export {
 	useState,
 	useLinkedState,
 	useReducer,
+	__useCommittedState,
 	__useStateWithGetter,
 	__useLinkedStateWithGetter,
 	__useReducerWithGetter,
@@ -114,11 +121,13 @@ export {
 	type LinkedStateOptions,
 	useEffect,
 	useLayoutEffect,
+	useLayoutSnapshot,
 	useInsertionEffect,
 	useImperativeHandle,
 	useMemo,
 	useCallback,
 	useRef,
+	useLazyRef,
 	useId,
 	useEffectEvent,
 	useTransition,
@@ -137,6 +146,7 @@ export {
 	invokeManualHook,
 	startTransition,
 	flushSync,
+	__createDiscreteEventListener,
 	isChildrenBlock,
 	isValidElement,
 	cloneElement,
@@ -166,6 +176,9 @@ export {
 
 	// Context
 	createContext,
+	createCompiledContext,
+	CompiledContext,
+	CompiledOutlet,
 	use,
 	useContext,
 	ssrIsSuspense,
@@ -224,6 +237,7 @@ export {
 	ssrElement,
 	ssrComponent,
 	ssrComponentNS,
+	ssrComponentFromConfig,
 	ssrInNamespace,
 	ssrBlock,
 	ssrFragmentMarker,

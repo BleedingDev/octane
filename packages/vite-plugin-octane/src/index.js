@@ -26,7 +26,7 @@ import { handleRenderRoute } from './server/render-route.js';
 import { handleServerRoute } from './server/server-route.js';
 import { HYDRATION_NONCE_PLACEHOLDER, injectHydrationEntry } from './server/html-template.js';
 import { generateServerEntry } from './server/virtual-entry.js';
-import { nodeRequestToWebRequest, sendWebResponse } from './server/node-http.js';
+import { nodeRequestToWebRequest, nodeRequestUrl, sendWebResponse } from './server/node-http.js';
 import { ENTRY_FILENAME } from './constants.js';
 import {
 	getOctaneConfigPath,
@@ -45,7 +45,7 @@ import {
 	write_project_generated_file,
 } from './project-codegen.js';
 import { createClientAssetMap } from './client-assets.js';
-import { createClientBuildState } from './client-build.js';
+import { PENDING_CLIENT_BUILD_ID, createClientBuildState } from './client-build.js';
 
 import { patch_global_fetch, is_rpc_request } from '@ripple-ts/adapter/rpc';
 
@@ -234,27 +234,49 @@ function has_islands_route(config) {
 }
 
 /**
- * Fail the build when an islands-only route's shell needs client work. The
- * shell's modules never load in the browser, so every component it renders
- * outside its independent islands must be static server output.
+ * Every rendered document of this app is an islands-only page.
+ * @param {ResolvedOctaneConfig | null} config
+ * @returns {boolean}
+ */
+function has_only_islands_routes(config) {
+	const routes = config?.router.routes.filter((route) => route.type === 'render') ?? [];
+	return routes.length > 0 && routes.every((route) => route.hydrate === 'islands');
+}
+
+/**
+ * Check every islands-only route's shell for client work. The shell's modules
+ * never load in the browser, so every component it renders outside its
+ * independent islands must be static server output. A build fails on the
+ * first problem; dev reports each one and keeps serving.
  *
- * @param {import('vite').Rollup.PluginContext} context
+ * @param {(source: string, importer: string) => Promise<{ id: string, external?: boolean | 'absolute' | 'relative' } | null>} resolve
  * @param {string} projectRoot
  * @param {ResolvedOctaneConfig} config
+ * @param {(message: string) => void} report
+ * @param {(file: string, exports: string[] | null, values: boolean) => ReturnType<typeof analyzeIslandsShell>} [analyze]
  */
-async function assertStaticIslandsShells(context, projectRoot, config) {
+async function checkIslandsShells(
+	resolve,
+	projectRoot,
+	config,
+	report,
+	analyze = (file, exports, values) =>
+		analyzeIslandsShell(fs.readFileSync(file, 'utf-8'), file, exports, { values }),
+) {
+	// Checked exports per module: a rendered export by name, a value passed into
+	// JSX as `?name`, which a rendered check of the same export also covers.
 	/** @type {Map<string, Set<string> | null>} */
 	const checked = new Map();
 	for (const route of config.router.routes) {
 		if (route.type !== 'render' || route.hydrate !== 'islands') continue;
 		const fail = (/** @type {string} */ message) =>
-			context.error(
+			report(
 				`[@octanejs/vite-plugin] RenderRoute ${JSON.stringify(route.path)} uses hydrate: 'islands', but ${message}`,
 			);
 		if (config.rootBoundary.pending || config.rootBoundary.catch)
 			fail('the configured root boundaries need a hydrated root.');
 		const exportName = get_route_entry_export_name(route.entry);
-		/** @type {Array<[string, string[] | null]>} */
+		/** @type {Array<[string, string[] | null, boolean]>} */
 		const pending = [];
 		for (const [
 			modulePath,
@@ -267,16 +289,29 @@ async function assertStaticIslandsShells(context, projectRoot, config) {
 				pending.push([
 					path.resolve(projectRoot, modulePath.startsWith('/') ? `.${modulePath}` : modulePath),
 					exports,
+					false,
 				]);
 		}
 		while (pending.length > 0) {
-			const [file, exports] = /** @type {[string, string[] | null]} */ (pending.shift());
+			const [file, exports, values] = /** @type {[string, string[] | null, boolean]} */ (
+				pending.shift()
+			);
+			const keys = exports?.map((name) => (values ? `?${name}` : name));
 			const seen = checked.get(file);
-			if (seen === null || (exports !== null && exports.every((name) => seen?.has(name)))) continue;
-			checked.set(file, exports === null ? null : new Set([...(seen ?? []), ...exports]));
-			if (!is_octane_module_path(file))
-				fail(`its shell renders ${file}, which Octane cannot check.`);
-			const result = analyzeIslandsShell(fs.readFileSync(file, 'utf-8'), file, exports);
+			if (
+				seen === null ||
+				(keys !== undefined &&
+					keys.every((key) => seen?.has(key) || (key[0] === '?' && seen?.has(key.slice(1)))))
+			)
+				continue;
+			checked.set(file, keys === undefined ? null : new Set([...(seen ?? []), ...keys]));
+			if (!is_octane_module_path(file)) {
+				// A plain module has no JSX; a value it exports (a string, an asset
+				// URL) renders nothing interactive.
+				if (!values) fail(`its shell renders ${file}, which Octane cannot check.`);
+				continue;
+			}
+			const result = analyze(file, exports, values);
 			if (result.problems.length > 0) {
 				const [problem] = result.problems;
 				fail(
@@ -284,13 +319,64 @@ async function assertStaticIslandsShells(context, projectRoot, config) {
 				);
 			}
 			for (const component of result.components) {
-				const resolved = await context.resolve(component.source, file, { skipSelf: true });
-				if (!resolved || resolved.external)
-					fail(`its shell renders ${component.source}, which Octane cannot check.`);
-				else pending.push([resolved.id.split('?')[0], [component.exportName]]);
+				const resolved = await resolve(component.source, file);
+				if (!resolved || resolved.external) {
+					if (!component.value)
+						fail(`its shell renders ${component.source}, which Octane cannot check.`);
+				} else
+					pending.push([
+						resolved.id.split('?')[0],
+						[component.exportName],
+						component.value === true,
+					]);
 			}
 		}
 	}
+}
+
+/**
+ * Dev serves an islands-only route whatever its shell does, so an interactive
+ * shell would be silently inert there. Warn once per problem, from the same
+ * check the build enforces, re-analyzing a module only when it changes.
+ *
+ * @param {ViteDevServer} server
+ * @param {string} projectRoot
+ */
+function createIslandsShellWarnings(server, projectRoot) {
+	/** @type {Map<string, { mtimeMs: number, result: ReturnType<typeof analyzeIslandsShell> }>} */
+	const analyses = new Map();
+	/** @type {Set<string>} */
+	let warned = new Set();
+	/** @param {ResolvedOctaneConfig} config */
+	return async (config) => {
+		/** @type {Set<string>} */
+		const current = new Set();
+		await checkIslandsShells(
+			async (source, importer) =>
+				(await server.environments.ssr.pluginContainer.resolveId(source, importer)) ?? null,
+			projectRoot,
+			config,
+			(message) => current.add(message),
+			(file, exports, values) => {
+				const key = `${file}\0${exports?.join(',') ?? '*'}\0${values}`;
+				const mtimeMs = fs.statSync(file).mtimeMs;
+				const cached = analyses.get(key);
+				if (cached?.mtimeMs === mtimeMs) return cached.result;
+				const result = analyzeIslandsShell(fs.readFileSync(file, 'utf-8'), file, exports, {
+					values,
+				});
+				analyses.set(key, { mtimeMs, result });
+				return result;
+			},
+		);
+		for (const message of current)
+			if (!warned.has(message))
+				server.config.logger.warn(
+					`${message} A production build fails until the shell is static.`,
+					{ timestamp: true },
+				);
+		warned = current;
+	};
 }
 
 /**
@@ -343,7 +429,7 @@ function collect_hydrate_module_paths(config) {
  * it). An explicit `profile` (true or false) always takes precedence over
  * `devtools`.
  *
- * @param {{ hmr?: boolean, profile?: boolean, devtools?: boolean, strong?: boolean, textTypes?: import('octane/compiler/vite').OctaneVitePluginOptions['textTypes'], knownAttributeSpreads?: import('octane/compiler/vite').OctaneVitePluginOptions['knownAttributeSpreads'], domBindingFixedProps?: import('octane/compiler/vite').OctaneVitePluginOptions['domBindingFixedProps'], exclude?: string[], requireDirective?: boolean, renderers?: import('@octanejs/app-core').ExperimentalRendererConfigOptions, cssModuleConstants?: import('octane/compiler/vite').OctaneVitePluginOptions['cssModuleConstants'] }} [inlineOptions]
+ * @param {{ hmr?: boolean, output?: 'js' | 'ts', profile?: boolean, devtools?: boolean, strong?: boolean, textTypes?: import('octane/compiler/vite').OctaneVitePluginOptions['textTypes'], knownAttributeSpreads?: import('octane/compiler/vite').OctaneVitePluginOptions['knownAttributeSpreads'], domBindingFixedProps?: import('octane/compiler/vite').OctaneVitePluginOptions['domBindingFixedProps'], opaqueSignalHandles?: boolean, exclude?: string[], requireDirective?: boolean, renderers?: import('@octanejs/app-core').ExperimentalRendererConfigOptions, cssModuleConstants?: import('octane/compiler/vite').OctaneVitePluginOptions['cssModuleConstants'] }} [inlineOptions]
  * @returns {Plugin[]}
  */
 export function octane(inlineOptions = {}) {
@@ -519,8 +605,27 @@ export function octane(inlineOptions = {}) {
 								return { relative: true };
 							}
 						};
+						// Only the renderer consumes the signal Action frame. Islands-only
+						// documents load signals without it, so this condition moves the
+						// frame and its candidate producers from the signal modules into the
+						// renderer (octane's action-capability.ts). Either placement is
+						// complete; it chooses which pages pay, so mixed apps keep the default.
+						/** @type {UserConfig['resolve']} */
+						let resolve;
+						if (has_only_islands_routes(buildOctaneConfig)) {
+							const { defaultClientConditions } = await import('vite');
+							// Vite concatenates plugin conditions onto the user's own, and
+							// replaces its defaults only when none were configured.
+							resolve = {
+								conditions: [
+									...(userConfig.resolve?.conditions ? [] : defaultClientConditions),
+									'octane-islands',
+								],
+							};
+						}
 						return {
 							...base,
+							...(resolve ? { resolve } : null),
 							build: buildConfig,
 							experimental: {
 								...userConfig.experimental,
@@ -557,10 +662,11 @@ export function octane(inlineOptions = {}) {
 			});
 			islandsEntryFile = null;
 			if (has_islands_route(buildOctaneConfig)) {
-				await assertStaticIslandsShells(
-					this,
+				await checkIslandsShells(
+					(source, importer) => this.resolve(source, importer, { skipSelf: true }),
 					root,
 					/** @type {ResolvedOctaneConfig} */ (buildOctaneConfig),
+					(message) => this.error(message),
 				);
 				this.emitFile({
 					type: 'chunk',
@@ -569,6 +675,14 @@ export function octane(inlineOptions = {}) {
 					preserveSignature: 'strict',
 				});
 			}
+		},
+
+		renderChunk(code, _chunk, _options, meta) {
+			if (!code.includes(PENDING_CLIENT_BUILD_ID)) return null;
+			return {
+				code: code.replaceAll(PENDING_CLIENT_BUILD_ID, clientBuild.seal(meta.chunks)),
+				map: null,
+			};
 		},
 
 		writeBundle() {
@@ -795,6 +909,7 @@ export function octane(inlineOptions = {}) {
 			let initPromise = null;
 			/** @type {number} */
 			let lastConfigErrorMtimeMs = 0;
+			const warnIslandsShells = createIslandsShellWarnings(vite, root);
 
 			async function ensureConfigLoaded() {
 				if (octaneConfig && router) return;
@@ -859,7 +974,7 @@ export function octane(inlineOptions = {}) {
 						return;
 					}
 
-					const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+					const url = nodeRequestUrl(req);
 					const method = req.method || 'GET';
 
 					// RPC requests for `module server` declarations.
@@ -907,8 +1022,14 @@ export function octane(inlineOptions = {}) {
 							next();
 							return;
 						}
+						if (freshMatch.route.type === 'render' && freshMatch.route.hydrate === 'islands') {
+							// A shell module that fails to parse reports through its SSR load.
+							await warnIslandsShells(octaneConfig).catch(() => {});
+						}
 
-						const request = nodeRequestToWebRequest(req, res);
+						const request = nodeRequestToWebRequest(req, res, {
+							trustProxy: octaneConfig.server.trustProxy,
+						});
 						const context = createContext(request, freshMatch.params);
 						Object.defineProperty(context, 'clientBuild', { get: () => clientBuild.metadata() });
 						const globalMiddlewares = octaneConfig.middlewares;
@@ -1272,11 +1393,13 @@ export function octane(inlineOptions = {}) {
 	/**
 	 * @type {{
 	 *   hmr?: boolean,
+	 *   output?: 'js' | 'ts',
 	 *   profile?: boolean | 'auto',
 	 *   strong?: boolean,
 	 *   textTypes?: import('octane/compiler/vite').OctaneVitePluginOptions['textTypes'],
 	 *   knownAttributeSpreads?: import('octane/compiler/vite').OctaneVitePluginOptions['knownAttributeSpreads'],
 	 *   domBindingFixedProps?: import('octane/compiler/vite').OctaneVitePluginOptions['domBindingFixedProps'],
+	 *   opaqueSignalHandles?: boolean,
 	 *   exclude?: string[],
 	 *   requireDirective?: boolean,
 	 *   renderers?: import('@octanejs/app-core').ExperimentalRendererConfigOptions,
@@ -1290,6 +1413,7 @@ export function octane(inlineOptions = {}) {
 		__clientBuildId: () => clientBuild.buildId,
 	};
 	if (inlineOptions.hmr !== undefined) compilerOptions.hmr = inlineOptions.hmr;
+	if (inlineOptions.output !== undefined) compilerOptions.output = inlineOptions.output;
 	// Explicit `profile` wins; otherwise `devtools: true` opts into the
 	// command-aware `'auto'` signal the compiler resolves to DEV-only profiling.
 	if (inlineOptions.profile !== undefined) compilerOptions.profile = inlineOptions.profile;
@@ -1301,6 +1425,9 @@ export function octane(inlineOptions = {}) {
 	}
 	if (inlineOptions.domBindingFixedProps !== undefined) {
 		compilerOptions.domBindingFixedProps = inlineOptions.domBindingFixedProps;
+	}
+	if (inlineOptions.opaqueSignalHandles !== undefined) {
+		compilerOptions.opaqueSignalHandles = inlineOptions.opaqueSignalHandles;
 	}
 	if (inlineOptions.exclude !== undefined) compilerOptions.exclude = inlineOptions.exclude;
 	if (inlineOptions.requireDirective !== undefined) {
@@ -1373,7 +1500,7 @@ export function defineConfig(/** @type {OctaneConfigOptions} */ options) {
  */
 async function handleRpcRequest(req, res, vite, trustProxy, config) {
 	try {
-		const webRequest = nodeRequestToWebRequest(req, res);
+		const webRequest = nodeRequestToWebRequest(req, res, { trustProxy });
 		const asyncContext = getDevAsyncContext(config);
 		const signalOwners = await loadDevSignalRequestHooks(vite);
 

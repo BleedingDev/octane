@@ -11,8 +11,16 @@ title: Signals
 </div>
 
 Signals are a **stable Octane API**. Import the data engine from `octane/signals`
-or the component hook from `octane/signals/client`. The standard Octane compiler
-handles native reads automatically: **no extra compiler option is needed**.
+or the component hook from `octane/signals/client`.
+
+**Every module that consumes native signal reads needs its own runtime import**
+from `octane/signals`, `octane/signals/client`, or `octane/signals/server`. For
+example, a component that calls `count$.get()` during rendering needs this import
+even if it receives the handle through props or imports it from another file. The
+same rule applies when a component calls a helper that reads signals. If the
+module does not use a named signals API, add `import 'octane/signals';`. A
+type-only import or a `$` name alone does not enable native-read compilation. No
+extra compiler option is needed.
 
 <h2 id="declarations">Declare state and derived values</h2>
 
@@ -36,6 +44,37 @@ state on the server**. Roots in one document can share them; separate requests
 do not share mutable cells. Compiled browser modules can use them without a
 renderer root. Server reads and writes require a request owner.
 
+Declarations inside a component or custom hook belong to that component
+instance, and its `@try`, `@if` and `@for` blocks share them. A child that
+receives a handle as a prop reads its own cell. A function the component creates
+**keeps the component's cells** wherever it runs: an event handler a child
+calls, an effect, or code after `await`. Once the component unmounts, a call
+through such a function throws `ScopeDisposedError`.
+
+```tsrx
+import { query$ } from 'octane/signals';
+
+function RetryButton(props) @{
+	<button onClick={() => props.retry()}>Retry</button>
+}
+
+export function Profile(props) @{
+	const user$ = query$(() => props.id, props.loadUser);
+	@try {
+		<output>{user$.get() as string}</output>
+	} @pending {
+		<span>Loading</span>
+	} @catch (_error, reset) {
+		<RetryButton
+			retry={() => {
+				user$.reset();
+				reset();
+			}}
+		/>
+	}
+}
+```
+
 An optional trailing options object supplies an explicit key:
 `signal$('', { key: 'draft' })` or
 `derived$(() => quantity$.get() * 12, { key: 'total' })`. Uncompiled declarations
@@ -43,10 +82,15 @@ require a nonempty key. The first argument of `signal$('draft')` is the stored
 string, not a key. Function initial values are also data; to store a function
 through the updater-style setter, use `handler$.set(() => nextHandler)`.
 
-Each module that consumes native reads needs a **runtime import** from
-`octane/signals`, `octane/signals/client`, or `octane/signals/server`. A
-type-only import or a `$` name alone does not enable native-read compilation.
-Use `import 'octane/signals'` in a component that only receives handles as props.
+Direct DOM bindings are distinct from native signal reads. Rendering a handle
+directly, as in `{props.label as string}` or
+`title={props.label}`, binds it to the DOM when the rendering module has **any
+import** from `octane/signals`. A type-only
+`import type { SignalHandle } from 'octane/signals'` is enough and does not enable
+native reads. `$`-named expressions such as `{props.label$}` bind in every module.
+Elsewhere an ordinary hole renders a plain value, so apps that never pass handles
+do not ship the binding runtime. For untyped components that render handles from a
+lazily loaded signals engine, set the `opaqueSignalHandles` compiler option.
 
 <h2 id="local-state">Start with local state</h2>
 
@@ -271,6 +315,10 @@ Snapshots also expose `refreshing`, `connection`, `complete`, and an optional
 `requestKey`. A ready value can still be refreshing or streaming. `undefined`,
 `null`, `false`, and empty strings are valid values, not pending sentinels.
 
+A synchronous derived computation can also throw a thenable to wait on it. It
+stays pending until the thenable settles, then runs again. Throwing a thenable
+that has already settled waits for a signal it reads to change instead.
+
 Use a derived signal to retain one coherent result:
 
 ```ts
@@ -453,9 +501,7 @@ module server {
 
 	export async function* loadMessages() {
 		await new Promise((resolve) => setTimeout(resolve, 500));
-		yield [
-			{ id: 1, text: 'Hello!' },
-		];
+		yield [{ id: 1, text: 'Hello!' }];
 
 		await new Promise((resolve) => setTimeout(resolve, 500));
 		yield [
@@ -468,8 +514,15 @@ module server {
 import { loadTitle, loadMessages } from 'server';
 import { derived$, query$, signal$ } from 'octane/signals';
 
-const title$ = query$(() => 'team-chat', () => loadTitle());
-const messages$ = query$(() => 'team-chat', () => loadMessages(), { kind: 'stream' });
+const title$ = query$(
+	() => 'team-chat',
+	() => loadTitle(),
+);
+const messages$ = query$(
+	() => 'team-chat',
+	() => loadMessages(),
+	{ kind: 'stream' },
+);
 const draft$ = signal$('');
 const draftLength$ = derived$(() => draft$.get().length);
 

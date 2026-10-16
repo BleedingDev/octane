@@ -102,13 +102,13 @@ describe('slotHooks surgical pass', () => {
 		expect(code).toContain('[key: string]: number;');
 		expect(code).toContain('export type Pair<A, B> = { a: A; b: B };');
 		expect(code).toContain('export const widen = <T>(x: T): T => x;');
-		// Apart from inferred dependency arrays and the call boundary around the
-		// module's own nested custom-hook call, the transform remains surgical:
+		// Apart from inferred dependency arrays and any call boundary around the
+		// module's own nested custom-hook calls, the transform remains surgical:
 		// stripping slots restores every original byte. (Default = no HMR → one
 		// runtime-reserved Symbol range; Symbol.for is dev-serve only.)
 		const stripped = code
 			.replace(
-				/^import \{ hookSlots as _\$hookSlots, withSlot as _\$withSlot \} from 'octane';\n/gm,
+				/^import \{ hookSlots as _\$hookSlots(?:, withSlot as _\$withSlot)? \} from 'octane';\n/gm,
 				'',
 			)
 			.replace(/_\$withSlot\(_h\$\d+, (\w+), /g, '$1(')
@@ -218,7 +218,9 @@ describe('vite plugin gate routing', () => {
 		const websiteRoot = join(process.cwd(), 'website');
 		const discovered = discoverOctaneSourceDependencies(websiteRoot);
 		expect(discovered).toContain('octane');
-		expect(discovered).toContain('@octanejs/visx');
+		expect(discovered).not.toContain('@octanejs/visx');
+		expect(discovered).toContain('@octanejs/devtools');
+		expect(discovered).toContain('@octanejs/tanstack-devtools');
 		// The website consumes the repository-owned TanStack source packages, so
 		// Vite must transform and keep both packages inside its SSR graph.
 		expect(discovered).toContain('@octanejs/tanstack-router');
@@ -622,7 +624,6 @@ export function App() @{ <main><Canvas><Scene /></Canvas><p>after</p></main> }
 				entrySource,
 				entry,
 			);
-			expect(changedAfterOctane).toBeNull();
 
 			// Conversely, a virtual loader can replace a void-looking disk file with
 			// a value-returning component. That actual loaded module must stay on the
@@ -646,7 +647,15 @@ export function App() @{ <main><Canvas><Scene /></Canvas><p>after</p></main> }
 				entrySource,
 				entry,
 			);
-			expect(virtualEntry).toBeNull();
+			for (const genericEntry of [changedAfterOctane, virtualEntry]) {
+				expect(genericEntry?.code).toContain(
+					"import { __createRootDefaultOptions as _$createRootDefaultOptions } from 'octane/internal/client';",
+				);
+				expect(genericEntry?.code).toContain(
+					'_$createRootDefaultOptions(document.body).render(Main);',
+				);
+				expect(genericEntry?.code).not.toContain('__createVoidRoot');
+			}
 
 			const watchPlugin = octane({ hmr: false });
 			(watchPlugin.configResolved as any)({
@@ -667,7 +676,8 @@ export function App() @{ <main><Canvas><Scene /></Canvas><p>after</p></main> }
 				entrySource,
 				entry,
 			);
-			expect(watchedEntry).toBeNull();
+			expect(watchedEntry?.code).toContain('__createRootDefaultOptions as');
+			expect(watchedEntry?.code).not.toContain('__createVoidRoot');
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -720,7 +730,7 @@ describe('manifest-declared manual hook slots', () => {
 		// design and therefore carry no flag. Base UI is also auto-slotted after its
 		// authored source migration, and Puck's plain .ts hooks are auto-slotted
 		// through their @jsxImportSource pragma. Bindings whose hooks all live in
-		// .tsrx (tanstack-form, tanstack-hotkeys, tanstack-ai, tanstack-table) are
+		// .tsrx (tanstack-form, tanstack-ai) are
 		// fully compiled, so they hand-forward nothing and carry no flag either.
 		const packagesDir = join(process.cwd(), 'packages');
 		const declared = readdirSync(packagesDir)

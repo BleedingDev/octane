@@ -5,18 +5,21 @@
 // false | matched params. The component renders its children when matched — a
 // render-prop child ALWAYS renders, receiving the params (false when unmatched).
 import { useCallback, isChildrenBlock } from 'octane';
-import { useRouter } from './context.ts';
-import { useStore } from './useStore.ts';
+import { useRouter } from './context';
+import { useStore } from './useStore';
 
 export function useMatchRoute() {
 	const router = useRouter();
 	useStore(router.stores.location, (l: any) => l.href as string);
 	useStore(router.stores.resolvedLocation, (l: any) => l?.href as string | undefined);
 	useStore(router.stores.status, (s: any) => s as string);
-	return useCallback((opts: Record<string, any>) => {
-		const { pending, caseSensitive, fuzzy, includeSearch, ...rest } = opts;
-		return router.matchRoute(rest as any, { pending, caseSensitive, fuzzy, includeSearch });
-	}, [router]);
+	return useCallback(
+		(opts: Record<string, any>) => {
+			const { pending, caseSensitive, fuzzy, includeSearch, ...rest } = opts;
+			return router.matchRoute(rest as any, { pending, caseSensitive, fuzzy, includeSearch });
+		},
+		[router],
+	);
 }
 
 // Props are permissive (`Record<string, any>` + optional render-prop children) —
@@ -26,12 +29,10 @@ export function MatchRoute(props: Record<string, any>) @{
 	const matchRoute = useMatchRoute();
 	const params = matchRoute(props);
 	const out =
-		typeof props.children === 'function' && !isChildrenBlock(props.children)
-			? props.children(params)
+		typeof props['children'] === 'function' && !isChildrenBlock(props['children'])
+			? props['children'](params)
 			: params
-				? props.children
+				? props['children']
 				: null;
-	<>
-		{out}
-	</>
+	<>{out}</>
 }

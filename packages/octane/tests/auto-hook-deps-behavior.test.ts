@@ -1,7 +1,23 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
+import * as ServerRuntime from 'octane/server';
 import { act, flushEffects, mount } from './_helpers';
-import { flushSync } from '../src/index.js';
 import {
+	loadCompiledFixtureSource,
+	loadPlainHookFixtureSource,
+	loadServerFixture,
+} from './_server-fixture';
+import { flushSync } from '../src/index.js';
+import { ShadowedNestedRowEffect, ShadowedRowEffect } from './_fixtures/for-shadowed-effects.tsrx';
+import {
+	ShadowedNestedRowEffectStrong,
+	ShadowedRowEffectStrong,
+} from './_fixtures/for-shadowed-effects-strong.tsrx';
+import {
+	CallbackReadsItself,
+	CallbackReadsLaterConst,
+	CallbackReadsLaterVar,
+	CallbackReadsReassignedLet,
 	CaptureFreeEffect,
 	CaptureFreeMemo,
 	EffectFromDerivedValue,
@@ -13,11 +29,16 @@ import {
 	EffectFromProps,
 	EffectFromReferencedCallback,
 	EffectFromState,
+	EffectReadsLaterConst,
+	EffectReadsLaterVar,
+	EffectReadsLetAssignedBefore,
+	EffectReadsReassignedLet,
 	EffectWithStableHookResults,
 	EffectWithConvergingUpdate,
 	EffectWithFreshFunction,
 	EffectWithFreshObject,
 	ExternalHookDependencies,
+	ExternalHookLaterDeclaration,
 	MemoFromComputedPath,
 	MemoFromInstanceMethodCall,
 	MemoFromNestedScope,
@@ -27,6 +48,7 @@ import {
 	MemoFromPrototypeMethodCall,
 	MemoFromReferencedFactory,
 	MemoFromState,
+	MemoReadsLaterConst,
 	MemoWithManyDependencies,
 	ObjectIsDependencies,
 	StoreFieldEffect,
@@ -35,6 +57,28 @@ import {
 	StoreSetterEffect,
 	withShaderContext,
 } from './_fixtures/auto-hook-deps-behavior.tsrx';
+import {
+	EffectFromCallbackProp,
+	EffectFromOwnMethod,
+	GuardedEffectFromOwnMethod,
+	GuardedLayoutEffectFromOwnFunctionRead,
+	MemoFromOwnMethod,
+} from './_fixtures/inferred-method-receiver.tsrx';
+import {
+	EffectFromOwnMethodStrong,
+	MemoFromOwnMethodStrong,
+} from './_fixtures/inferred-method-receiver-strong.tsrx';
+
+// One stable arrow callback that forwards to `spy`. A component calling
+// `props.log(...)` passes the props container as `this`, so an inferred
+// dependency on that call tracks the container unless the callback is an arrow,
+// which cannot see a receiver. A `vi.fn()` spy is an ordinary function that
+// records `this`; wrap it where a test means an ordinary stable callback prop.
+function arrowCallback<Args extends unknown[], Result>(
+	spy: (...args: Args) => Result,
+): (...args: Args) => Result {
+	return (...args) => spy(...args);
+}
 
 function createStore(initial: string) {
 	let value = initial;
@@ -63,6 +107,66 @@ function createStore(initial: string) {
 }
 
 describe('inferred useEffect dependencies — behavior', () => {
+	it.each([
+		['compatibility', ShadowedNestedRowEffect],
+		['Strong', ShadowedNestedRowEffectStrong],
+	] as const)(
+		'tracks destructured bindings in nested keyed rows in %s mode',
+		(_label, Component) => {
+			const entries: string[] = [];
+			const log = (entry: string) => entries.push(entry);
+			const r = mount(Component, {
+				groups: [{ id: 'group', items: [{ id: 'row', value: 'a' }] }],
+				log,
+			});
+			flushEffects();
+			expect(entries).toEqual(['run:a']);
+			r.update(Component, { groups: [{ id: 'group', items: [{ id: 'row', value: 'b' }] }], log });
+			flushEffects();
+			expect(entries).toEqual(['run:a', 'cleanup:a', 'run:b']);
+			r.unmount();
+			flushEffects();
+			expect(entries).toEqual(['run:a', 'cleanup:a', 'run:b', 'cleanup:b']);
+		},
+	);
+
+	it.each([
+		['compatibility', ShadowedRowEffect],
+		['Strong', ShadowedRowEffectStrong],
+	] as const)(
+		'tracks a shadowing keyed row and the outer empty value in %s mode',
+		(_label, Component) => {
+			const entries: string[] = [];
+			const log = (entry: string) => entries.push(entry);
+			const first = { id: '1', value: 'first' };
+			const replacement = { id: '1', value: 'second' };
+			const r = mount(Component, { items: [], log, emptyValue: 'a', noise: 0 });
+			flushEffects();
+			expect(entries).toEqual(['empty:outer:a']);
+			r.update(Component, { items: [], log, emptyValue: 'a', noise: 1 });
+			flushEffects();
+			expect(entries).toEqual(['empty:outer:a']);
+			r.update(Component, { items: [], log, emptyValue: 'b', noise: 1 });
+			flushEffects();
+			expect(entries).toEqual(['empty:outer:a', 'empty-cleanup:outer:a', 'empty:outer:b']);
+			r.update(Component, { items: [first], log, emptyValue: 'b', noise: 1 });
+			flushEffects();
+			expect(entries.slice(-2)).toEqual(['empty-cleanup:outer:b', 'run:first']);
+			r.update(Component, { items: [replacement], log, emptyValue: 'b', noise: 1 });
+			flushEffects();
+			expect(entries.slice(-2)).toEqual(['cleanup:first', 'run:second']);
+			r.update(Component, { items: [replacement], log, emptyValue: 'b', noise: 2 });
+			flushEffects();
+			expect(entries.slice(-2)).toEqual(['cleanup:first', 'run:second']);
+			r.update(Component, { items: [], log, emptyValue: 'c', noise: 2 });
+			flushEffects();
+			expect(entries.slice(-2)).toEqual(['cleanup:second', 'empty:outer:c']);
+			r.unmount();
+			flushEffects();
+			expect(entries.at(-1)).toBe('empty-cleanup:outer:c');
+		},
+	);
+
 	it('ignores unrelated props and refreshes the captured value with ordered cleanup', () => {
 		const entries: string[] = [];
 		const log = (entry: string) => entries.push(entry);
@@ -114,16 +218,17 @@ describe('inferred useEffect dependencies — behavior', () => {
 		flushEffects();
 		expect(entries).toEqual(['run']);
 
-		const onPing = vi.fn();
+		const onPingSpy = vi.fn();
+		const onPing = arrowCallback(onPingSpy);
 		r.update(EffectFromOptionalMethodCall, { log, onPing, noise: 2 });
 		flushEffects();
 		expect(entries).toEqual(['run', 'run']);
-		expect(onPing).toHaveBeenCalledTimes(1);
+		expect(onPingSpy).toHaveBeenCalledTimes(1);
 
 		r.update(EffectFromOptionalMethodCall, { log, onPing, noise: 3 });
 		flushEffects();
 		expect(entries).toEqual(['run', 'run']);
-		expect(onPing).toHaveBeenCalledTimes(1);
+		expect(onPingSpy).toHaveBeenCalledTimes(1);
 		r.unmount();
 	});
 
@@ -146,7 +251,8 @@ describe('inferred useEffect dependencies — behavior', () => {
 	});
 
 	it('tracks values derived through computed access', () => {
-		const log = vi.fn();
+		const logSpy = vi.fn();
+		const log = arrowCallback(logSpy);
 		const items = [{ label: 'first' }, { label: 'second' }];
 		const r = mount(EffectFromDerivedValue, {
 			log,
@@ -156,7 +262,7 @@ describe('inferred useEffect dependencies — behavior', () => {
 			noise: 0,
 		});
 		flushEffects();
-		expect(log).toHaveBeenLastCalledWith('selected:first');
+		expect(logSpy).toHaveBeenLastCalledWith('selected:first');
 
 		r.update(EffectFromDerivedValue, {
 			log,
@@ -166,7 +272,7 @@ describe('inferred useEffect dependencies — behavior', () => {
 			noise: 1,
 		});
 		flushEffects();
-		expect(log).toHaveBeenCalledTimes(1);
+		expect(logSpy).toHaveBeenCalledTimes(1);
 
 		r.update(EffectFromDerivedValue, {
 			log,
@@ -176,8 +282,8 @@ describe('inferred useEffect dependencies — behavior', () => {
 			noise: 2,
 		});
 		flushEffects();
-		expect(log).toHaveBeenLastCalledWith('active:second');
-		expect(log).toHaveBeenCalledTimes(2);
+		expect(logSpy).toHaveBeenLastCalledWith('active:second');
+		expect(logSpy).toHaveBeenCalledTimes(2);
 
 		r.unmount();
 		flushEffects();
@@ -242,8 +348,10 @@ describe('inferred useEffect dependencies — behavior', () => {
 	});
 
 	it('tracks values captured only by the cleanup', () => {
-		const connect = vi.fn();
-		const disconnect = vi.fn();
+		const connectSpy = vi.fn();
+		const connect = arrowCallback(connectSpy);
+		const disconnectSpy = vi.fn();
+		const disconnect = arrowCallback(disconnectSpy);
 		const r = mount(EffectFromCleanupOnly, {
 			connect,
 			disconnect,
@@ -251,7 +359,7 @@ describe('inferred useEffect dependencies — behavior', () => {
 			noise: 0,
 		});
 		flushEffects();
-		expect(connect).toHaveBeenCalledTimes(1);
+		expect(connectSpy).toHaveBeenCalledTimes(1);
 
 		r.update(EffectFromCleanupOnly, {
 			connect,
@@ -260,8 +368,8 @@ describe('inferred useEffect dependencies — behavior', () => {
 			noise: 1,
 		});
 		flushEffects();
-		expect(connect).toHaveBeenCalledTimes(1);
-		expect(disconnect).not.toHaveBeenCalled();
+		expect(connectSpy).toHaveBeenCalledTimes(1);
+		expect(disconnectSpy).not.toHaveBeenCalled();
 
 		r.update(EffectFromCleanupOnly, {
 			connect,
@@ -270,12 +378,12 @@ describe('inferred useEffect dependencies — behavior', () => {
 			noise: 2,
 		});
 		flushEffects();
-		expect(disconnect).toHaveBeenLastCalledWith('a');
-		expect(connect).toHaveBeenCalledTimes(2);
+		expect(disconnectSpy).toHaveBeenLastCalledWith('a');
+		expect(connectSpy).toHaveBeenCalledTimes(2);
 
 		r.unmount();
 		flushEffects();
-		expect(disconnect).toHaveBeenLastCalledWith('b');
+		expect(disconnectSpy).toHaveBeenLastCalledWith('b');
 	});
 
 	it('tracks captures in deferred callbacks and cancels stale work through cleanup', async () => {
@@ -374,23 +482,24 @@ describe('inferred useEffect dependencies — behavior', () => {
 	});
 
 	it('reads module-scope helpers correctly without treating them as reactive', () => {
-		const log = vi.fn();
+		const logSpy = vi.fn();
+		const log = arrowCallback(logSpy);
 		const r = mount(EffectFromModuleScopeHelpers, { value: 1, noise: 0, log });
 		flushEffects();
 		// The omitted captures still resolve — dropping them from the array must
 		// not change what the callback computes.
-		expect(log).toHaveBeenLastCalledWith('cfg:fmt:10');
+		expect(logSpy).toHaveBeenLastCalledWith('cfg:fmt:10');
 
 		// An unrelated prop change must not rerun an effect whose only other
 		// captures are module-scope constants.
 		r.update(EffectFromModuleScopeHelpers, { value: 1, noise: 1, log });
 		flushEffects();
-		expect(log).toHaveBeenCalledTimes(1);
+		expect(logSpy).toHaveBeenCalledTimes(1);
 
 		r.update(EffectFromModuleScopeHelpers, { value: 2, noise: 1, log });
 		flushEffects();
-		expect(log).toHaveBeenLastCalledWith('cfg:fmt:20');
-		expect(log).toHaveBeenCalledTimes(2);
+		expect(logSpy).toHaveBeenLastCalledWith('cfg:fmt:20');
+		expect(logSpy).toHaveBeenCalledTimes(2);
 		r.unmount();
 		flushEffects();
 	});
@@ -430,18 +539,19 @@ describe('inferred useEffect dependencies — behavior', () => {
 
 describe('inferred useMemo dependencies — behavior', () => {
 	it('ignores unrelated props and recomputes from the latest captured values', () => {
-		const compute = vi.fn((value: string) => value.toUpperCase());
+		const computeSpy = vi.fn((value: string) => value.toUpperCase());
+		const compute = arrowCallback(computeSpy);
 		const r = mount(MemoFromProps, { compute, value: 'a', noise: 0 });
 		expect(r.find('.value').textContent).toBe('A');
-		expect(compute).toHaveBeenCalledTimes(1);
+		expect(computeSpy).toHaveBeenCalledTimes(1);
 
 		r.update(MemoFromProps, { compute, value: 'a', noise: 1 });
 		expect(r.find('.value').textContent).toBe('A');
-		expect(compute).toHaveBeenCalledTimes(1);
+		expect(computeSpy).toHaveBeenCalledTimes(1);
 
 		r.update(MemoFromProps, { compute, value: 'b', noise: 2 });
 		expect(r.find('.value').textContent).toBe('B');
-		expect(compute).toHaveBeenCalledTimes(2);
+		expect(computeSpy).toHaveBeenCalledTimes(2);
 		r.unmount();
 	});
 
@@ -504,35 +614,37 @@ describe('inferred useMemo dependencies — behavior', () => {
 	});
 
 	it('preserves inference beyond the four-dependency inline fast path', () => {
-		const compute = vi.fn((...values: number[]) => values.join(':'));
+		const computeSpy = vi.fn((...values: number[]) => values.join(':'));
+		const compute = arrowCallback(computeSpy);
 		const initial = { compute, a: 1, b: 2, c: 3, d: 4, e: 5, noise: 0 };
 		const r = mount(MemoWithManyDependencies, initial);
 		expect(r.find('.value').textContent).toBe('1:2:3:4:5');
 
 		r.update(MemoWithManyDependencies, { ...initial, noise: 1 });
-		expect(compute).toHaveBeenCalledTimes(1);
+		expect(computeSpy).toHaveBeenCalledTimes(1);
 
 		r.update(MemoWithManyDependencies, { ...initial, e: 6, noise: 2 });
 		expect(r.find('.value').textContent).toBe('1:2:3:4:6');
-		expect(compute).toHaveBeenCalledTimes(2);
+		expect(computeSpy).toHaveBeenCalledTimes(2);
 		r.unmount();
 	});
 
 	it('never reads context-bound getters captured by an opaque directive closure (issue #542)', () => {
 		// `resource.$` throws outside withShaderContext. The inferred array must
 		// track the root binding only, so plain renders perform no `.$` read.
-		const build = vi.fn((shader: () => number) => `p:${withShaderContext(shader)}`);
+		const buildSpy = vi.fn((shader: () => number) => `p:${withShaderContext(shader)}`);
+		const build = arrowCallback(buildSpy);
 		const r = mount(MemoFromOpaqueDirectiveClosure, { seed: 1, build, noise: 0 });
 		expect(r.find('.value').textContent).toBe('p:1');
-		expect(build).toHaveBeenCalledTimes(1);
+		expect(buildSpy).toHaveBeenCalledTimes(1);
 
 		r.update(MemoFromOpaqueDirectiveClosure, { seed: 1, build, noise: 1 });
 		expect(r.find('.value').textContent).toBe('p:1');
-		expect(build).toHaveBeenCalledTimes(1);
+		expect(buildSpy).toHaveBeenCalledTimes(1);
 
 		r.update(MemoFromOpaqueDirectiveClosure, { seed: 2, build, noise: 2 });
 		expect(r.find('.value').textContent).toBe('p:2');
-		expect(build).toHaveBeenCalledTimes(2);
+		expect(buildSpy).toHaveBeenCalledTimes(2);
 		r.unmount();
 	});
 
@@ -600,31 +712,33 @@ describe('inferred useMemo dependencies — behavior', () => {
 	});
 
 	it('uses Object.is equality for inferred effect and memo dependencies', () => {
-		const effect = vi.fn();
-		const compute = vi.fn((value: number) =>
+		const effectSpy = vi.fn();
+		const effect = arrowCallback(effectSpy);
+		const computeSpy = vi.fn((value: number) =>
 			Object.is(value, -0) ? 'negative zero' : String(value),
 		);
+		const compute = arrowCallback(computeSpy);
 		const r = mount(ObjectIsDependencies, { effect, compute, value: NaN, noise: 0 });
 		flushEffects();
 		expect(r.find('.value').textContent).toBe('NaN');
-		expect(effect).toHaveBeenCalledTimes(1);
-		expect(compute).toHaveBeenCalledTimes(1);
+		expect(effectSpy).toHaveBeenCalledTimes(1);
+		expect(computeSpy).toHaveBeenCalledTimes(1);
 
 		r.update(ObjectIsDependencies, { effect, compute, value: NaN, noise: 1 });
 		flushEffects();
-		expect(effect).toHaveBeenCalledTimes(1);
-		expect(compute).toHaveBeenCalledTimes(1);
+		expect(effectSpy).toHaveBeenCalledTimes(1);
+		expect(computeSpy).toHaveBeenCalledTimes(1);
 
 		r.update(ObjectIsDependencies, { effect, compute, value: 0, noise: 2 });
 		flushEffects();
-		expect(effect).toHaveBeenCalledTimes(2);
-		expect(compute).toHaveBeenCalledTimes(2);
+		expect(effectSpy).toHaveBeenCalledTimes(2);
+		expect(computeSpy).toHaveBeenCalledTimes(2);
 
 		r.update(ObjectIsDependencies, { effect, compute, value: -0, noise: 3 });
 		flushEffects();
 		expect(r.find('.value').textContent).toBe('negative zero');
-		expect(effect).toHaveBeenCalledTimes(3);
-		expect(compute).toHaveBeenCalledTimes(3);
+		expect(effectSpy).toHaveBeenCalledTimes(3);
+		expect(computeSpy).toHaveBeenCalledTimes(3);
 		r.unmount();
 		flushEffects();
 	});
@@ -751,4 +865,424 @@ describe('inferred dependencies with subscribed stores', () => {
 		r.unmount();
 		flushEffects();
 	});
+});
+
+// Reading a later `let`, `const` or `class` where the hook is called throws, and
+// a later `var` is still undefined there, so a list holding it never changes.
+// A variable assigned after the call holds its earlier value there. The compiler
+// infers `null` instead, and the hook runs on every render.
+describe('inferred dependencies that read a later declaration', () => {
+	it('runs a useEffect that reads a later const on every render', () => {
+		const entries: string[] = [];
+		const log = (entry: string) => entries.push(entry);
+		const r = mount(EffectReadsLaterConst, { log, prefix: 'a', noise: 0 });
+		flushEffects();
+		expect(entries).toEqual(['run:a']);
+
+		r.update(EffectReadsLaterConst, { log, prefix: 'a', noise: 1 });
+		flushEffects();
+		expect(entries).toEqual(['run:a', 'cleanup:a', 'run:a']);
+
+		r.update(EffectReadsLaterConst, { log, prefix: 'b', noise: 2 });
+		flushEffects();
+		expect(entries).toEqual(['run:a', 'cleanup:a', 'run:a', 'cleanup:a', 'run:b']);
+
+		r.unmount();
+		flushEffects();
+		expect(entries.at(-1)).toBe('cleanup:b');
+	});
+
+	it.each([
+		['a useCallback that reads a later const', CallbackReadsLaterConst],
+		['a useMemo whose result reads a later const', MemoReadsLaterConst],
+		['a useCallback that calls itself', CallbackReadsItself],
+	] as const)('refreshes %s', (_label, Component) => {
+		const r = mount(Component, { prefix: 'a' });
+		expect(r.find('.value').textContent).toBe('a');
+
+		r.update(Component, { prefix: 'b' });
+		expect(r.find('.value').textContent).toBe('b');
+		r.unmount();
+	});
+
+	it('reruns a useEffect that reads a later var when it changes', () => {
+		const log = vi.fn();
+		const r = mount(EffectReadsLaterVar, { log, prefix: 'a', noise: 0 });
+		flushEffects();
+		expect(log).toHaveBeenLastCalledWith('run:a');
+
+		r.update(EffectReadsLaterVar, { log, prefix: 'b', noise: 1 });
+		flushEffects();
+		expect(log).toHaveBeenLastCalledWith('run:b');
+		r.unmount();
+		flushEffects();
+	});
+
+	it('refreshes a useCallback that reads a later var', () => {
+		const r = mount(CallbackReadsLaterVar, { prefix: 'a' });
+		expect(r.find('.value').textContent).toBe('a');
+
+		r.update(CallbackReadsLaterVar, { prefix: 'b' });
+		expect(r.find('.value').textContent).toBe('b');
+		r.unmount();
+	});
+
+	it('reruns a useEffect whose captured let is assigned after the call', () => {
+		const log = vi.fn();
+		const r = mount(EffectReadsReassignedLet, { log, a: 'a', b: '', noise: 0 });
+		flushEffects();
+		expect(log).toHaveBeenLastCalledWith('run:a');
+
+		r.update(EffectReadsReassignedLet, { log, a: 'a', b: 'b', noise: 1 });
+		flushEffects();
+		expect(log).toHaveBeenLastCalledWith('run:b');
+		r.unmount();
+		flushEffects();
+	});
+
+	it('refreshes a useCallback whose captured let is assigned after the call', () => {
+		const r = mount(CallbackReadsReassignedLet, { a: 'a', b: '' });
+		expect(r.find('.value').textContent).toBe('a');
+
+		r.update(CallbackReadsReassignedLet, { a: 'a', b: 'b' });
+		expect(r.find('.value').textContent).toBe('b');
+		r.unmount();
+	});
+
+	it('keeps tracking a let assigned before the call', () => {
+		const logSpy = vi.fn();
+		const log = arrowCallback(logSpy);
+		const r = mount(EffectReadsLetAssignedBefore, { log, a: 'a', b: 'b', noise: 0 });
+		flushEffects();
+		expect(logSpy.mock.calls).toEqual([['run:b']]);
+
+		r.update(EffectReadsLetAssignedBefore, { log, a: 'a', b: 'b', noise: 1 });
+		flushEffects();
+		expect(logSpy.mock.calls).toEqual([['run:b']]);
+
+		r.update(EffectReadsLetAssignedBefore, { log, a: 'a', b: 'c', noise: 2 });
+		flushEffects();
+		expect(logSpy.mock.calls).toEqual([['run:b'], ['run:c']]);
+		r.unmount();
+		flushEffects();
+	});
+
+	it('refreshes hooks that read a later const in a plain TypeScript custom hook', () => {
+		const log = vi.fn();
+		const r = mount(ExternalHookLaterDeclaration, { log, prefix: 'a', noise: 0 });
+		flushEffects();
+		expect(r.find('.value').textContent).toBe('A/A');
+		expect(log).toHaveBeenLastCalledWith('run:A');
+
+		r.update(ExternalHookLaterDeclaration, { log, prefix: 'b', noise: 1 });
+		flushEffects();
+		expect(r.find('.value').textContent).toBe('B/B');
+		expect(log).toHaveBeenLastCalledWith('run:B');
+		r.unmount();
+		flushEffects();
+	});
+
+	it.each([false, true])('server-renders hooks that read a later binding (dev: %s)', (dev) => {
+		const fixtures = 'packages/octane/tests/_fixtures';
+		const external = loadPlainHookFixtureSource(
+			readFileSync(`${fixtures}/auto-hook-deps-external.ts`, 'utf8'),
+			{ id: `/${fixtures}/auto-hook-deps-external.ts`, mode: 'server', inlineHookMemo: !dev },
+		);
+		const server = loadServerFixture(`${fixtures}/auto-hook-deps-behavior.tsrx`, {
+			compileOptions: { dev, hmr: false },
+			runtimeModules: { './auto-hook-deps-external.ts': external },
+		});
+		const render = (name: string, props: Record<string, unknown>) => {
+			const container = document.createElement('div');
+			container.innerHTML = ServerRuntime.renderToString(server[name], props).html;
+			return container.querySelector('.value')?.textContent;
+		};
+		for (const name of [
+			'CallbackReadsLaterConst',
+			'MemoReadsLaterConst',
+			'CallbackReadsItself',
+			'CallbackReadsLaterVar',
+		])
+			expect(render(name, { prefix: 'a' })).toBe('a');
+		expect(render('ExternalHookLaterDeclaration', { prefix: 'a', log() {}, noise: 0 })).toBe('A/A');
+	});
+});
+
+type Labelled = { label: string };
+
+// Two receivers that share each method as one own function. A `function`
+// expression and a spread-copied method shorthand both read `this`.
+function sharedMethodSources(shape: 'function' | 'shorthand') {
+	const entries: string[] = [];
+	const methods =
+		shape === 'function'
+			? {
+					subscribe: function (this: Labelled) {
+						const label = this.label;
+						entries.push(`subscribe:${label}`);
+						return () => void entries.push(`cleanup:${label}`);
+					},
+					read: function (this: Labelled) {
+						return this.label;
+					},
+				}
+			: {
+					subscribe(this: Labelled) {
+						const label = this.label;
+						entries.push(`subscribe:${label}`);
+						return () => void entries.push(`cleanup:${label}`);
+					},
+					read(this: Labelled) {
+						return this.label;
+					},
+				};
+	return {
+		entries,
+		first: { ...methods, label: 'first' },
+		second: { ...methods, label: 'second' },
+	};
+}
+
+// A plain JavaScript hook module exporting `useHook(props)`, compiled with or
+// without inline memo lowering, rendered by a `.tsrx` component.
+function plainHookApp(hook: string, inlineHookMemo: boolean) {
+	const module = loadPlainHookFixtureSource(hook, { id: '/src/useHook.ts', inlineHookMemo });
+	return loadCompiledFixtureSource<any>(
+		`import { useHook } from './hook';
+export function App(props) @{ const value = useHook(props); <p>{String(value ?? '')}</p> }`,
+		{
+			id: '/src/PlainHookApp.tsrx',
+			mode: 'client',
+			compileOptions: { hmr: false, dev: false },
+			runtimeModules: { './hook': module },
+		},
+	).App;
+}
+
+// A memo, so inline lowering covers it as well as the slot-hook pass.
+const guardedFunctionReadHook = `import { useMemo } from 'octane';
+export function useHook(props) {
+  return useMemo(() => (props.enabled ? props.log(props.handler) : undefined));
+}`;
+
+// The test transform re-prints arrow parameters with parentheses, so arrows
+// whose source text is the subject come from the Function constructor.
+function arrowFromSource(source: string): (...args: unknown[]) => unknown {
+	return new Function(`return ${source}`)();
+}
+
+describe('inferred dependencies of an own method call', () => {
+	it.each([
+		['effect', EffectFromOwnMethod],
+		['guarded effect', GuardedEffectFromOwnMethod],
+		['Strong effect', EffectFromOwnMethodStrong],
+	] as const)(
+		'moves the %s to a receiver that shares the subscribed method',
+		(_label, Component) => {
+			for (const shape of ['function', 'shorthand'] as const) {
+				const { entries, first, second } = sharedMethodSources(shape);
+				const r = mount(Component, { source: first, enabled: true, noise: 0 });
+				try {
+					flushEffects();
+					expect(entries).toEqual(['subscribe:first']);
+
+					r.update(Component, { source: first, enabled: true, noise: 1 });
+					flushEffects();
+					expect(entries).toEqual(['subscribe:first']);
+
+					r.update(Component, { source: second, enabled: true, noise: 1 });
+					flushEffects();
+					expect(entries).toEqual(['subscribe:first', 'cleanup:first', 'subscribe:second']);
+				} finally {
+					r.unmount();
+					flushEffects();
+				}
+				expect(entries.at(-1)).toBe('cleanup:second');
+			}
+		},
+	);
+
+	it.each([
+		['memo', MemoFromOwnMethod],
+		['Strong memo', MemoFromOwnMethodStrong],
+	] as const)(
+		'recomputes the %s for a receiver that shares the read method',
+		(_label, Component) => {
+			for (const shape of ['function', 'shorthand'] as const) {
+				const { first, second } = sharedMethodSources(shape);
+				const r = mount(Component, { source: first });
+				try {
+					expect(r.container.textContent).toBe('first');
+					r.update(Component, { source: second });
+					expect(r.container.textContent).toBe('second');
+				} finally {
+					r.unmount();
+				}
+			}
+		},
+	);
+
+	it.each([false, true])(
+		'moves a plain hook to a receiver that shares the subscribed method (inline memo: %s)',
+		(inlineHookMemo) => {
+			const App = plainHookApp(
+				`import { useEffect, useMemo } from 'octane';
+export function useHook(props) {
+  const source = props.source;
+  useEffect(() => source.subscribe());
+  return useMemo(() => source.read());
+}`,
+				inlineHookMemo,
+			);
+			const { entries, first, second } = sharedMethodSources('shorthand');
+			const r = mount(App, { source: first });
+			try {
+				flushEffects();
+				expect(r.container.textContent).toBe('first');
+				r.update(App, { source: second });
+				flushEffects();
+				expect(r.container.textContent).toBe('second');
+				expect(entries).toEqual(['subscribe:first', 'cleanup:first', 'subscribe:second']);
+			} finally {
+				r.unmount();
+				flushEffects();
+			}
+		},
+	);
+
+	it.each([
+		['arrow', () => () => {}],
+		['async arrow', () => async () => {}],
+		['arrow named async', () => ({ async: () => {} }).async],
+		['bare-parameter arrow', () => arrowFromSource('value => value')],
+		['minified arrow', () => arrowFromSource('v=>v')],
+		['async bare-parameter arrow', () => arrowFromSource('async value => value')],
+	] as const)(
+		'keeps an own %s callback inert while only the props container changes',
+		(_label, create) => {
+			const runs: string[] = [];
+			const log = (entry: string) => void runs.push(entry);
+			const onPing = create();
+			const r = mount(EffectFromCallbackProp, { log, onPing, noise: 0 });
+			try {
+				flushEffects();
+				r.update(EffectFromCallbackProp, { log, onPing, noise: 1 });
+				flushEffects();
+				expect(runs).toEqual(['run']);
+
+				r.update(EffectFromCallbackProp, { log, onPing: create(), noise: 1 });
+				flushEffects();
+				expect(runs).toEqual(['run', 'run']);
+			} finally {
+				r.unmount();
+			}
+		},
+	);
+
+	it.each([
+		[
+			'function',
+			(seen: unknown[]) =>
+				function (this: unknown) {
+					seen.push(this);
+				},
+		],
+		[
+			'async function',
+			(seen: unknown[]) =>
+				async function (this: unknown) {
+					seen.push(this);
+				},
+		],
+		[
+			'method shorthand',
+			(seen: unknown[]) =>
+				({
+					ping(this: unknown) {
+						seen.push(this);
+					},
+				}).ping,
+		],
+		[
+			'async method',
+			(seen: unknown[]) =>
+				({
+					async ping(this: unknown) {
+						seen.push(this);
+					},
+				}).ping,
+		],
+		[
+			'method named async',
+			(seen: unknown[]) =>
+				({
+					async(this: unknown) {
+						seen.push(this);
+					},
+				}).async,
+		],
+	] as const)(
+		'calls a shared own %s callback again with the new props container as `this`',
+		(_label, create) => {
+			const receivers: unknown[] = [];
+			const log = () => {};
+			const onPing = create(receivers);
+			const r = mount(EffectFromCallbackProp, { log, onPing, noise: 0 });
+			try {
+				flushEffects();
+				r.update(EffectFromCallbackProp, { log, onPing, noise: 1 });
+				flushEffects();
+				expect(receivers.map((receiver) => (receiver as { noise: number }).noise)).toEqual([0, 1]);
+			} finally {
+				r.unmount();
+			}
+		},
+	);
+
+	it('tracks the receiver when probing an own callback throws', () => {
+		const runs: string[] = [];
+		const log = (entry: string) => void runs.push(entry);
+		// A bare-parameter arrow reaches the `name` check, whose getter throws.
+		const onPing = Object.defineProperty(arrowFromSource('value => value'), 'name', {
+			get() {
+				throw new Error('name probe');
+			},
+		});
+		const r = mount(EffectFromCallbackProp, { log, onPing, noise: 0 });
+		try {
+			flushEffects();
+			r.update(EffectFromCallbackProp, { log, onPing, noise: 1 });
+			flushEffects();
+			expect(runs).toEqual(['run', 'run']);
+		} finally {
+			r.unmount();
+		}
+	});
+
+	it.each([
+		['component', () => GuardedLayoutEffectFromOwnFunctionRead],
+		['plain hook', () => plainHookApp(guardedFunctionReadHook, false)],
+		['inline plain hook', () => plainHookApp(guardedFunctionReadHook, true)],
+	] as const)(
+		'keeps a guarded read of a stable own function inert across fresh props (%s)',
+		(_label, load) => {
+			const Component = load();
+			const seen: unknown[] = [];
+			const log = (value: unknown) => void seen.push(value);
+			function handler() {}
+			function replacement() {}
+			const r = mount(Component, { enabled: true, handler, log, noise: 0 });
+			try {
+				expect(seen).toEqual([handler]);
+
+				r.update(Component, { enabled: true, handler, log, noise: 1 });
+				expect(seen).toEqual([handler]);
+
+				r.update(Component, { enabled: true, handler: replacement, log, noise: 1 });
+				expect(seen).toEqual([handler, replacement]);
+			} finally {
+				r.unmount();
+			}
+		},
+	);
 });

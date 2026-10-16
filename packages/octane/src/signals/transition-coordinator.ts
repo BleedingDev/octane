@@ -36,10 +36,18 @@ interface SignalTransitionSuspense<T extends SignalTransitionTypes> {
 interface SignalTransitionBlock<T extends SignalTransitionTypes> {
 	disposed: boolean;
 	parentBlock: T['Block'] | null;
-	idState: { renderOwner?: T['Owner'] };
+	/** The renderer's feature-only record; a Suspense boundary registers its handler there. */
+	rare: { suspenseHandler?: SignalTransitionSuspenseHandler<T> | null | undefined } | null;
+	idState: { renderOwner?: T['Owner'] | undefined };
 	pendingMode: 'urgent' | 'transition' | null;
 	inactive: boolean;
 }
+
+// Method syntax keeps the parameters bivariant: the renderer's handler takes its
+// own thenable and Block types, which this model only sees structurally.
+type SignalTransitionSuspenseHandler<T extends SignalTransitionTypes> = {
+	handle(thenable: T['Thenable'], sourceBlock: T['Block']): void;
+}['handle'];
 
 interface SignalTransitionOwner<T extends SignalTransitionTypes> {
 	disposed: boolean;
@@ -59,11 +67,11 @@ interface SignalTransitionUpdate<T extends SignalTransitionTypes> {
 	block: T['Block'];
 	slot: {
 		value: T['Value'];
-		pendingActionBatch?: T['Batch'];
+		pendingActionBatch?: T['Batch'] | undefined;
 		pendingActionValue?: T['Value'];
 	};
-	state?: { renderTransition?: T['Update']; updates?: unknown };
-	reducer?: { renderTransition?: T['Update']; renderPhaseActions?: unknown };
+	state?: { renderTransition?: T['Update'] | undefined; updates?: unknown };
+	reducer?: { renderTransition?: T['Update'] | undefined; renderPhaseActions?: unknown };
 }
 
 interface SignalTransitionBatch<T extends SignalTransitionTypes> {
@@ -72,16 +80,16 @@ interface SignalTransitionBatch<T extends SignalTransitionTypes> {
 	hook: T['Hook'] | null;
 	hooks: T['Hook'][] | null;
 	hooksPending: boolean;
-	native?: SignalActionFrame;
-	nativeWake?: () => void;
-	nativeBlocks?: Set<T['Block']>;
-	nativeBoundaries?: Map<T['Boundary'], T['Thenable']>;
+	native?: SignalActionFrame | undefined;
+	nativeWake?: (() => void) | undefined;
+	nativeBlocks?: Set<T['Block']> | undefined;
+	nativeBoundaries?: Map<T['Boundary'], T['Thenable']> | undefined;
 }
 
 interface SignalTransitionBoundary<T extends SignalTransitionTypes> {
 	tryBlock: T['Block'] | null;
 	parentBlock: T['Block'];
-	nativeTransition?: T['Batch'];
+	nativeTransition?: T['Batch'] | undefined;
 	transitionTimeoutId: ReturnType<typeof setTimeout> | null;
 	hasResolved: boolean;
 	branch: -1 | 0 | 1 | 2;
@@ -189,7 +197,7 @@ export function createSignalTransitionCoordinator<T extends SignalTransitionType
 				// Independent consumers enter below their boundary's render catch.
 				// Route only to the real boundary to retain its configured timeout.
 				for (let owner: Block | null = block; owner !== null; owner = owner.parentBlock) {
-					const handler = (owner as any).__suspenseHandler;
+					const handler = owner.rare?.suspenseHandler;
 					if (handler) {
 						try {
 							handler(error.thenable, block);

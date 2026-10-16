@@ -1,0 +1,35 @@
+name: UltraModern native source release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful main push CI run containing accepted compiler archives
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: ultramodern-native-source-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'BleedingDev/octane' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - name: Publish exact archives accepted by merged-main CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: node scripts/ultramodern-native-release.mjs "$CI_RUN_ID"

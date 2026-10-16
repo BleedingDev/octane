@@ -82,6 +82,18 @@ export function TransitiveTrio(props: { bBig?: boolean }) @{
 	</section>
 }
 
+/**
+ * Two transitive panels: the first can empty out after mounting with content
+ * while the second swaps arms in the same render.
+ */
+export function TransitiveTwin(props: { aBig?: boolean; bOff?: boolean }) @{
+	<section class="host">
+		<PanelViaChain big={props.aBig} label="A" />
+		<PanelViaChain off={props.bOff} label="B" />
+		<Leaf label="C" />
+	</section>
+}
+
 /** A root-first multi-hop chain whose leaf can mount empty. */
 export function MultiHopTransitiveTrio(props: { bBig?: boolean }) @{
 	<section class="host">
@@ -112,6 +124,23 @@ function MultiHopEmptyLeaf(props: { big?: boolean; label: string }) @{
 	}
 }
 
+/** A chain child leading a fragment body, ahead of a toggled sibling root. */
+function ChainThenToggle(props: { big?: boolean; on?: boolean }) @{
+	<>
+		<PanelViaChain big={props.big} label="B" />
+		@if (props.on) {
+			<em class="on">on</em>
+		}
+	</>
+}
+
+export function FragmentChainTrio(props: { big?: boolean; on?: boolean }) @{
+	<section class="host">
+		<ChainThenToggle big={props.big} on={props.on} />
+		<Leaf label="C" />
+	</section>
+}
+
 // ---- Single-root proven children (anchorless componentSlot regime) ----
 
 // Local state inside the flipping component: the @if flip replaces only the
@@ -119,7 +148,9 @@ function MultiHopEmptyLeaf(props: { big?: boolean; label: string }) @{
 function Panel(props: { big?: boolean; label: string }) @{
 	const [n, setN] = useState(0);
 	@if (props.big) {
-		<div class="big" onClick={() => setN(n + 1)}>{props.label + ':' + n as string}</div>
+		<div class="big" onClick={() => setN(n + 1)}>
+			{(props.label + ':' + n) as string}
+		</div>
 	} @else {
 		<Leaf label={props.label} />
 	}
@@ -147,7 +178,9 @@ export function Tree(props: { depth: number; path: string }) @{
 
 function Counter(props: { label: string }) @{
 	const [n, setN] = useState(0);
-	<button class="c" onClick={() => setN(n + 1)}>{props.label + ':' + n as string}</button>
+	<button class="c" onClick={() => setN(n + 1)}>
+		{(props.label + ':' + n) as string}
+	</button>
 }
 
 // Neighbouring contract: a keyed sibling must still remount (state reset) on a
@@ -163,7 +196,9 @@ export function KeyedPair(props: { k: number }) @{
 export function TransitionPair() @{
 	const [aBig, setABig] = useState(true);
 	<div>
-		<button class="flip" onClick={() => startTransition(() => setABig(!aBig))}>flip</button>
+		<button class="flip" onClick={() => startTransition(() => setABig(!aBig))}>
+			flip
+		</button>
 		<section class="host">
 			<Panel big={aBig} label="A" />
 			<Panel big={true} label="B" />

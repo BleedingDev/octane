@@ -52,6 +52,58 @@ function writeOctaneJsxRuntimeStub(root: string, intrinsics: string): void {
  * the contract.
  */
 describe('compileToVolarMappings', () => {
+	it('type-checks internal script metadata without widening public or component props', () => {
+		const root = mkdtempSync(join(tmpdir(), 'octane-volar-script-'));
+		try {
+			mkdirSync(join(root, 'node_modules'));
+			symlinkSync(
+				fileURLToPath(new URL('../..', import.meta.url)),
+				join(root, 'node_modules/octane'),
+				'dir',
+			);
+			const sources = {
+				Native:
+					'export function Native() @{ <script __executeOnMount src="/entry.js" nonce="test" /> }',
+				Component:
+					'declare function Child(props: { __executeOnMount: string }): any; export function Component() @{ <Child __executeOnMount={42} /> }',
+				Public: 'export function Public() @{ <script executeOnMount /> }',
+				InvalidNative: 'export function InvalidNative() @{ <script __executeOnMount src={42} /> }',
+			};
+			const files = Object.entries(sources).map(([name, source]) => {
+				const file = join(root, name + '.tsx');
+				writeFileSync(file, compileToVolarMappings(source, name + '.tsrx').code);
+				return file;
+			});
+			const inspection = join(root, 'Inspection.tsx');
+			writeFileSync(inspection, compileTypesInspection(sources.Native, 'Inspection.tsrx').code);
+			files.push(inspection);
+			const program = ts.createProgram(files, {
+				jsx: ts.JsxEmit.Preserve,
+				module: ts.ModuleKind.ESNext,
+				moduleResolution: ts.ModuleResolutionKind.Bundler,
+				noEmit: true,
+				strict: true,
+				skipLibCheck: true,
+				target: ts.ScriptTarget.ESNext,
+				types: [],
+			});
+			const errors = files.map((file) =>
+				program
+					.getSemanticDiagnostics(program.getSourceFile(file)!)
+					.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')),
+			);
+			expect(errors[0]).toEqual([]);
+			expect(errors[1]).toEqual([
+				expect.stringContaining("Type 'number' is not assignable to type 'string'"),
+			]);
+			expect(errors[2]).toEqual([expect.stringContaining('executeOnMount')]);
+			expect(errors[3]).toEqual([expect.stringContaining("Type 'number' is not assignable")]);
+			expect(errors[4]).toEqual([]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it('retains computed method keys when generated brackets have no source mapping', () => {
 		const source = `const key = Symbol.iterator;
 		export const iterable = { [key]() { return [1, 2][Symbol.iterator](); } };`;
@@ -608,6 +660,345 @@ declare module '@fixture/object-intrinsics/jsx-runtime' {
 		}
 	});
 
+	it('checks a portable JSX surface independently of the runtime renderer and authored pragma', () => {
+		const root = mkdtempSync(join(tmpdir(), 'octane-volar-portable-intrinsics-'));
+		try {
+			mkdirSync(join(root, 'node_modules/@fixture'), { recursive: true });
+			symlinkSync(
+				fileURLToPath(new URL('../..', import.meta.url)),
+				join(root, 'node_modules/octane'),
+				'dir',
+			);
+			const intrinsics = '@fixture/portable-intrinsics';
+			const moduleRoot = join(root, 'node_modules', intrinsics);
+			mkdirSync(moduleRoot);
+			writeFileSync(
+				join(moduleRoot, 'package.json'),
+				JSON.stringify({
+					name: intrinsics,
+					exports: { './jsx-runtime': './jsx-runtime.d.ts' },
+				}),
+			);
+			writeFileSync(
+				join(moduleRoot, 'jsx-runtime.d.ts'),
+				`import type { UniversalRenderable } from 'octane/universal';
+export namespace JSX {
+	type Element = UniversalRenderable;
+	interface ElementChildrenAttribute { children: {}; }
+	interface IntrinsicElements {
+		div: { columns?: number; children?: UniversalRenderable };
+	}
+}
+`,
+			);
+
+			const portable = 'export function Scene() @{ <div columns={3}>ready</div> }\n';
+			const cases = [
+				['NoPragma', portable, { intrinsics }],
+				[
+					'ConfiguredRenderer',
+					portable,
+					{ intrinsics, renderers: { ...OBJECT_RENDERERS, default: 'object' } },
+				],
+				['BlockPragma', '/** @jsxImportSource octane */\n' + portable, { intrinsics }],
+				['LinePragma', '// @jsxImportSource octane\n' + portable, { intrinsics }],
+				['Strong', '"use strong";\n' + portable, { intrinsics }],
+				[
+					'StrongPragma',
+					'/** @jsxImportSource octane */\n"use strong";\n' + portable,
+					{ intrinsics },
+				],
+				['OrdinaryDom', 'export function Dom() @{ <div id="ordinary">ready</div> }', {}],
+				[
+					'InvalidPortable',
+					'export function Invalid() @{ <div columns="three">ready</div> }',
+					{ intrinsics },
+				],
+				[
+					'InvalidBlockPragma',
+					'/** @jsxImportSource octane */\nexport function Invalid() @{ <div columns="three">ready</div> }',
+					{ intrinsics },
+				],
+				[
+					'InvalidLinePragma',
+					'// @jsxImportSource octane\nexport function Invalid() @{ <div columns="three">ready</div> }',
+					{ intrinsics },
+				],
+			] as const;
+			const compilations: ReturnType<typeof compileToVolarMappings>[] = [];
+			const rootNames = cases.map(([name, source, options]) => {
+				const compiled = compileToVolarMappings(source, `/src/${name}.tsrx`, options);
+				expect(compiled.errors).toEqual([]);
+				compilations.push(compiled);
+				const file = join(root, `${name}.tsx`);
+				writeFileSync(file, compiled.code);
+				return file;
+			});
+			const program = ts.createProgram({
+				rootNames,
+				options: {
+					jsx: ts.JsxEmit.ReactJSX,
+					module: ts.ModuleKind.ESNext,
+					moduleResolution: ts.ModuleResolutionKind.Bundler,
+					noEmit: true,
+					skipLibCheck: true,
+					strict: true,
+					target: ts.ScriptTarget.ESNext,
+					types: [],
+				},
+			});
+			const diagnostics = rootNames.flatMap((name) =>
+				program.getSemanticDiagnostics(program.getSourceFile(name)!),
+			);
+			expect(
+				diagnostics.map((diagnostic) => ({
+					file: diagnostic.file!.fileName,
+					code: diagnostic.code,
+					message: ts.flattenDiagnosticMessageText(diagnostic.messageText, ' '),
+				})),
+			).toEqual(
+				['InvalidPortable', 'InvalidBlockPragma', 'InvalidLinePragma'].map((name) => ({
+					file: join(root, `${name}.tsx`),
+					code: 2322,
+					message: "Type 'string' is not assignable to type 'number'.",
+				})),
+			);
+			for (const diagnostic of diagnostics) {
+				const index = rootNames.indexOf(diagnostic.file!.fileName);
+				const sourceOffset = cases[index][1].indexOf('columns=');
+				expect(
+					compilations[index].mappings.some((mapping) =>
+						mapping.sourceOffsets.some(
+							(start, position) =>
+								start === sourceOffset && mapping.generatedOffsets[position] === diagnostic.start,
+						),
+					),
+				).toBe(true);
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	}, 15_000);
+
+	it('type-checks @try boundaries under a renderer whose JSX.Element is a closed union', () => {
+		// Universal renderers such as ink type JSX.Element as UniversalRenderable
+		// and declare no JSX.ElementType, so every component in their virtual TSX,
+		// including the boundaries that `@try` becomes, must return a member of it.
+		const root = mkdtempSync(join(tmpdir(), 'octane-volar-universal-try-'));
+		try {
+			mkdirSync(join(root, 'node_modules/@fixture'), { recursive: true });
+			symlinkSync(
+				fileURLToPath(new URL('../..', import.meta.url)),
+				join(root, 'node_modules/octane'),
+				'dir',
+			);
+			const moduleRoot = join(root, 'node_modules/@fixture/universal-intrinsics');
+			mkdirSync(moduleRoot);
+			writeFileSync(
+				join(moduleRoot, 'package.json'),
+				JSON.stringify({
+					name: '@fixture/universal-intrinsics',
+					exports: { './jsx-runtime': './jsx-runtime.d.ts' },
+				}),
+			);
+			writeFileSync(
+				join(moduleRoot, 'jsx-runtime.d.ts'),
+				`import type { UniversalRenderable } from 'octane/universal';
+export namespace JSX {
+	type Element = UniversalRenderable;
+	interface ElementChildrenAttribute {
+		children: {};
+	}
+	interface IntrinsicElements {
+		'fixture-text': { children?: UniversalRenderable };
+	}
+}
+`,
+			);
+			const compiled = compileToVolarMappings(
+				`/** @jsxImportSource @fixture/universal-intrinsics */
+function Content() @{ <fixture-text>ready</fixture-text> }
+function Fallback(props: { error: Error }) @{ <fixture-text>{props.error.message}</fixture-text> }
+export function Boundary() @{
+	@try {
+		<Content />
+	} @catch (error) {
+		<Fallback error={error as Error} />
+	}
+}
+export function Pending() @{
+	@try {
+		<Content />
+	} @pending {
+		<fixture-text>loading</fixture-text>
+	}
+}
+export function PendingOrFailed() @{
+	@try {
+		<Content />
+	} @pending {
+		<fixture-text>loading</fixture-text>
+	} @catch (error) {
+		<Fallback error={error as Error} />
+	}
+}
+`,
+				'/src/Boundary.tsrx',
+			);
+			expect(compiled.errors).toEqual([]);
+			expect(compiled.code).toContain('<TsrxErrorBoundary');
+			expect(compiled.code).toContain('<Suspense');
+			const file = join(root, 'Boundary.tsx');
+			writeFileSync(file, compiled.code);
+			const program = ts.createProgram({
+				rootNames: [file],
+				options: {
+					jsx: ts.JsxEmit.ReactJSX,
+					module: ts.ModuleKind.ESNext,
+					moduleResolution: ts.ModuleResolutionKind.Bundler,
+					noEmit: true,
+					skipLibCheck: true,
+					strict: true,
+					target: ts.ScriptTarget.ESNext,
+					types: [],
+				},
+			});
+			expect(
+				ts
+					.getPreEmitDiagnostics(program)
+					.filter((diagnostic) => diagnostic.file?.fileName === file)
+					.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ')),
+			).toEqual([]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	}, 15_000);
+
+	it('keeps a template @ts-expect-error on the line before the child it is about', () => {
+		const source = `export function Line(props: { label: (value: number) => string }) @{
+	<p>
+		// @ts-expect-error the label takes a number
+		{props.label('one')}
+	</p>
+}
+
+export function Block(props: { label: (value: number) => string }) {
+	return (
+		<p>
+			{/* @ts-expect-error the label takes a number */}
+			{props.label('two')}
+		</p>
+	);
+}
+
+export function Unchecked(props: { label: (value: number) => string }) @{
+	<p>{props.label('three')}</p>
+}
+`;
+		const root = mkdtempSync(join(tmpdir(), 'octane-volar-expect-error-'));
+		try {
+			mkdirSync(join(root, 'node_modules'));
+			symlinkSync(
+				fileURLToPath(new URL('../..', import.meta.url)),
+				join(root, 'node_modules/octane'),
+				'dir',
+			);
+			const result = compileToVolarMappings(source, 'Labels.tsrx');
+			expect(result.errors).toEqual([]);
+			const file = join(root, 'Labels.tsx');
+			writeFileSync(file, result.code);
+			const program = ts.createProgram({
+				rootNames: [file],
+				options: {
+					jsx: ts.JsxEmit.Preserve,
+					module: ts.ModuleKind.ESNext,
+					moduleResolution: ts.ModuleResolutionKind.Bundler,
+					noEmit: true,
+					strict: true,
+					target: ts.ScriptTarget.ESNext,
+					types: [],
+				},
+			});
+			const sourceFile = program.getSourceFile(file)!;
+			const diagnostics = program.getSemanticDiagnostics(sourceFile);
+			// Only the call without a directive is reported; both directives are used.
+			expect(diagnostics.map(({ code }) => code)).toEqual([2345]);
+			expect(result.code.slice(diagnostics[0].start!)).toMatch(/^'three'/);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.each([false, true])('maps dynamic style content as host props (Strong: %s)', (strong) => {
+		const source = readFileSync(
+			new URL('../_fixtures/dynamic-style-content.tsrx', import.meta.url),
+			'utf8',
+		);
+		const result = compileToVolarMappings(source, 'dynamic-style-content.tsrx', { strong });
+		expect(result.errors).toEqual([]);
+		expect(result.diagnostics).toEqual([]);
+		// Only the authored CSS block is an embedded stylesheet. Both dynamic
+		// expressions remain mapped TSX so the language service checks their types.
+		expect(result.cssMappings).toHaveLength(1);
+		for (const match of source.matchAll(/props\.css/g)) {
+			const offset = match.index + 'props.'.length;
+			const mapped = result.mappings.flatMap((mapping) =>
+				mapping.sourceOffsets.map((start, index) => {
+					if (offset < start || offset >= start + mapping.lengths[index]) return '';
+					const generated = mapping.generatedOffsets[index] + offset - start;
+					return result.code.slice(generated, generated + 3);
+				}),
+			);
+			expect(mapped).toContain('css');
+		}
+		expect(result.code).toContain('children=');
+		expect(result.code).toContain('dangerouslySetInnerHTML=');
+		const inspection = compileTypesInspection(source, 'dynamic-style-content.tsrx');
+		expect(inspection.code).toContain('children=');
+		expect(inspection.code).toContain('dangerouslySetInnerHTML=');
+	});
+
+	it('accepts a parenthesized style block as an apply target', () => {
+		// The formatter wraps a multi-line assigned block in parentheses, which the
+		// editor parse keeps.
+		const source = `const theme = (
+	<style>
+		.card { color: purple; }
+	</style>
+);
+const themes = {
+	dark: (
+		<style>
+			.card { color: black; }
+		</style>
+	),
+};
+const notTheme = ('card');
+
+export function Card() @{
+	<>
+		<style apply={[theme, themes.dark]}>
+			.title { font-weight: bold; }
+		</style>
+		<p class="card title">{'Card'}</p>
+	</>
+}
+
+export function Wrong() @{
+	<>
+		<style apply={notTheme}>
+			.title { font-weight: bold; }
+		</style>
+		<p class="title">{'Wrong'}</p>
+	</>
+}
+`;
+		const { errors } = compileToVolarMappings(source, 'Card.tsrx');
+		expect(errors.map((error) => [error.code, error.message])).toEqual([
+			['TSRX3002', expect.stringContaining("'notTheme' is not a style block")],
+		]);
+	});
+
 	it('reports a typed error array when there are no parse errors', () => {
 		// Hard parse errors still throw (the underlying acorn parser can't
 		// recover from arbitrary brace mismatches). When parsing succeeds the
@@ -1104,6 +1495,23 @@ export function Chart<T extends Octane.SVGProps<SVGTextElement>>(props: T) {
 	return <text ref={null} {...props} />;
 }`,
 				],
+				// As in plain TSX, a key that only an index signature admits is not a
+				// declared ref, so the bag's ref composes as absent.
+				[
+					'index-signature spread with an explicit ref',
+					`export function Tooltip(props: { rest: Record<string, unknown> }) {
+	return <input ref={null} {...props.rest} />;
+}`,
+				],
+				[
+					'index-signature props with a forwarded ref',
+					`import type { Octane } from 'octane/jsx-runtime';
+type InputProps = { [key: string]: unknown; innerRef?: Octane.Ref<HTMLInputElement>; id?: string };
+export function Input(props: InputProps) @{
+	const { innerRef, ...innerProps } = props;
+	<input ref={innerRef ?? null} {...innerProps} />
+}`,
+				],
 			];
 			const files = sources.map(([name, source], index) => {
 				const compiled = compileToVolarMappings(source, `/src/Spread${index}.tsrx`);
@@ -1199,7 +1607,7 @@ export function Invalid(value: SignalHandle<string>) @{ <p>{value as string}</p>
 					2698,
 				],
 				[
-					`export function Invalid(props: { rest: Record<string, unknown> }) {
+					`export function Invalid(props: { rest: { [key: string]: unknown; ref: (node: SVGSVGElement | null) => void } }) {
 	return <input ref={null} {...props.rest} />;
 }`,
 					2322,
@@ -1628,6 +2036,103 @@ export const ordinaryResult: string = ordinary('draft', { count: 1 });
 					.getPreEmitDiagnostics(program)
 					.map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n')),
 			).toEqual([]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it('type-checks static JSX in the scope it was authored in', () => {
+		// @tsrx/core hoists a fully static element (literal attributes and
+		// children) to a module-level `const`, React's element-identity fast path.
+		// A component tag is the only binding such an element can name, and at
+		// module scope it was checked against the wrong one: a named function
+		// expression's own name resolved to a module binding of the same name or
+		// to nothing (TS2604 / TS2304), and `@if` narrowing was lost (TS2604).
+		const sources = {
+			DefaultExpression:
+				"const Counter = 'module binding';\n" +
+				'export default (function Counter(props: { nested?: boolean }) @{\n' +
+				'\t<section>@if (!props.nested) { <Counter nested /> }</section>\n' +
+				'});\n',
+			MemoExpression:
+				'declare function memo<T>(component: T): T;\n' +
+				'export const Counter = memo(function Self(props: { nested?: boolean }) @{\n' +
+				'\t<section>@if (!props.nested) { <Self nested /> }</section>\n' +
+				'});\n',
+			Narrowed:
+				'declare const Maybe: ((props: { label: string }) => unknown) | undefined;\n' +
+				'export function Optional() @{\n' +
+				'\t<section>@if (Maybe) { <Maybe label="ready" /> }</section>\n' +
+				'}\n',
+			// An authored `Suspense` import selects the transform that reuses it.
+			AuthoredSuspense:
+				"import { Suspense } from 'octane';\n" +
+				'declare function memo<T>(component: T): T;\n' +
+				'export const Boundary = memo(function Panel(props: { nested?: boolean }) @{\n' +
+				'\t<Suspense fallback={null}>@if (!props.nested) { <Panel nested /> }</Suspense>\n' +
+				'});\n',
+		};
+		// The self-reference is checked against the function's own props, so a
+		// wrong literal is a props error, not a call-signature one.
+		const invalidSource = sources.DefaultExpression.replace(
+			'<Counter nested />',
+			'<Counter nested={1} />',
+		);
+
+		const root = mkdtempSync(join(tmpdir(), 'octane-volar-static-scope-'));
+		try {
+			writeOctaneJsxRuntimeStub(
+				root,
+				'\t\tsection: { children?: unknown };\n\t\tspan: { children?: unknown };',
+			);
+			writeFileSync(
+				join(root, 'node_modules/octane/package.json'),
+				JSON.stringify({
+					name: 'octane',
+					exports: { '.': './index.d.ts', './jsx-runtime': './jsx-runtime.d.ts' },
+				}),
+			);
+			writeFileSync(
+				join(root, 'node_modules/octane/index.d.ts'),
+				'export declare function Suspense(props: { fallback: unknown; children?: unknown }): unknown;\n',
+			);
+			const files = Object.entries(sources).flatMap(([name, source]) => {
+				const result = compileToVolarMappings(source, `/src/${name}.tsrx`);
+				expect(result.errors).toEqual([]);
+				const file = join(root, `${name}.tsx`);
+				writeFileSync(file, result.code);
+				const inspectionFile = join(root, `${name}.inspection.tsx`);
+				writeFileSync(inspectionFile, compileTypesInspection(source, `/src/${name}.tsrx`).code);
+				return [file, inspectionFile];
+			});
+			const invalid = compileToVolarMappings(invalidSource, '/src/Invalid.tsrx');
+			expect(invalid.errors).toEqual([]);
+			const invalidFile = join(root, 'Invalid.tsx');
+			writeFileSync(invalidFile, invalid.code);
+			const program = ts.createProgram({
+				rootNames: [...files, invalidFile],
+				options: {
+					jsx: ts.JsxEmit.Preserve,
+					module: ts.ModuleKind.ESNext,
+					moduleResolution: ts.ModuleResolutionKind.Bundler,
+					noEmit: true,
+					skipLibCheck: true,
+					strict: true,
+					target: ts.ScriptTarget.ESNext,
+				},
+			});
+			const diagnostics = ts.getPreEmitDiagnostics(program);
+			expect(
+				diagnostics
+					.filter(({ file }) => file?.fileName !== invalidFile)
+					.map(
+						({ file, messageText }) =>
+							`${file?.fileName.slice(root.length + 1)}: ${ts.flattenDiagnosticMessageText(messageText, '\n')}`,
+					),
+			).toEqual([]);
+			expect(
+				diagnostics.filter(({ file }) => file?.fileName === invalidFile).map(({ code }) => code),
+			).toEqual([2322]);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

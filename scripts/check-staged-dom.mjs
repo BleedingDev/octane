@@ -9,7 +9,11 @@
  */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import ts from 'typescript';
+import { importNativeTypeScript } from './octane-tsc/native.mjs';
+import { is, NodeFlags, ScriptTarget, SyntaxKind } from './octane-tsc/native-syntax.mjs';
+
+const { API, ModuleKind, ModuleResolutionKind, TypeFlags } =
+	await importNativeTypeScript('unstable/sync');
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 export const runtimeFile = path.join(ROOT, 'packages/octane/src/runtime.ts');
@@ -34,6 +38,10 @@ const NATIVE_OPERATIONS = new Map(
 		// native access if DOM initialization has not supplied the cached getter.
 		getFirstChild: ['read:firstChild'],
 		getNextSibling: ['read:nextSibling'],
+		// Route preparation first. The committed read goes through the prototype
+		// because a form's named control can shadow its getAttribute method.
+		'HydrationCapability.allowAttribute': ['read:getAttribute'],
+		'HydrationCapability.settleValues': ['read:getAttribute'],
 		// Transition handles inspect the current animation tree and committed resources.
 		vtScopeName: ['read:style', 'read:activeViewTransition'],
 		'ViewTransitionPseudoElement.animate': ['call:animate'],
@@ -61,6 +69,9 @@ const NATIVE_OPERATIONS = new Map(
 		// retire detached anchors only after a root replacement has been accepted.
 		hydrateRootWithOutputHandler: ['call:contains'],
 		beginPresentationHydration: ['read:nextSibling'],
+		// A moved host's lease compares the hydration cursor's native parent
+		// against the server site it recorded before any preparation.
+		supersedeDisplacedHost: ['read:parentNode'],
 		// These proofs and rollback guards compare the early owner's live range,
 		// not the renderer's projected tree. A stale candidate cannot authorize
 		// restoring or publishing over newer early DOM.
@@ -89,11 +100,11 @@ const NATIVE_OPERATIONS = new Map(
 		'FragmentInstance.scrollIntoView': ['call:scrollIntoView'],
 		focusFragmentElement: ['read:focus'],
 		// Root delegation and native submit/default restoration are publication work.
-		delegateEvents: ['call:addEventListener'],
-		delegateCaptureEvents: ['call:addEventListener'],
+		registerDelegatedBubble: ['call:addEventListener'],
+		registerDelegatedCapture: ['call:addEventListener'],
 		registerDelegationTarget: ['read:onclick', 'write:onclick', 'call:addEventListener'],
 		unregisterDelegationTarget: ['call:removeEventListener'],
-		publishManualFormPending: ['read:method'],
+		publishRegisteredManualFormPending: ['read:method'],
 		resetFormNow: ['call:reset'],
 		handleFormSubmit: ['call:reset'],
 		reassertControlledIn: ['read:elements'],
@@ -102,10 +113,10 @@ const NATIVE_OPERATIONS = new Map(
 
 function unwrap(node) {
 	while (
-		ts.isAsExpression(node) ||
-		ts.isTypeAssertionExpression(node) ||
-		ts.isParenthesizedExpression(node) ||
-		ts.isNonNullExpression(node)
+		is.isAsExpression(node) ||
+		is.isTypeAssertion(node) ||
+		is.isParenthesizedExpression(node) ||
+		is.isNonNullExpression(node)
 	)
 		node = node.expression;
 	return node;
@@ -113,12 +124,12 @@ function unwrap(node) {
 
 function owner(node) {
 	for (let current = node.parent; current !== undefined; current = current.parent) {
-		if (ts.isFunctionDeclaration(current) && current.name)
-			return ts.isSourceFile(current.parent) ? current.name.text : `<nested>.${current.name.text}`;
-		if (ts.isMethodDeclaration(current) && current.name) {
+		if (is.isFunctionDeclaration(current) && current.name)
+			return is.isSourceFile(current.parent) ? current.name.text : `<nested>.${current.name.text}`;
+		if (is.isMethodDeclaration(current) && current.name) {
 			const parent = current.parent;
 			const name = `${parent.name?.text ?? '<class>'}.${current.name.getText()}`;
-			return ts.isClassDeclaration(parent) && ts.isSourceFile(parent.parent)
+			return is.isClassDeclaration(parent) && is.isSourceFile(parent.parent)
 				? name
 				: `<nested>.${name}`;
 		}
@@ -127,60 +138,75 @@ function owner(node) {
 }
 
 export function inspectStagedDOM(text, file = runtimeFile) {
-	const host = ts.createCompilerHost({});
-	const readFile = host.readFile.bind(host);
-	if (text !== undefined)
-		host.readFile = (name) => (path.resolve(name) === path.resolve(file) ? text : readFile(name));
-	const program = ts.createProgram(
-		[file],
-		{
-			target: ts.ScriptTarget.ESNext,
-			module: ts.ModuleKind.ESNext,
-			moduleResolution: ts.ModuleResolutionKind.Bundler,
-			strict: true,
-			skipLibCheck: true,
-		},
-		host,
-	);
-	const checker = program.getTypeChecker();
+	// TypeScript 7 runs in its own process: `text` reaches it through the API's
+	// file system callbacks.
+	const api = new API({
+		cwd: process.cwd(),
+		...(text === undefined
+			? {}
+			: {
+					fs: {
+						readFile: (name) => (path.resolve(name) === path.resolve(file) ? text : undefined),
+					},
+				}),
+	});
+	try {
+		return inspectProgram(
+			api.createProgram([file], {
+				target: ScriptTarget.ESNext,
+				module: ModuleKind.ESNext,
+				moduleResolution: ModuleResolutionKind.Bundler,
+				strict: true,
+				skipLibCheck: true,
+				// Every visible @types package, as TypeScript 5.9 included by default.
+				types: ['*'],
+			}),
+			file,
+		);
+	} finally {
+		api.close();
+	}
+}
+
+function inspectProgram(program, file) {
+	const { checker } = program.getProject();
 	const source = program.getSourceFile(file);
 	if (!source) throw new Error(`Cannot read ${file}`);
 	const moduleBindings = new Map();
 	for (const statement of source.statements) {
-		if (ts.isVariableStatement(statement))
+		if (is.isVariableStatement(statement))
 			for (const declaration of statement.declarationList.declarations)
-				if (ts.isIdentifier(declaration.name))
+				if (is.isIdentifier(declaration.name))
 					moduleBindings.set(declaration.name.text, checker.getSymbolAtLocation(declaration.name));
 	}
 	const moduleBinding = (node, name) =>
-		ts.isIdentifier(node) &&
+		is.isIdentifier(node) &&
 		node.text === name &&
 		moduleBindings.has(name) &&
 		checker.getSymbolAtLocation(node) === moduleBindings.get(name);
 	const failures = [];
+	// Declarations are handles that name their file without resolving the node.
 	const fromDOM = (symbol) =>
-		symbol?.declarations?.some((entry) =>
-			/\/lib\.dom(?:\.iterable)?\.d\.ts$/.test(entry.getSourceFile().fileName),
-		);
+		symbol?.declarations?.some((entry) => /\/lib\.dom(?:\.iterable)?\.d\.ts$/.test(entry.path));
 	const initializer = (node) =>
-		ts.isIdentifier(node)
-			? checker.getSymbolAtLocation(node)?.valueDeclaration?.initializer
+		is.isIdentifier(node)
+			? checker.getSymbolAtLocation(node)?.valueDeclaration?.resolve()?.initializer
 			: undefined;
 	function literalKey(expression) {
 		const node = unwrap(expression);
-		if (ts.isStringLiteralLike(node)) return node.text;
-		if (!ts.isIdentifier(node)) return null;
-		const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration;
+		if (is.isStringLiteralLikeNode(node)) return node.text;
+		if (!is.isIdentifier(node)) return null;
+		const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration?.resolve();
 		if (
 			!declaration ||
-			!ts.isVariableDeclaration(declaration) ||
-			!ts.isVariableDeclarationList(declaration.parent) ||
-			!(declaration.parent.flags & ts.NodeFlags.Const) ||
+			!is.isVariableDeclaration(declaration) ||
+			!is.isVariableDeclarationList(declaration.parent) ||
+			!(declaration.parent.flags & NodeFlags.Const) ||
 			!declaration.initializer
 		)
 			return null;
 		const value = unwrap(declaration.initializer);
-		return ts.isStringLiteralLike(value) ? value.text : null;
+		return is.isStringLiteralLikeNode(value) ? value.text : null;
 	}
 	function nodeReceiver(expression, depth = 0) {
 		if (depth > 12) return false;
@@ -203,37 +229,37 @@ export function inspectStagedDOM(text, file = runtimeFile) {
 	function preparedReceiver(expression, depth = 0) {
 		if (depth > 12) return false;
 		const node = unwrap(expression);
-		if (
-			ts.isBinaryExpression(node) &&
-			node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
-		) {
-			const native = unwrap(node.right);
-			const prepared = unwrap(node.left);
-			const view = ts.isCallExpression(prepared) ? unwrap(prepared.expression) : undefined;
+		if (is.isConditionalExpression(node)) {
+			const native = unwrap(node.whenFalse);
+			const prepared = unwrap(node.whenTrue);
+			const view = is.isCallExpression(prepared) ? unwrap(prepared.expression) : undefined;
 			// The cold preparation branch is inlined only around local identifiers.
-			// Matching bindings proves that the optional stage and both selected receivers
-			// refer to the renderer's actual stage and the same native node. Restricting
-			// the receiver also preserves evaluation order for getters and function calls.
+			// Matching bindings proves that the tested stage, its view, and both selected
+			// receivers refer to the renderer's actual stage and the same native node.
+			// Restricting the receiver also preserves evaluation order for getters and
+			// function calls. Only a truthiness test of the stage lets a bundle without
+			// ViewTransition drop the branch (see the driver declarations in runtime.ts).
 			return (
-				ts.isIdentifier(native) &&
-				ts.isCallExpression(prepared) &&
+				moduleBinding(unwrap(node.condition), 'STAGED_DOM') &&
+				is.isIdentifier(native) &&
+				is.isCallExpression(prepared) &&
 				prepared.questionDotToken === undefined &&
-				ts.isPropertyAccessExpression(view) &&
-				view.questionDotToken !== undefined &&
+				is.isPropertyAccessExpression(view) &&
+				view.questionDotToken === undefined &&
 				view.name.text === 'view' &&
 				moduleBinding(unwrap(view.expression), 'STAGED_DOM') &&
 				prepared.arguments.length === 1 &&
-				ts.isIdentifier(unwrap(prepared.arguments[0])) &&
+				is.isIdentifier(unwrap(prepared.arguments[0])) &&
 				checker.getSymbolAtLocation(native) !== undefined &&
 				checker.getSymbolAtLocation(native) ===
 					checker.getSymbolAtLocation(unwrap(prepared.arguments[0]))
 			);
 		}
-		if (ts.isCallExpression(node)) {
+		if (is.isCallExpression(node)) {
 			const callee = node.expression;
 			return (
-				(ts.isIdentifier(callee) && callee.text === 'domNode') ||
-				(ts.isPropertyAccessExpression(callee) &&
+				(is.isIdentifier(callee) && callee.text === 'domNode') ||
+				(is.isPropertyAccessExpression(callee) &&
 					callee.name.text === 'view' &&
 					callee.expression.getText(source) === 'STAGED_DOM')
 			);
@@ -243,39 +269,39 @@ export function inspectStagedDOM(text, file = runtimeFile) {
 	}
 	function operation(access) {
 		let node = access;
-		while (ts.isParenthesizedExpression(node.parent)) node = node.parent;
+		while (is.isParenthesizedExpression(node.parent)) node = node.parent;
 		const parent = node.parent;
-		if (ts.isCallExpression(parent) && parent.expression === node) return 'call';
+		if (is.isCallExpression(parent) && parent.expression === node) return 'call';
 		if (
-			ts.isDeleteExpression(parent) ||
-			ts.isPrefixUnaryExpression(parent) ||
-			ts.isPostfixUnaryExpression(parent)
+			is.isDeleteExpression(parent) ||
+			is.isPrefixUnaryExpression(parent) ||
+			is.isPostfixUnaryExpression(parent)
 		)
 			return 'write';
 		if (
-			ts.isBinaryExpression(parent) &&
+			is.isBinaryExpression(parent) &&
 			parent.left === node &&
-			parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-			parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+			parent.operatorToken.kind >= SyntaxKind.FirstAssignment &&
+			parent.operatorToken.kind <= SyntaxKind.LastAssignment
 		)
 			return 'write';
 		return 'read';
 	}
 	function visit(node) {
 		if (
-			(ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+			(is.isPropertyAccessExpression(node) || is.isElementAccessExpression(node)) &&
 			nodeReceiver(node.expression) &&
 			!preparedReceiver(node.expression)
 		) {
-			const argumentType = ts.isElementAccessExpression(node)
+			const argumentType = is.isElementAccessExpression(node)
 				? checker.getTypeAtLocation(node.argumentExpression)
 				: undefined;
-			const key = ts.isPropertyAccessExpression(node)
+			const key = is.isPropertyAccessExpression(node)
 				? node.name.text
 				: literalKey(node.argumentExpression);
 			// Renderer-owned symbols/expandos aren't native operations. Their lifecycle
 			// publication is checked in the effect/event suites, not inferred from names.
-			const symbolKey = argumentType && (argumentType.flags & ts.TypeFlags.ESSymbolLike) !== 0;
+			const symbolKey = argumentType && (argumentType.flags & TypeFlags.ESSymbolLike) !== 0;
 			const dynamic = key === null && !symbolKey;
 			// Resolve through any casts/aliases so they cannot bypass native checks.
 			if (dynamic || (key !== null && nativeProperty(node.expression, key))) {
@@ -297,7 +323,7 @@ export function inspectStagedDOM(text, file = runtimeFile) {
 				}
 			}
 		}
-		ts.forEachChild(node, visit);
+		node.forEachChild(visit);
 	}
 	visit(source);
 	return failures;

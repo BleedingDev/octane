@@ -23,7 +23,20 @@ export function FreshRootScopeHold(props) @{
 			id="committed-label"
 			title={props.label}
 			class={{ initial: props.label === 'initial', next: props.label === 'next' }}
-		>{props.label as string}</span>
+		>
+			{props.label as string}
+		</span>
+		<Reader promise={props.promise} />
+	</main>
+}
+
+export function KeyedIndexHold(props: { items: string[]; promise: PromiseLike<string> }) @{
+	<main>
+		<ol>
+			@for (const item of props.items; index i; key item) {
+				<li id={'row-' + item}>{item + ':' + i}</li>
+			}
+		</ol>
 		<Reader promise={props.promise} />
 	</main>
 }

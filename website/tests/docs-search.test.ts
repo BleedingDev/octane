@@ -2,7 +2,7 @@
 // and the ⌘K dialog wired through the real router.
 import { describe, it, expect, afterEach } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@octanejs/testing-library';
-import { RouterProvider, createMemoryHistory } from '@octanejs/tanstack-router';
+import { RouterProvider, createMemoryHistory } from '@octanejs/tanstack-router/compiled';
 import { getRouter } from '../src/router.ts';
 import { docs } from '../src/content/docs.ts';
 import { headingsFor, loadSearchIndex, searchDocs } from '../src/lib/docs-search.ts';
@@ -149,13 +149,17 @@ describe('docs search ranking', () => {
 		}
 	});
 
-	it('deep links Strong-mode searches to the render contract guide', async () => {
+	it('sends Strong-mode searches to the Strong mode guide', async () => {
 		const index = await loadSearchIndex();
-		const [top] = searchDocs(index, 'strong mode');
 
-		expect(top).toBeDefined();
-		expect(top.slug).toBe('differences-from-react');
-		expect(top.id).toBe('strong-mode');
+		for (const query of ['strong mode', 'use strong', '--strong-preview', 'OCTANE_STRONG']) {
+			const [top] = searchDocs(index, query);
+
+			expect(top, query).toBeDefined();
+			expect(top.slug, query).toBe('strong-mode');
+		}
+		// The query names the guide itself, so it lands on the page, not a section.
+		expect(searchDocs(index, 'strong mode')[0].id).toBe('');
 	});
 
 	it('finds browser support and deep links required DOM API searches', async () => {

@@ -1,7 +1,17 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, relative, resolve, sep } from 'node:path';
-import ts from 'typescript';
+import { relative, resolve, sep } from 'node:path';
+import { is, parseSourceFile, ScriptKind } from '../octane-tsc/native-syntax.mjs';
+import {
+	factory,
+	flattenDiagnosticText,
+	parseProjectConfigContent,
+	printFileWithoutComments,
+	printNodeWithoutComments,
+	readProjectConfig,
+	TokenFlags,
+	visitEachChild,
+} from './native-typescript-lib.mjs';
 
 export const TYPE_PARITY_CONFIG = 'packages/alien-signals/audit/type-parity.json';
 
@@ -18,23 +28,13 @@ function compilerProgramFiles(root, projectPath) {
 	if (!existsSync(configPath)) {
 		throw new Error(`missing compiler project: ${projectPath}`);
 	}
-	const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
+	const configFile = readProjectConfig(configPath);
 	if (configFile.error) {
-		throw new Error(
-			`failed to read ${projectPath}: ${ts.flattenDiagnosticMessageText(configFile.error.messageText, '\n')}`,
-		);
+		throw new Error(`failed to read ${projectPath}: ${flattenDiagnosticText(configFile.error)}`);
 	}
-	const parsed = ts.parseJsonConfigFileContent(
-		configFile.config,
-		ts.sys,
-		dirname(configPath),
-		undefined,
-		configPath,
-	);
+	const parsed = parseProjectConfigContent(configFile.config, { configFileName: configPath });
 	if (parsed.errors.length > 0) {
-		throw new Error(
-			`failed to parse ${projectPath}: ${ts.flattenDiagnosticMessageText(parsed.errors[0].messageText, '\n')}`,
-		);
+		throw new Error(`failed to parse ${projectPath}: ${flattenDiagnosticText(parsed.errors[0])}`);
 	}
 	return new Set(
 		parsed.fileNames.map(function toRepoPath(fileName) {
@@ -75,44 +75,74 @@ const PUBLIC_API_CALLEES = new Set([
 	'createComputed',
 	'createEffect',
 	'createSignalScope',
+	'batch',
+	'trigger',
 	'useSignal',
 	'useSignalValue',
+	'useDeferredSignalValue',
+	'useSignalSelector',
 	'useSetSignal',
 	'useSignalEffect',
+	'useSignalPassiveEffect',
+	'useSignalLayoutEffect',
+	'useSignalInsertionEffect',
 	'useSignalScope',
 	'useComputed',
 ]);
 
 export function assertionGroups(source, fileName) {
-	const sourceFile = ts.createSourceFile(
-		fileName,
-		source,
-		ts.ScriptTarget.Latest,
-		true,
-		ts.ScriptKind.TS,
-	);
-	const printer = ts.createPrinter({ removeComments: true });
+	const sourceFile = parseSourceFile(fileName, source, ScriptKind.TS);
 	const groups = [];
 	for (const match of source.matchAll(/\/\/\s*@ts-expect-error([^\n]*)\n\s*([^\n]+)/g)) {
 		groups.push(`expect-error:${match[1].trim()}:${match[2].replace(/\s+/g, ' ').trim()}`);
 	}
 	function visit(node) {
 		if (
-			ts.isCallExpression(node) &&
-			ts.isIdentifier(node.expression) &&
+			is.isCallExpression(node) &&
+			is.isIdentifier(node.expression) &&
 			node.expression.text === 'expectType'
 		) {
-			groups.push(
-				`expectType:${printer
-					.printNode(ts.EmitHint.Unspecified, node, sourceFile)
-					.replace(/\s+/g, ' ')
-					.trim()}`,
-			);
+			groups.push(`expectType:${printNodeWithoutComments(node).replace(/\s+/g, ' ').trim()}`);
 		}
-		ts.forEachChild(node, visit);
+		node.forEachChild(visit);
 	}
 	visit(sourceFile);
 	return groups;
+}
+
+/**
+ * Quote style and trailing commas are formatter output, not type surface.
+ * Reprinting string literals and comma-separated lists as synthesized nodes
+ * lets a Prettier-formatted adapted file match the pinned upstream spelling.
+ */
+function withCanonicalPresentation(node) {
+	function visit(child) {
+		if (is.isStringLiteral(child)) return factory.createStringLiteral(child.text, TokenFlags.None);
+		const visited = visitEachChild(child, visit);
+		if (is.isCallExpression(visited) && visited.arguments.hasTrailingComma) {
+			return factory.updateCallExpression(
+				visited,
+				visited.expression,
+				visited.questionDotToken,
+				visited.typeArguments,
+				factory.createNodeArray([...visited.arguments]),
+			);
+		}
+		if (is.isArrayLiteralExpression(visited) && visited.elements.hasTrailingComma) {
+			return factory.updateArrayLiteralExpression(
+				visited,
+				factory.createNodeArray([...visited.elements]),
+			);
+		}
+		if (is.isObjectLiteralExpression(visited) && visited.properties.hasTrailingComma) {
+			return factory.updateObjectLiteralExpression(
+				visited,
+				factory.createNodeArray([...visited.properties]),
+			);
+		}
+		return visited;
+	}
+	return visit(node);
 }
 
 /**
@@ -122,14 +152,7 @@ export function assertionGroups(source, fileName) {
  * dropping one duplicate while another remains is rejected.
  */
 export function acceptedApiCalls(source, fileName) {
-	const sourceFile = ts.createSourceFile(
-		fileName,
-		source,
-		ts.ScriptTarget.Latest,
-		true,
-		ts.ScriptKind.TS,
-	);
-	const printer = ts.createPrinter({ removeComments: true });
+	const sourceFile = parseSourceFile(fileName, source, ScriptKind.TS);
 	const expectErrorLines = new Set();
 	for (const match of source.matchAll(/\/\/\s*@ts-expect-error[^\n]*\n/g)) {
 		const nextLine = source.slice(0, match.index + match[0].length).split('\n').length;
@@ -138,18 +161,18 @@ export function acceptedApiCalls(source, fileName) {
 	const calls = [];
 	function visit(node) {
 		if (
-			ts.isCallExpression(node) &&
-			ts.isIdentifier(node.expression) &&
+			is.isCallExpression(node) &&
+			is.isIdentifier(node.expression) &&
 			PUBLIC_API_CALLEES.has(node.expression.text)
 		) {
 			const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 			if (!expectErrorLines.has(line)) {
 				calls.push(
-					printer.printNode(ts.EmitHint.Unspecified, node, sourceFile).replace(/\s+/g, ' ').trim(),
+					printNodeWithoutComments(withCanonicalPresentation(node)).replace(/\s+/g, ' ').trim(),
 				);
 			}
 		}
-		ts.forEachChild(node, visit);
+		node.forEachChild(visit);
 	}
 	visit(sourceFile);
 	return calls.sort();
@@ -167,16 +190,10 @@ function normalizeSpecifier(specifier) {
 }
 
 function structuralSource(source, fileName) {
-	const sourceFile = ts.createSourceFile(
-		fileName,
-		source,
-		ts.ScriptTarget.Latest,
-		true,
-		ts.ScriptKind.TS,
-	);
+	const sourceFile = parseSourceFile(fileName, source, ScriptKind.TS);
 	const replacements = [];
 	for (const statement of sourceFile.statements) {
-		if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier))
+		if (!is.isImportDeclaration(statement) || !is.isStringLiteral(statement.moduleSpecifier))
 			continue;
 		const specifier = statement.moduleSpecifier.text;
 		const normalized = normalizeSpecifier(specifier);
@@ -193,18 +210,8 @@ function structuralSource(source, fileName) {
 	})) {
 		transformed = `${transformed.slice(0, replacement.start)}${replacement.value}${transformed.slice(replacement.end)}`;
 	}
-	const normalizedFile = ts.createSourceFile(
-		fileName,
-		transformed,
-		ts.ScriptTarget.Latest,
-		true,
-		ts.ScriptKind.TS,
-	);
-	return ts
-		.createPrinter({ removeComments: true })
-		.printFile(normalizedFile)
-		.replace(/\s+/g, ' ')
-		.trim();
+	const normalizedFile = parseSourceFile(fileName, transformed, ScriptKind.TS);
+	return printFileWithoutComments(normalizedFile).replace(/\s+/g, ' ').trim();
 }
 
 function readTypeParityConfig(root, configPath) {
@@ -256,11 +263,11 @@ function inventoryTypecheckPairs(root, config) {
 			'utf8',
 		);
 		const adaptedSource = readFileSync(resolve(root, config.adaptedRoot, entry.adapted), 'utf8');
+		// A pinned typecheck suite may carry no @ts-expect-error groups; its
+		// accepted public-API calls are then the whole type evidence, and the
+		// adapted counterpart must not add or drop a negative group either.
 		const upstreamGroups = assertionGroups(upstreamSource, entry.upstream);
 		const adaptedGroups = assertionGroups(adaptedSource, entry.adapted);
-		if (upstreamGroups.length === 0) {
-			throw new Error(`${entry.upstream}: upstream typecheck file has no assertion groups`);
-		}
 		if (JSON.stringify(upstreamGroups) !== JSON.stringify(adaptedGroups)) {
 			throw new Error(
 				`${entry.adapted}: assertion groups differ between pristine and adapted type suites`,

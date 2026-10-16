@@ -1,6 +1,5 @@
 import type { CSSProperties } from 'octane';
 import type { OctaneNode } from '../util/OctaneTypes.ts';
-import * as React from 'octane';
 import { useCallback, useEffect, useRef, useState } from 'octane';
 import { noop } from '../util/DataUtils';
 import { resolveDefaultProps } from '../util/resolveDefaultProps';
@@ -65,8 +64,7 @@ export function CSSTransitionAnimate(outsideProps: CSSTransitionAnimateProps) {
 
 	const prefersReducedMotion = usePrefersReducedMotion();
 
-	const isActive =
-		isActiveProp === 'auto' ? !Global.isSsr && !prefersReducedMotion : isActiveProp;
+	const isActive = isActiveProp === 'auto' ? !Global.isSsr && !prefersReducedMotion : isActiveProp;
 
 	const animationController = useAnimationController(props.animationController);
 	const [style, setStyle] = useState<string | number>(() => {

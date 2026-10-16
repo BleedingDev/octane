@@ -35,29 +35,33 @@ Ordinary two-item destructures keep the allocation-free React shape.
 ## Strong mode reads render snapshots
 
 Strong modules use inferred dependencies and automatic memoization: omit effect
-dependency arguments, and replace `useMemo` / `useCallback` with normal const
-calculations / callbacks. Equivalent explicit arrays are hints; conflicting
-arrays and `null` are errors. Avoid chains of effects linked by state. An effect
-may not update state synchronously, including through `startTransition`,
-`queueMicrotask`, a settled promise, a zero-delay timer, or an await of a
-non-promise (`OCTANE_STRONG_EFFECT_STATE_UPDATE`). A state update after an
+dependency arguments. For effects, equivalent explicit arrays are hints;
+conflicting arrays and `null` are errors. `useMemo` and `useCallback` allow
+explicit dependency control; omitted dependencies are inferred and `null` runs
+every render. Avoid chains of effects linked by
+state. An effect may not update state synchronously, including through
+`startTransition`, `queueMicrotask`, a settled promise, a zero-delay timer, or
+an await of a non-promise (`OCTANE_STRONG_EFFECT_STATE_UPDATE`); an effect that
+copies a DOM measurement into state becomes
+`useLayoutSnapshot(() => measure(), { initial })`. A state update after an
 `await` or promise callback needs cleanup that aborts the request's
 `AbortController` or sets a flag the update checks
-(`OCTANE_STRONG_EFFECT_DATA_FETCH`). Effect setup may not call a state getter,
-read an unattached ref's `current`, or read a reassigned module variable
-(`OCTANE_STRONG_EFFECT_HIDDEN_DEPENDENCY`); use the snapshot or `useEffectEvent`.
+(`OCTANE_STRONG_EFFECT_DATA_FETCH`). Effect setup may not read a reassigned
+module variable (`OCTANE_STRONG_EFFECT_HIDDEN_DEPENDENCY`); use state or
+`useEffectEvent`. It may read and write a ref's `current` and call a state
+getter; neither is a dependency.
 Platform listeners, intervals, observers, connections, and geolocation watches
 acquired in setup must be released by the cleanup
 (`OCTANE_STRONG_EFFECT_RESOURCE_LEAK`). Use `useLinkedState` for prop-driven state;
 use a lazy `useState` initializer or an explicit third `useReducer` initializer
-for deliberate initial capture. In `.tsrx`, render lists
-with keyed `@for` and stable item IDs, never position keys. Strong `.tsx` keeps
-standard keyed JSX mapping. DOM suppression props
+for deliberate initial capture. Strong compiles `.tsrx`, `.ts`, and `.js` only
+(a `.tsx` or `.jsx` module reports `OCTANE_STRONG_TSX_MODULE`); render lists
+with keyed `@for` and stable item IDs, never position keys. DOM suppression props
 and Octane compatibility imports (`flushSync`, `unstable_batchedUpdates`,
 `StrictMode`) are errors. Native text `onChange` warnings become errors.
 Strong DOM JSX requires `dangerouslySetInnerHTML={trustHTML(trustedString)}`;
 `trustHTML` marks trust and does not sanitize. Strong `.tsrx` selects branded JSX
-types automatically; plain TypeScript `.tsx` needs `jsxImportSource: octane/strong`.
+types automatically.
 
 In a module with `"use strong"` or application-wide Strong enabled, reading a
 `useRef` object's `current` while rendering is a compiler error
@@ -67,8 +71,11 @@ can read scheduled state that differs from the render snapshot. Reading a
 reassigned module-scope `let` or `var` during render is an error too
 (`OCTANE_STRONG_RENDER_MODULE_STATE_READ`), since the variable can change
 without a witnessed render input. Pass the ref directly to a `ref` prop and
-render from the state tuple's first member. Move changing module values into
-state or context, or pass an immutable snapshot as a prop. Read the ref or call
+render from the state tuple's first member. Create a value once with
+`useLazyRef(() => create())` instead of React's `if (ref.current === null)`
+initialization, and render from a DOM measurement with `useLayoutSnapshot`.
+Move changing module values into state or context, or pass an immutable
+snapshot as a prop. Read the ref or call
 the getter in an event, effect cleanup, Effect Event, or deferred callback;
 effect setup may read refs attached to elements.
 Compatibility modules keep their existing behavior.
@@ -86,11 +93,14 @@ values still have to satisfy the render-snapshot contract.
 
 Use `useSyncExternalStore` with a server snapshot for changing browser state;
 browser reads inside its snapshot callbacks remain legal. Events, effects,
-deferred callbacks, and lazy `useState` or `useReducer` initializers may also
-read browser state. Lazy initialization still runs during server rendering:
-guard unavailable browser APIs there and ensure server and client initial
-output agrees. A guard in an ordinary render calculation still reads ambient
-state and is rejected.
+deferred callbacks, lazy `useState` or `useReducer` initializers, and
+`useLazyRef` factories may also read browser state. Lazy initialization still
+runs during server rendering: guard unavailable browser APIs there and ensure
+server and client initial output agrees. A guard in an ordinary render
+calculation still reads ambient state and is rejected.
+
+Look up any `OCTANE_STRONG_*` code with the `octane_strong_explain` tool, and
+follow the `migrate-to-strong` skill to move a module or app to Strong mode.
 
 ## Controlled inputs match React — on native events
 

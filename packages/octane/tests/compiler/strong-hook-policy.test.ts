@@ -6,7 +6,6 @@ import { compileToVolarMappings } from '../../src/compiler/volar.js';
 const EXPLICIT = 'OCTANE_STRONG_EXPLICIT_DEPENDENCIES';
 const REDUNDANT = EXPLICIT;
 const EVERY_RENDER = 'OCTANE_STRONG_UNTRACKED_EFFECT';
-const MANUAL_MEMO = 'OCTANE_STRONG_MANUAL_MEMO';
 const app = (
 	setup: string,
 	output = '<div />',
@@ -39,15 +38,49 @@ describe('Strong compiler-owned hook policies', () => {
 		},
 	);
 
+	it.each(['useMemo', 'useCallback'])(
+		'leaves %s dependency control to the author without Strong diagnostics',
+		(hook) => {
+			for (const deps of [
+				'',
+				', undefined',
+				', [props.value]',
+				', [props.revision]',
+				', []',
+				', props.dependencies',
+				', null',
+			]) {
+				const source = strong(
+					app(
+						`const value = ${hook}(() => props.value * 2${deps});`,
+						'<span>{String(value)}</span>',
+					),
+				);
+				for (const options of [{}, { dev: true }, { mode: 'server' }]) {
+					expect(compile(source, '/src/App.tsrx', options as any).diagnostics).toEqual([]);
+				}
+				expect(compileToVolarMappings(source, '/src/App.tsrx').diagnostics).toEqual([]);
+			}
+		},
+	);
+
 	it.each([
-		'useMemo(() => props.value * 2)',
-		'useMemo(() => props.value * 2, [props.value])',
-		'useCallback(() => props.value)',
-		'useCallback(() => props.value, [])',
-	])('rejects manual caching with %s', (call) => {
-		const source = app(`const value = ${call};`);
-		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
-		expect(() => compile(strong(source), '/src/App.tsrx')).toThrow(MANUAL_MEMO);
+		["import { useMemo as memo } from 'octane';", 'memo'],
+		["import * as Octane from 'octane';", 'Octane.useMemo'],
+		["import * as Octane from 'octane'; const { useMemo: memo } = Octane;", 'memo'],
+		["import { useMemo } from 'octane/server';", 'useMemo'],
+		["import { useCallback as callback } from 'octane';", 'callback'],
+		["import * as Octane from 'octane';", 'Octane.useCallback'],
+		["import * as Octane from 'octane'; const { useCallback: callback } = Octane;", 'callback'],
+		["import { useCallback } from 'octane/server';", 'useCallback'],
+		["import { useCallback } from 'octane';", 'useCallback?.'],
+		["import * as Octane from 'octane';", 'Octane?.useCallback'],
+	])('accepts manual memo dependencies through recognized bindings: %s', (imports, callee) => {
+		const source = strong(`${imports}
+export function useExample(props) { return ${callee}(() => props.value, [props.revision]); }`);
+		expect(compile(source, '/src/useExample.tsrx').diagnostics).toEqual([]);
+		expect(slotHooks(source, '/src/useExample.ts')?.diagnostics ?? []).toEqual([]);
+		expect(compileToVolarMappings(source, '/src/useExample.tsrx').diagnostics).toEqual([]);
 	});
 
 	it.each([
@@ -59,9 +92,7 @@ describe('Strong compiler-owned hook policies', () => {
 		'const event = useEffectEvent(() => console.log(props.value)); useEffect(() => { event(); }, []);',
 		'const ref = useRef(null); useEffect(() => { console.log(ref.current, props.value); }, [ref, props.value]);',
 	])('reports equivalent explicit dependencies as a non-fatal redundancy hint', (setup) => {
-		// Effect setup may read refs attached to an element, not value refs.
-		const output = setup.includes('useRef') ? '<div ref={ref} />' : undefined;
-		const result = compile(strong(app(setup, output)), '/src/App.tsrx');
+		const result = compile(strong(app(setup)), '/src/App.tsrx');
 		expect(result.diagnostics).toEqual(
 			expect.arrayContaining([expect.objectContaining({ code: REDUNDANT, severity: 'hint' })]),
 		);
@@ -149,9 +180,9 @@ export function App(props) @{
 				`${imports} export function useLog(props) { ${callee}(() => console.log(props.value), ${dependencies}); }`,
 			);
 			for (const options of [{}, { dev: true }, { mode: 'server' }])
-				expect(() => compile(source, '/src/useLog.tsx', options as any)).not.toThrow();
+				expect(() => compile(source, '/src/useLog.tsrx', options as any)).not.toThrow();
 			expect(() => slotHooks(source, '/src/useLog.ts')).not.toThrow();
-			expect(compileToVolarMappings(source, '/src/useLog.tsx').diagnostics).toEqual([]);
+			expect(compileToVolarMappings(source, '/src/useLog.tsrx').diagnostics).toEqual([]);
 		}
 	});
 
@@ -160,9 +191,9 @@ export function App(props) @{
 		'const undefined = []; export function useLog(props) { useEffect(() => console.log(props.value), (undefined as any)); }',
 	])('retains explicit policy for a shadowed undefined binding', (declaration) => {
 		const source = strong(`import { useEffect } from 'octane'; ${declaration}`);
-		expect(() => compile(source, '/src/useLog.tsx')).toThrow(EXPLICIT);
+		expect(() => compile(source, '/src/useLog.tsrx')).toThrow(EXPLICIT);
 		expect(() => slotHooks(source, '/src/useLog.ts')).toThrow(EXPLICIT);
-		expect(compileToVolarMappings(source, '/src/useLog.tsx').diagnostics).toEqual(
+		expect(compileToVolarMappings(source, '/src/useLog.tsrx').diagnostics).toEqual(
 			expect.arrayContaining([expect.objectContaining({ code: EXPLICIT })]),
 		);
 	});
@@ -191,10 +222,43 @@ export function App(props) @{
 		);
 	});
 
-	it('enforces policies in plain TypeScript and TSX', () => {
+	// Compatibility modules infer `null` here and run the hook every render.
+	it.each([
+		'useEffect(() => console.log(prefix)); const prefix = props.prefix;',
+		'useEffect(() => console.log(prefix), undefined); const prefix = props.prefix;',
+		'useLayoutEffect(() => console.log(prefix)); var prefix = props.prefix;',
+		'useImperativeHandle(props.ref, () => ({ prefix })); const prefix = props.prefix;',
+	])('rejects an omitted list that reads a later declaration: %s', (setup) => {
+		const source = app(setup);
+		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
+		expect(() => compile(strong(source), '/src/App.tsrx')).toThrow(
+			/UNTRACKED_EFFECT\] Strong mode does not allow \w+ to read `prefix` before its declaration/,
+		);
+		const reordered = strong(app(setup.replace(/^(.*?;) (.*)$/, '$2 $1')));
+		expect(() => compile(reordered, '/src/App.tsrx')).not.toThrow();
+	});
+
+	it('rejects an omitted list that reads a variable assigned after the call', () => {
+		const setup = 'let label = props.a; useEffect(() => console.log(label)); label = props.b;';
+		expect(() => compile(app(setup), '/src/App.tsrx')).not.toThrow();
+		expect(() => compile(strong(app(setup)), '/src/App.tsrx')).toThrow(
+			/UNTRACKED_EFFECT\] Strong mode does not allow useEffect to read `label` while the component assigns it after the call/,
+		);
+		const assignedFirst =
+			'let label = props.a; label = props.b; useEffect(() => console.log(label));';
+		expect(() => compile(strong(app(assignedFirst)), '/src/App.tsrx')).not.toThrow();
+	});
+
+	it('rejects a later declaration read by a plain TypeScript hook', () => {
+		const source = `"use strong"; import { useEffect } from 'octane'; export function useLog(value: string) { useEffect(() => console.log(label)); const label = value.trim(); }`;
+		expect(() => slotHooks(source, '/src/useLog.ts')).toThrow(EVERY_RENDER);
+		expect(() => compile(source, '/src/useLog.tsrx')).toThrow(EVERY_RENDER);
+	});
+
+	it('enforces policies in plain TypeScript and .tsrx', () => {
 		const source = `"use strong"; import { useEffect } from 'octane'; export function useLog(value: string) { useEffect(() => console.log(value), []); }`;
 		expect(() => slotHooks(source, '/src/useLog.ts')).toThrow(EXPLICIT);
-		expect(() => compile(source, '/src/useLog.tsx')).toThrow(EXPLICIT);
+		expect(() => compile(source, '/src/useLog.tsrx')).toThrow(EXPLICIT);
 	});
 
 	it.each([{ mode: 'client' }, { mode: 'server' }, { dev: true }, { hmr: true }])(
@@ -223,17 +287,18 @@ export function App(props) @{
 		const result = slotHooks(source, '/src/useOptions.ts');
 		expect(result?.code.startsWith('#!/usr/bin/env node')).toBe(true);
 	});
-	it('rejects manually managed slots only when a declaration needs a generated cache', () => {
-		const source = `"use strong"; import { useEffect } from 'octane'; export function useOptions(value: string) { const options = { value }; useEffect(() => console.log(options)); }`;
-		expect(() => slotHooks(source, '/src/useOptions.ts', { manualSlots: true })).toThrow(
-			'OCTANE_STRONG_AUTOMATIC_MEMO_UNSUPPORTED',
-		);
-	});
+	it.each([false, true])(
+		'rejects generated caches with manual slots (inline=%s)',
+		(inlineHookMemo) => {
+			const source = `"use strong"; import { useEffect } from 'octane'; export function useOptions(value: string) { const options = { value }; useEffect(() => console.log(options)); }`;
+			expect(() =>
+				slotHooks(source, '/src/useOptions.ts', { manualSlots: true, inlineHookMemo }),
+			).toThrow('OCTANE_STRONG_AUTOMATIC_MEMO_UNSUPPORTED');
+		},
+	);
 
 	it.each([
-		['', 'useMemo(() => props.value)', MANUAL_MEMO],
 		['', 'useEffect(() => console.log(props.value), [])', EXPLICIT],
-		["import { useMemo } from 'octane/server';", 'useMemo(() => props.value)', MANUAL_MEMO],
 		[
 			"import * as Octane from 'octane/server'; const {useEffect: effect}=Octane;",
 			'effect(() => console.log(props.value), [])',
@@ -248,22 +313,15 @@ export function App(props) @{
 	});
 
 	it.each([
-		["import { useMemo } from 'octane';", 'useMemo?.(() => props.value)', MANUAL_MEMO],
 		[
 			"import { useEffect } from 'octane';",
 			'useEffect?.(() => console.log(props.value), [])',
 			EXPLICIT,
 		],
-		["import * as Octane from 'octane';", 'Octane?.useMemo(() => props.value)', MANUAL_MEMO],
 		[
 			"import * as Octane from 'octane';",
 			'Octane.useEffect?.(() => console.log(props.value), [])',
 			EXPLICIT,
-		],
-		[
-			"import * as Octane from 'octane'; const { useMemo } = Octane;",
-			'useMemo(() => props.value)',
-			MANUAL_MEMO,
 		],
 		[
 			"import * as Octane from 'octane'; const { useEffect: effect } = Octane;",
@@ -275,10 +333,10 @@ export function App(props) @{
 		(imports, call, code) => {
 			const setup = `${imports} export function useExample(props) { const result = ${call}; return result; }`;
 			const source = strong(setup);
-			expect(() => compile(setup, '/src/useExample.tsx')).not.toThrow();
-			expect(() => compile(source, '/src/useExample.tsx')).toThrow(code);
+			expect(() => compile(setup, '/src/useExample.tsrx')).not.toThrow();
+			expect(() => compile(source, '/src/useExample.tsrx')).toThrow(code);
 			expect(() => slotHooks(source, '/src/useExample.ts')).toThrow(code);
-			expect(compileToVolarMappings(source, '/src/useExample.tsx').diagnostics).toEqual(
+			expect(compileToVolarMappings(source, '/src/useExample.tsrx').diagnostics).toEqual(
 				expect.arrayContaining([expect.objectContaining({ code })]),
 			);
 		},

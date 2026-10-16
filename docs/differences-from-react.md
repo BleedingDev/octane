@@ -118,37 +118,51 @@ change between renders:
 | `useEffectEvent` results | Omitted because Effect Events are non-reactive |
 | Imports and unreassigned module-scope `const`/`function`/`class` | Omitted as program-lifetime identities |
 | A local `const` naming one of those stable values, or a literal | Omitted |
+| A local binding initialized after the hook call, such as a later `const` or `var`, or the `const` that receives the hook's own result. Also a local variable assigned after the call, or from a nested function | No list: `null` runs the hook on every render, as an omitted array does in React. Strong mode reports it instead |
 
 A member read through a stable module binding, such as `CONFIG.mode`, is also
 omitted. Mutating such an object in place is therefore not witnessed by a
 dependency array; state that should drive rendering belongs in state, context,
 or a store rather than a module singleton.
 
-Member reads inside a conditional branch, after a possible early exit, or
-protected by exception handling preserve that protection. For one-level reads,
+Member reads inside a conditional branch, after a possible early exit,
+protected by exception handling, or skipped by an optional chain preserve that
+protection. An optional chain skips the arguments and computed keys after its
+optional link: `run?.(options.label)` and `value?.[options.key]` read
+`options` only once the receiver exists. Compiler-memoized `use()` arguments,
+including those in plain `.ts`/`.js` hook modules, and server-rendered prop
+creations apply the same optional-chain rule to their dependencies. For
+one-level reads,
 the inferred array inspects an own property descriptor: a data property tracks
 its value, while an accessor or inherited property tracks its receiver without
 invoking a getter. An absent property tracks `undefined`. Failed reflection
 probes track the receiver, leaving the
 authored callback responsible for the read and its exception handling. Thus a
-guarded `props.onChange(...)` still tracks a stable own callback when the props
-container changes, while method getters stay behind their authored guard.
+guarded `props.onChange(...)` still tracks a stable own arrow callback when the
+props container changes, while method getters stay behind their authored guard.
 Null and undefined receivers use separate module-local markers, so a failed receiver
 read does not compare equal to a successful own-data read of null or undefined.
 These markers are created once per module, rather than once per probe.
-These guarded probes allocate a property descriptor; ordinary unguarded
-one-level method calls retain the allocation-free comparison below.
+These guarded probes allocate a property descriptor; unguarded one-level
+method calls read the property directly.
 
-A one-level method call tracks the value that can change between renders. The
-compiled array selects that value on each render, based on where the method
-lives:
+A one-level method call reads both the method and the receiver it passes as
+`this`. The compiled array selects the value that can change between renders
+on each render, based on the method:
 
-- An own function property tracks itself: `props.onChange(...)` tracks
-  `props.onChange`.
-- An inherited method tracks its receiver: `count.toFixed(2)` tracks `count`,
-  because `Number.prototype.toFixed` is one function for every number.
+- An own arrow function tracks itself: `props.onChange(...)` tracks
+  `props.onChange` when it is an arrow, because an arrow cannot see the
+  receiver it is called on.
+- Any other method can read `this`, so it tracks its receiver, as React
+  Compiler does for every method call. `count.toFixed(2)` tracks `count`,
+  because `Number.prototype.toFixed` is one function for every number, and
+  `source.read()` tracks `source` when `read` is an ordinary `function` or a
+  method, even if several objects share that one function.
 - An absent handler in an optional call tracks a stable `undefined`:
   `props.onReady?.()` does not re-run its hook until a handler is passed.
+
+The arrow check reads the function's source text. Where an engine does not
+expose source text, every own function tracks its receiver.
 
 Deeper calls such as `cart.items.push(x)` track their receiver path
 (`cart.items`), unchanged.
@@ -224,6 +238,20 @@ state:
 {localFormat(row)} // Re-runs: component-local callee.
 {use(resource)} // Re-runs: hook and suspension point.
 ```
+
+Host-only TSRX children with stable refs and dependency-tracked effects can also
+reuse a parent's unchanged output region without an explicit `memo()` wrapper.
+Live imports read by the child invalidate that region when their values change.
+Effects with `null` dependencies, callback or dependency factories, render-time
+ref reads, and unsupported hooks keep the child live. This proof is specific to
+compiled TSRX bodies; returned JSX retains its existing behavior.
+
+An exported pure component carries the same proof across modules. In Vite and
+Rspack production builds, a parent in another module then skips it when its
+props are unchanged, as a parent in the same module already does. The proof covers the
+component's whole subtree: an export whose subtree renders an imported
+component without a proof, such as one that calls a hook, publishes none, and
+a cached call lapses while any live import the subtree reads changes.
 
 A call keeps its surrounding region memoizable only when the callee is an
 imported binding or an unreassigned same-module function whose body is itself a
@@ -315,7 +343,7 @@ stable live object safe across `memo`, an unchanged child boundary, or Strong
 memoization. The supported migration is to subscribe and select in compatibility
 code, then cross the Strong boundary with the selected value:
 
-```tsx
+```tsrx
 // SelectionBridge.tsrx — compatibility mode
 function SelectionBridge({ table, row }) @{
   <table.Subscribe
@@ -327,12 +355,12 @@ function SelectionBridge({ table, row }) @{
 }
 ```
 
-```tsx
+```tsrx
 // StrongSelectionRow.tsrx
 "use strong";
 
 function StrongSelectionRow({ label, selected }) @{
-  <li data-selected={selected ? '1' : '0'}>{label}</li>
+  <li data-selected={selected ? '1' : '0'}>{label as string}</li>
 }
 ```
 
@@ -368,12 +396,24 @@ onClick={() => setItems((current) => current.filter((entry) => entry.id !== item
 The first form remains correct and supported. Strong mode does not change its
 closure semantics or promise to skip its reevaluation.
 
+### Component updates
+
+Compatibility mode keeps React's rule that a child's state update never
+re-renders its parent. In Strong production client builds, a component whose
+hooks are all Octane builtins may instead render inside its caller's Block, as
+long as each `use` call reads a context the same module creates with
+`createContext`. Its hooks keep their own state, effects, and cleanup order, but
+its update re-renders the nearest enclosing component that owns a Block, so that
+component's body runs again. Strong render purity makes the extra evaluation
+unobservable, and effects still run only when their inferred dependencies change.
+An imported component renders that way only when both modules are Strong.
+
 ### Local mutation and retained rows
 
 Mutation of fresh render-local data is supported when it finishes before that
 data escapes. A plain JavaScript loop has normal sequential JavaScript semantics:
 
-```tsx
+```tsrx
 function Labels({ items }) @{
   const labels = [];
   for (const item of items) labels.push(item.label);
@@ -387,7 +427,7 @@ the row would make its output depend on which other rows happened to run and in
 what order. Strong reports that shape as
 `OCTANE_STRONG_RETAINED_ROW_MUTATION`:
 
-```tsx
+```tsrx
 let position = 0;
 @for (const item of items; key item.id) {
   position++; // Strong compile error: shared across retained rows.
@@ -399,7 +439,7 @@ Use setup to build a complete value before it escapes, keep mutable scratch data
 inside one row, or use the directive's index binding when position is the desired
 input:
 
-```tsx
+```tsrx
 @for (const item of items; index position; key item.id) {
   <li>{String(position + 1)}</li>
 }
@@ -419,7 +459,10 @@ let freshLabels = formatRows(rows); // Not cached: `let` is an escape hatch.
 
 An eligible `const` keeps the same identity until its tracked component-local
 inputs change. This lets a region key on the identity of a derived value instead
-of seeing a new array or object on every render.
+of seeing a new array or object on every render. Caching follows a chain: in
+`const labels = formatRows(rows); const view = wrapRows(labels);` with only
+`view` in the template, `labels` is cached too, so `view` is rebuilt only when
+`rows` changes.
 
 The same callee rule governs declaration caching. In compatibility mode, the virtualizer call must stay
 live because its window can move while the virtualizer object keeps the same
@@ -517,28 +560,39 @@ The tuple also supports the same optional latest-value getter as `useState`.
 
 ## Optional Strong mode
 
-Strong modules also require inferred dependencies, compiler-owned memoization,
-keyed template lists in `.tsrx`, and branded HTML values. Standard keyed JSX
-mapping remains supported in `.tsx`. See the
-[Strong compiler checks and migration table](./strong-compiler-checks.md).
+Strong modules infer effect dependencies and cache eligible declarations. They
+also require keyed `@for` lists and branded HTML values. Strong compiles `.tsrx`,
+`.ts`, and `.js` modules; a `.tsx` or `.jsx` module that it reaches reports
+`OCTANE_STRONG_TSX_MODULE`, because its JSX lowers to element descriptors
+instead of compiled templates. See the
+[Strong compiler checks and migration table](./strong-compiler-checks.md), and the
+[Strong mode guide](https://octanejs.dev/docs/strong-mode) for adopting it in an
+existing app.
 
 Strong mode opts into the immutable render-snapshot contract above and adds
 compile-time checks for detectable violations. Opt into one module with a
 directive before its imports:
 
-```tsx
+```tsrx
 "use strong";
 
 import { useLinkedState } from 'octane';
 ```
 
 Alternatively, enable it across application-owned modules with
-`compiler: { strong: true }` in `octane.config.ts`. Installed dependencies stay
+`compiler: { strong: true }` in `octane.config.ts`, after converting the
+application's `.tsx` and `.jsx` modules to `.tsrx`. Installed dependencies stay
 in compatibility mode unless their own source opts in.
 
 A Strong module cannot call a state updater during render or synchronously while
 setting up an effect, and it cannot read or assign to a `useRef` object's
-`current` during render (`OCTANE_STRONG_RENDER_REF_READ` for reads). It also
+`current` during render (`OCTANE_STRONG_RENDER_REF_READ` for reads,
+`OCTANE_STRONG_RENDER_REF_WRITE` for writes). React's lazy initialization,
+`if (ref.current === null) ref.current = create()`, does both: create the value
+once with `useLazyRef(() => create())` instead. A layout effect that copies a DOM
+measurement into state is a synchronous update in effect setup
+(`OCTANE_STRONG_EFFECT_STATE_UPDATE`): render the measurement from
+`useLayoutSnapshot(measure, { initial })` instead. It also
 rejects calling a known third-tuple state getter during render
 (`OCTANE_STRONG_RENDER_STATE_GETTER_CALL`): the getter can observe scheduled
 state that differs from the render snapshot. Read the state tuple's first member
@@ -549,8 +603,14 @@ context, or pass an immutable snapshot as a prop. The checks follow provable
 synchronous calls through local callbacks and `useEffectEvent`. Calling a statically
 known Effect Event during render or including it in an explicit hook dependency
 list is also a compile error. Strong modules use normal const declarations for
-automatic memoization. Manual memo hooks and non-equivalent explicit dependencies
-are errors; equivalent arrays keep their behavior and produce a hint.
+automatic memoization. Non-equivalent explicit dependencies on effects or
+imperative handles are errors; equivalent arrays keep their behavior and produce
+a hint. `useMemo` and `useCallback` support manual dependency control.
+Explicit arrays are used as written, omitted or `undefined` dependencies are
+inferred, and `null` recomputes the memo or refreshes the callback on each
+render. A `useMemo` factory still runs during render and must obey Strong's
+purity and snapshot rules. Creating a callback does not execute its body;
+calling it during render remains subject to those rules.
 
 Inside an async function, code after a guaranteed `await` is not synchronous. In
 effect work, an `await` that resumes without waiting, such as `await null`, does
@@ -576,10 +636,14 @@ non-idempotent globals such as `Date.now()`, `Math.random()`, and
 `crypto.randomUUID()` (`OCTANE_STRONG_RENDER_IMPURE_CALL`), including inside
 callbacks that known array methods run synchronously. These checks follow
 supported aliases and synchronous helpers; they do not prove arbitrary method
-bodies or imported code pure. Lazy state initialization may obtain an initial
-timestamp or random value. Locale- and time-zone-dependent formatting of a
+bodies or imported code pure. Lazy state and `useLazyRef` initialization may
+obtain an initial timestamp or random value. Locale- and time-zone-dependent formatting of a
 provable `Date` or an `Intl` service during render reports
 `OCTANE_STRONG_RENDER_LOCALE_FORMAT`; pass an explicit locale and `timeZone`.
+Scheduling work during render with `setTimeout`, `setInterval`,
+`queueMicrotask`, `requestAnimationFrame`, or `requestIdleCallback` reports
+`OCTANE_STRONG_RENDER_SIDE_EFFECT`, including in a lazy initializer; schedule
+from an event handler or an effect.
 State values stay immutable outside render too
 (`OCTANE_STRONG_SNAPSHOT_MUTATION`), updaters and reducers follow the render
 checks because Octane may replay them (`OCTANE_STRONG_IMPURE_UPDATER`), and a
@@ -601,8 +665,9 @@ imports. Those values still have to satisfy the render-snapshot contract.
 
 For changing browser state, use `useSyncExternalStore` with a server snapshot
 and render its returned snapshot. Browser reads in its snapshot callbacks,
-events, effects, and deferred callbacks remain supported. Lazy `useState` and
-`useReducer` initializers may also read browser state for an initial value. They
+events, effects, and deferred callbacks remain supported. Lazy `useState`,
+`useReducer`, and `useLazyRef` initializers may also read browser state for an
+initial value. They
 still run during server rendering: guard unavailable browser APIs and ensure the
 server and client agree on initial output. A `typeof window` guard inside an
 ordinary render calculation does not make the calculation snapshot-safe.
@@ -711,6 +776,10 @@ as data resolves it in the inspecting caller's current scope; it does not enter
 a provider or boundary that has not rendered. Static JSX, explicit
 `createElement(...)` calls, and event or render-prop callbacks retain ordinary
 JavaScript evaluation semantics.
+
+Strong DOM templates have one explicit render-only form: an inline `@{ ... }`
+block passed directly as a component prop. It produces a compiled body rather
+than an element descriptor; see [Named render bodies](#named-render-bodies).
 
 ### Values that exist only during the building call
 
@@ -832,6 +901,44 @@ For a function-as-child API that also accepts ordinary template children, use
 `typeof children === 'function' && !isChildrenBlock(children)` before invoking a
 render prop. A compiled children body must be rendered through Octane.
 
+### Named render bodies
+
+In Strong-mode DOM templates, a block passed directly to a component prop is
+also a render-only body, on both the client and server:
+
+```tsrx
+"use strong";
+
+function Slot(props) @{
+  <section>{props.content}</section>
+}
+
+function Example(props) @{
+  <Slot content={@{ <span>{props.label as string}</span> }} />
+}
+```
+
+This form needs no authored `() =>` wrapper and constructs no element descriptor
+for the block itself. `isChildrenBlock(content)` identifies it. Render it with
+`{content}`; do not call it as a callback or inspect it with `Children`,
+`isValidElement`, or `cloneElement`. Ordinary JSX such as
+`content={<span />}` retains its descriptor contract.
+
+The block's setup, hooks, and output run when the receiving component renders
+it, under that insertion's context. Each insertion owns independent state and
+cleanup. Updating captures preserves the insertion; switching to a different
+authored body replaces it. Strong's immutable snapshot rules still apply.
+Production memoization can retain a simple body when its captured own data
+properties are unchanged. Dependency probes leave accessors unread and compare
+their receiver instead. Setup, conditional reads, and deeper property paths
+conservatively retain ordinary rendering.
+
+This contract applies to direct block attributes on compiled template component
+calls. Blocks stored in variables or object properties, returned from callbacks,
+passed to portals, or compiled outside Strong mode keep their existing behavior.
+Universal renderers are unchanged. Use an ordinary function for an API that
+invokes a callback itself.
+
 ### Template branch identity
 
 Each `@if`/`@else`, `@switch` arm, and template-lowered conditional arm owns a
@@ -922,10 +1029,11 @@ What differs is the event API and synthesis layer:
 - `onFocus`/`onBlur` use the browser's bubbling `focusin`/`focusout` events,
   including capture variants; the event object retains that native type.
 - Removing a focused host can make the browser dispatch `focusout` while the
-  removal is in progress. The removed hosts, and any host whose component has
-  unmounted, start no handler for it, but still-mounted ancestors receive it.
-  React suppresses every event during its commit, including those ancestors'
-  handlers.
+  removal is in progress, and so can a deletion cleanup that moves focus. Every
+  host the deletion removes starts no handler for it, including hosts of child
+  components the teardown has not reached yet, but still-mounted ancestors
+  receive it. React suppresses every event during its commit, including those
+  ancestors' handlers.
 - There are no synthetic `onChange`/`onBeforeInput`/`onSelect` polyfills — use
   the native events (`onInput` etc.).
 - Root listeners are non-passive. `preventDefault()` in `onWheel` or
@@ -948,7 +1056,13 @@ and after discrete events (rejected edits snap back), IME composition is
 respected, radio groups restore as a group, `<select value>` projects options
 (single + multiple), and `defaultValue`/`defaultChecked` are the uncontrolled
 escape hatch. Hydration adopts pre-hydration user input, then the first
-commit/discrete event reasserts. `<textarea>` with children AND a
+commit/discrete event reasserts. As in React 19, a value or checked state the
+client renders differently from the server becomes the control's reset baseline
+(the `value` attribute, a textarea's content, the `checked` attribute). An
+unedited input or textarea follows it, and a checkbox or radio keeps its live
+state. React 19 replaces a pre-hydration textarea edit with the client's content
+even when server and client agree; Octane keeps the edit, as it does in an
+input. `<textarea>` with children AND a
 `value`/`defaultValue` prop is a compile error (the prop owns the content).
 
 Uncontrolled `defaultValue` updates change an input or textarea's reset baseline
@@ -1026,8 +1140,15 @@ controlled state and radio cousins.
 
 Form **actions**
 (`<form action={fn}>`, `useActionState`, `useFormStatus`, `useOptimistic`,
-`requestFormReset`, auto-reset) match React 19; an action error does **not**
-cancel queued dispatches (octane keeps threading).
+`requestFormReset`, auto-reset) follow React 19's commit pattern. Action results
+render at transition priority in a later host task (see the scheduler section
+below), so a backlog of queued dispatches that settle together commits once, with
+the final state, and intermediate results never commit. A hundred synchronous
+`useActionState` dispatches commit twice, `isPending` and then the result, as in
+React. Two differences remain: an action error does **not** cancel queued
+dispatches (octane keeps threading), and every dispatch, even of a synchronous
+action, starts its action one microtask after the call, where React runs the
+first queued action synchronously.
 
 ## Attributes: native names, React's value rules
 
@@ -1313,19 +1434,103 @@ physically-moved nodes can differ.
 
 ## Scheduler: synchronous, two priorities
 
-Renders are microtask-batched and run to completion — no lanes, yields,
-time-slicing, expiration, or selective hydration. Priority changes Suspense
-behavior, not whether ordinary work is time-sliced:
+Renders run to completion — no lanes beyond the two priorities, yields,
+time-slicing, expiration, or selective hydration. Urgent renders are
+microtask-batched. Priority changes Suspense behavior, and where the render runs:
 
 ```tsx
 setPage(next); // If it suspends, show the pending fallback.
 startTransition(() => setPage(next)); // Keep the previous content while pending.
 ```
 
+Transition-priority renders run in a later host task, never in the microtask
+checkpoint of the urgent commit before them, as React renders a transition lane in
+a Scheduler task. The browser can therefore paint that commit and deliver input
+first, and a burst of ready continuations renders once: a backlog of `useActionState`
+results, a transition started after each `await`, or the post-`await` updates of
+several Actions that settle together. Octane posts the task with
+`scheduler.postTask` where available, then `MessageChannel`, then `setTimeout`.
+Waiting there are updates inside `startTransition`, Action results, and, while an
+async Action is pending, every update made outside a delegated event, `flushSync`,
+or a commit callback, which Octane already treats as part of the Action. Three kinds
+of update stay on the microtask flush, because they announce the transition rather
+than complete it: `useTransition` and `useActionState` raising `isPending`, and
+`useOptimistic` showing a value. As React renders these cues in an urgent lane, a
+cue renders at urgent priority and without the transition's own updates, whether
+the component that holds them is the cue's own or one its render reaches. That
+render shows their previous values, and those components render them in the task.
+Because the cue is urgent, a component that suspends during it shows its boundary's
+fallback, and its commit starts no native View Transition capture. Explicit
+transition work keeps its capture when it reaches the render queue, including state
+in the same component as the cue. `isPending` falls in the transition's own
+render, as React's transition lane carries `setPending(false)`: the component that
+holds the transition's state renders the new value with `isPending` false, and a
+component whose only change is the falling edge renders in the same commit. A render
+that suspends into a hold keeps `isPending` raised. A `useOptimistic` value a
+synchronous transition showed reverts in that commit too. The falling edge is transition
+work, so it waits for the task even after an urgent update takes over the
+transition's components, or when the transition updates nothing. When `flushSync` or
+`act()` renders a cue together with the transition it announces, the cue commits
+first and the falling edge takes a later task. A cue keeps transition priority and renders the
+transition's work with it when that work is not hook state, inside a Suspense
+boundary that is holding a suspended transition, when `flushSync` drains both, or
+when the cue starts during a render, a commit, or the transition's task. An urgent
+update to a component whose transition is waiting renders it in the microtask
+flush. `flushSync` and `act()` drain both priorities.
+
+Action result rendering is task-batched; Action callback invocation is not paced.
+As in React, a callback can run synchronously during dispatch, and queued callbacks
+run as earlier Actions complete. Many already-ready callbacks doing substantial
+application work can therefore share a long checkpoint even when their resulting
+UI commits only once. The render-admission guarantee does not bound Action bodies.
+
+`useDeferredValue`'s deferred render also runs in a later host task. Urgent updates
+that arrive before the task runs only change the value it renders, so a fast typist's
+skipped values never render deferred. There is still no time-slicing: once a
+transition or deferred render starts it runs to completion, and a keystroke that
+arrives during it waits until it commits, where React would yield to handle it.
+
+Ready query and asynchronous `derived$` publications coalesce native component
+rendering in the same host-task queue. Source subscriptions, graph effects, and
+direct signal bindings still observe every publication. Plain signal writes,
+native events, lifecycle updates, and `flushSync` retain their existing timing.
+The admission change does not turn an urgent signal render into a Suspense
+transition; held native-read frames keep their existing retention policy.
+
+Successful query promise results and query/derived stream pulls share an
+approximately 5 ms host budget. Retained ready values and hydration seeds keep their synchronous
+reads. Both a pull and a ready-result publication check the same window, so many
+producers do not each receive a separate allowance. A posted sentinel resets
+that window; ready continuations wait for it when the budget is spent, then recheck their
+current producer lease. Ordered values, cancellation, and server observation
+backpressure are preserved. This is a scheduling opportunity between complete
+units, not a hard 5 ms limit: one iterator call, subscriber, render, or commit can
+itself take longer. Cold I/O lets the sentinel run between results. Buffered RPC
+and custom renderer response readers use the same window; transport chunks are
+not scheduling units.
+Independent islands instead activate at most once per document task, prioritizing
+captured input. None of these boundaries guarantees a particular next input or
+paint. The [backlog investigation](../benchmarks/scheduler-responsiveness/investigation.md)
+records browser measurements, policy comparisons, and the remaining atomic work.
+
+Even a single successful query can wait for a later host task if earlier work
+has exhausted the shared window. A synchronous `renderToString` immediately
+after its promise resolves can therefore still render the pending arm. Tests
+should await `act()` or the observable result across host tasks, rather than
+counting microtasks. Awaited `act()` drains budget-paced publications and the
+renders they schedule, for both synchronous and asynchronous callbacks.
+
+Query rejections retain prompt failure notification and failed-attempt cleanup;
+they do not wait for the shared budget. An error can therefore publish before an
+earlier-settled success that is waiting for admission. Bursts of expensive error
+subscribers or `@catch` work remain unpaced. This preserves the existing failure
+contract; the successful-publication guarantee does not bound rejection work.
+
 Native `ResizeObserver` callbacks run inside the browser's resize delivery loop.
 An ordinary microtask commit that resizes an already-delivered target can trigger
 `ResizeObserver loop completed with undelivered notifications`, even when the
-layout eventually settles. `startTransition` does not change that scheduling.
+layout eventually settles. A transition-only update renders in a later task, outside
+that loop, but an urgent update or `flushSync` still commits inside it.
 Use Octane's `createResizeObserver` when a callback updates state or writes DOM
 that can resize its observed targets:
 
@@ -1387,20 +1592,26 @@ visible primary while `isPending` remains true. `getTransitionFallbackTimeout()`
 returns `Infinity` by default; setting `Infinity` restores the no-timeout policy
 for subsequent holds.
 
-`flushSync` drains both priorities but leaves passive effects asynchronous:
+`flushSync` drains both priorities without forcing the new commit's passive
+effects. Previously queued passive work can still run before its render:
 
 ```tsx
 flushSync(() => {
   setQuery('octane');
   startTransition(() => setResults(nextResults));
 });
-// Both updates committed; passive effects still run later.
+// Both updates committed; their new passive effects remain queued.
 ```
 
-Passive effects normally run after paint, including effects queued by discrete
-events and external-store updates. A listener installed by `useEffect` can miss
-another event dispatched before that drain. Use `useLayoutEffect` when the
-subscription must be installed by the end of the commit. Passive timing is not
+Passive effects use a post-paint callback with a timer fallback, including effects
+queued by discrete events and external-store updates. This is not an after-paint
+guarantee: before beginning another render, Octane drains the previous commit's
+pending passive work. Back-to-back urgent renders or layout-triggered updates
+can therefore run passive effects before a paint. A task boundary does not
+change that ordering, and one effect callback still runs to completion.
+A listener installed by `useEffect` can miss another event dispatched before
+that drain. Use `useLayoutEffect` when the subscription must be installed by
+the end of the commit. Passive timing is not
 React's synchronous discrete-event effect timing.
 
 `root.unmount()` drains pending passive work and its passive cleanups before
@@ -1410,7 +1621,7 @@ Octane also skips React's extra same-value render after a previous state change.
 If a component body does run, its children can render even when the final state
 is unchanged; do not depend on React's incidental render counts. Updates across
 roots share a microtask wave, and an `await` continuation can observe the commit
-after `setState(); await 0`. Cross-component render-time updates join the current
+after an urgent `setState(); await 0`. A transition commits in a later host task. Cross-component render-time updates join the current
 drain. Finite layout-effect cascades complete before DOM mutation observers run,
 including commits started by the scheduler. `flushSync` drains them before returning.
 
@@ -1423,11 +1634,12 @@ before-mutation ref-detach phase.
 
 Other consequences:
 
-- Priority (`urgent` vs `transition`) governs Suspense hold semantics, not
-  general commit deferral.
+- Priority (`urgent` vs `transition`) governs Suspense hold semantics and
+  whether a render waits for a later host task (above), not time-slicing.
 - Fallback-visible boundaries whose retries fully stage reveal together,
   including refs and layout effects.
-- Retry-only Suspense reveals follow React's shared 300ms fallback window.
+- Retry-only Suspense reveals use a shared 100ms fallback window (React uses
+  300ms). Ready content can therefore appear sooner after a fallback is shown.
   Showing or filling a fallback advances the window, and retries wait if more
   than 10ms remains. Urgent updates and active `act()` scopes bypass this delay.
   A committed fallback inside hidden Activity contributes to the window;
@@ -1516,6 +1728,17 @@ and remains sequential.
 - **Creations are memoized per call site**: `use(fetchA(id))` compiles to a
   slot-keyed memo with member-path deps (`[fetchA, id]`), so replays never mint
   fresh promises and refetch happens exactly when inputs change.
+- **A one-level method call is tracked by where its method lives**:
+  `use(load(count.toFixed(1)))` tracks `count`, because an inherited method
+  is one function for every receiver. A getter also tracks its receiver. An own
+  function tracks only itself, whether it is an arrow or not, so
+  `use(props.load(id))` keeps its request when the parent rebuilds `props`
+  around the same `load`. Inferred hook dependencies differ here: an own
+  non-arrow function there tracks its receiver. A `use()` memo keyed on a
+  rebuilt `props` would start a fresh request on every parent render and every
+  boundary retry. So an own `function` shared by several objects, called as
+  `source.read()`, is not witnessed when only `source` changes. Pass the value
+  it reads as an argument instead.
 - **Fetch trees warm across components**: a suspended body prefetches
   descendants whose reachability and props are provably independent of the
   suspended data (compiled `__warm` plans, depth-capped recursion), so a nested
@@ -1527,6 +1750,9 @@ and remains sequential.
   creates a fresh promise for a slot that already holds one reuses the stored
   thenable ("uncached promise" dev warning), and a replay that discovers a new
   pending `use()` behind a data dependency gets a dev waterfall diagnostic.
+  A component with an update queued since the suspended attempt, and everything
+  it renders, renders that update instead of replaying, so a changed condition
+  cannot hand a shifted `use()` call another call's thenable.
 
 Composition is regression-pinned in `benchmarks/async-composition`, whose
 dashboard fixture reads eight resources — seven independent, one truly dependent
@@ -1685,13 +1911,33 @@ error-boundary lifecycles. Catch fallbacks mount fresh nodes (like React's
 `forceUnmountCurrentAndReconcile`); deletion-phase and ref-detach errors route
 to the enclosing boundary.
 
+Directives are also renderable values. A module-level arrow can return a
+boundary directly, with or without parentheses or an explicit `return`:
+
+```tsx
+export const Content = (props: { promise: Promise<string> }) => @try {
+  const message = use(props.promise);
+  <p>{message as string}</p>
+} @pending {
+  <p>Loading…</p>
+} @catch (error) {
+  <p>{String(error)}</p>
+};
+```
+
+Render that function as `<Content promise={promise} />`. An assigned boundary
+value, `const content = @try { … } @catch (error) { … };`, renders as `{content}`.
+The function owns its directive helpers, so an `@{ … }` body is optional for
+these return forms.
+
 React 19's root error-callback options are supported on `createRoot` and
 `hydrateRoot`: `onCaughtError` (a boundary claimed an error from the render,
 passive-effect, or ref-attach channel), `onUncaughtError` (no boundary claimed
 it — providing the callback replaces the default report, which otherwise
 rethrows render errors out of the flush and `console.error`s effect-channel
 errors; the failed root's tree still unmounts), and `onRecoverableError`
-(hydration recovered from a structural mismatch — see the hydration section).
+(a hydration mismatch made the nearest fallback boundary, or the root, discard
+its server DOM and render on the client — see the hydration section).
 Each callback receives only the error: there is no `errorInfo`/`componentStack`
 second argument, matching the documented SSR `onError` shape (owner stacks are
 not part of Octane's API). Deletion-phase teardown errors (effect cleanups and
@@ -1719,6 +1965,16 @@ function Search({ ref }) @{
 
 A ref may be a callback, a `{ current }` object, or an array of refs as shown
 above.
+
+Octane also supports lazy initialization of a mutable ref with
+`useLazyRef(() => createValue())`. Plain `useRef(callback)` retains React-compatible
+behavior and stores the callback itself. The lazy factory runs during render, so
+abandoned work, retries, remounts, and separate server and hydration renders can
+invoke it again; keep it free of side effects and use an effect for resources
+requiring cleanup. Strong mode checks the factory like a lazy `useState`
+initializer: it may read a clock, randomness, or browser state for the initial
+value, but it may not schedule work. The experimental Valdi writer's existing
+adapter ABI does not support this hook.
 
 ### Fragment refs
 
@@ -1839,32 +2095,90 @@ the failure; its owner must choose the transport response.
 
 ### Hydration
 
-Attribute mismatches recover to the **client** value; React keeps the server
-value. Octane warns and rebuilds a mismatched subtree in place rather than
-throwing.
+Browser translation and other external tools replacing nodes inside
+framework-owned content are unsupported, including after hydration. Applications
+should keep localization under their control and opt owned content out of browser
+translation in the initial HTML; see [DOM ownership and translation opt-outs](./deferred-hydration.md#compiled-presentation-on-existing-dom).
 
-`hydrateRoot`'s `onRecoverableError` option fires (dev AND prod) after a
-structural or text recovery — a rebuilt subtree, corrected text, or a discarded
-stale server range —
-coalesced to one report per root per microtask burst. Like React, which reports
-recoverable errors when a render commits, a root's hydrating attempt reports
-only if it commits. One that suspends leaves the server content untouched until
-a later attempt commits and reports the mismatch once; one that ends in an
-uncaught error reports nothing for the recovery it discarded. A suspended
-attempt also leaves the server's text and style values as rendered, so the
-attempt that commits reports each corrected text once and, in development, warns
-about each value mismatch once. A resolved `@try` arm does the same while its
-first hydrating attempt is suspended: its server content, text and attribute
-values included, stays as the server rendered it, and the attempt that commits
-rebuilds and reports each mismatch once. Any other boundary that retries
-hydration after suspending does not report content that an earlier attempt
-already rebuilt. A try body that throws to its `@catch` arm or `<ErrorBoundary>`
-fallback reports nothing for what it adopted before it threw, in development or
-production: the catch arm replaces that content, and where the server's body
-threw the same way, the server rendered its catch arm there. Octane recovers per site
-rather than client-rendering a whole boundary, so attribute-level value patches
-do not report: production React does not detect those at all, and reporting
-Octane's extra detection would make the channel incomparable.
+Mismatches are handled as React 19 handles them. Nothing is repaired in
+place. When the server's HTML differs structurally from the client render (a
+different tag, a missing node, or server content the client renders nothing
+for) or its text differs, the nearest fallback boundary discards its server
+DOM and renders on the client. The boundaries are Suspense and `@try` regions
+the server rendered with boundary markers, `<Hydrate>` islands, and, as the
+last resort, the root. Sibling boundaries keep hydrating. `onRecoverableError`
+fires once per boundary that falls back, in development and production, and a
+root's hydrating attempt reports only if it commits. `ErrorBoundary` and
+`@catch` are not hydration boundaries.
+
+As in React:
+
+- Attributes are never patched. An adopted element keeps the server's value
+  until the client next changes it. Development logs one "won't be patched up"
+  warning per hydration pass; production compares nothing. A `<textarea>`'s
+  text takes the client's value.
+- `dangerouslySetInnerHTML` keeps the server's HTML in the same way, and
+  production compares nothing. The next render that passes an `__html` object
+  rewrites it, even with the same string.
+- Texts that match after the HTML parser's normalization (CRLF to LF,
+  stripped `\u0000` and `\uFFFD`) count as a match, and the server text stays.
+  `suppressHydrationWarning` keeps the server text one level deep. It never
+  hides a structural mismatch.
+- The root's container and `<html>`, `<head>` and `<body>` skip server
+  elements that do not match, and comments, such as ones a browser extension
+  inserted, and leave them in place, together with any server content after
+  the client's. A text node there is a mismatch.
+- A root that falls back clears its container. A `<head>` or `<body>`
+  container keeps its scripts, styles and stylesheet links. Octane has no
+  host singletons, so unlike React a `Document` or `<html>` container does
+  not keep its existing `<html>`, `<head>` and `<body>` elements, or the
+  scripts, styles and stylesheet links inside them: the client render's own
+  elements replace them. A `Document` keeps its doctype.
+- A suspension while hydrating keeps the server HTML; it never causes a
+  fallback.
+
+A boundary that falls back renders from client data. The `use()` values its
+attempt read from the server's seeds are discarded, and so is captured
+interaction intent whose target was in the discarded DOM. An early host
+binding (`adoptBindings`, a behavior root) whose server DOM lies in a
+boundary that falls back loses it: its lease ends when the fallback commits,
+its cleanup runs once, and it stops writing, even if its host was moved
+elsewhere while the boundary was pending. A boundary whose captures changed
+before it activated (a dormant `<Hydrate>` island) falls back without a
+report when its server content differs, as React reports nothing for an
+update that reaches a dehydrated boundary.
+
+Two differences are intentional. Matching React exactly would mean shipping
+and running a structural comparison of everything hydration adopts, which is
+the work compiled templates exist to avoid.
+
+First, control-flow ranges are part of the hydration protocol, as React's
+Suspense markers are part of React's. A client `@if` or `@switch` branch, or a
+catch-only `@try` or `ErrorBoundary`, whose server output has no range of its
+own is a structural mismatch and falls back, even where the elements inside
+it match; React, which has no markers for them, adopts them. (A `@try` with
+`@pending` is a Suspense boundary, so React falls back there too.) The markers
+do not record which arm rendered, so an arm whose elements match the server's
+arm adopts them, as in React.
+
+Second, development compares a template's static structure and attributes and warns
+about differences, but development-only comparisons never cause a fallback,
+so development and production adopt the same DOM. Production validates a
+template root's node type and tag, together with its dynamic binding and range
+sites, and does not walk arbitrary static descendants. Unlike React's full
+hydration walk, two static branches that share a root tag are not told apart:
+
+```html
+<!-- Server branch -->
+<span class="compact">...</span>
+
+<!-- Client branch -->
+<span class="expanded">...</span>
+```
+
+A `@try` body whose server render threw adopts the server's `@catch` arm
+rather than rendering the boundary on the client (template `@catch` also
+catches during SSR).
 
 A `<Hydrate>` boundary replays captured interaction events as constructed,
 untrusted copies that keep the captured event's `timeStamp`, including through
@@ -1895,23 +2209,6 @@ React.
 form POST requires React's server-action state serialization, which is part of
 the RSC model Octane does not implement (the matching `useActionState`
 `permalink` argument is accepted for signature parity and ignored).
-
-Production validates a template root's node type and tag, together with its
-dynamic binding and range sites. It does not walk arbitrary static descendants.
-Tag and text mismatches at inspected sites recover, but different static
-branches that share a tag may not be detected:
-
-```html
-<!-- Server branch -->
-<span class="compact">...</span>
-
-<!-- Client branch -->
-<span class="expanded">...</span>
-```
-
-Development recursively compares unambiguous static structure and attributes,
-warns, and rebuilds. It stops at dynamic holes, so unmatched static descendants
-outside an inspected range can remain. This is not React's full hydration walk.
 
 ## Hot module updates remount the edited component
 
@@ -1945,6 +2242,15 @@ Octane declines a refresh when the old and new compiler bodies use incompatible
 direct-template and returned-output layouts, or when a live block has no coherent,
 exclusively resettable DOM range. The emitted accept block then calls
 `import.meta.hot.invalidate()` for a full page reload.
+
+As with React's bundler plugins, an export other than a component reaches the
+module's importers only through them. Under Vite, the accept block invalidates
+when such an export changed or cannot be compared, which propagates the update to
+the importers. Under webpack and Rspack, a module with such exports does not
+accept its own updates, so the bundler re-executes its importers. Either way, the
+importers refresh through their own boundaries or reload the page. Universal
+renderer modules, modules that render renderer-owned regions, and `.mdx` documents
+follow the same rule.
 
 Hook slot ids are numbered per module in source order, so inserting or reordering
 a hook call shifts every later hook's key in that file and remaps its state. That

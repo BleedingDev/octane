@@ -5,6 +5,8 @@
  * owns only renderer construction, R3F-shaped root state, the Three host
  * container, and the configuration barrier before a scene may render.
  */
+'use strong';
+
 import * as THREE from 'three';
 import {
 	defineUniversalComponent,
@@ -469,6 +471,9 @@ function ensureHostRoot(internals: ThreeRootInternals<any>): void {
 	let hostRoot: UniversalRoot | null = null;
 	const environment: ThreeHostEnvironment = {
 		store: internals.store,
+		// An application root commits for its whole lifetime; keeping every accepted
+		// batch would retain each replaced props object and listener table forever.
+		recordCommits: false,
 		invalidate: () => internals.store.getState().invalidate(),
 		eventScope(priority, run) {
 			const root = hostRoot;

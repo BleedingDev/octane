@@ -2,7 +2,7 @@
 // discovery choice in the URL so header-search links and shared views agree.
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@octanejs/testing-library';
-import { RouterProvider, createMemoryHistory } from '@octanejs/tanstack-router';
+import { RouterProvider, createMemoryHistory } from '@octanejs/tanstack-router/compiled';
 import { BINDING_CATEGORIES, BINDING_COUNT } from '../src/content/bindings.ts';
 import {
 	FRAMEWORK_INTEGRATIONS,
@@ -81,7 +81,7 @@ describe('ecosystem directory', () => {
 			]),
 		);
 		expect(titles.every((title) => !title.includes(',') && !/\band\b/i.test(title))).toBe(true);
-		expect(Math.max(...BINDING_CATEGORIES.map((category) => category.packages.length))).toBe(16);
+		expect(Math.max(...BINDING_CATEGORIES.map((category) => category.packages.length))).toBe(15);
 		expect(
 			BINDING_CATEGORIES.find((category) => category.title === 'UI Utilities')?.packages.map(
 				(entry) => entry.packageName,

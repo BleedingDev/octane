@@ -20,15 +20,19 @@ import type { ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, relative } from 'node:path';
-import { encodePlaygroundHash } from '../src/lib/playground-hash.ts';
+import {
+	encodePlaygroundHash,
+	MAX_PLAYGROUND_HASH_LENGTH,
+	MAX_PLAYGROUND_SOURCE_LENGTH,
+	PLAYGROUND_SOURCE_LIMIT_ERROR,
+} from '../src/lib/playground-hash.ts';
 import { PLAYGROUND_REACT_VERSION } from '../src/lib/playground-sandbox.ts';
 import { LYNX_EXAMPLES } from '../src/content/lynx-examples.ts';
 import {
-	getFreePort,
 	spawnServer as spawnServerIn,
+	startServerOnFreePort,
 	stopServer,
 	waitForReadyState,
-	waitForServer,
 } from './support/server-process.ts';
 
 const WEBSITE = join(process.cwd(), 'website');
@@ -71,6 +75,7 @@ const ROUTES = [
 	'/docs/bindings?q=TanStack%20Router&kind=binding#binding-tanstack-router',
 	'/errors',
 	'/errors/3?args%5B%5D=%22quoted%22',
+	'/devtools',
 	'/benchmarks',
 	'/playground',
 ];
@@ -360,9 +365,6 @@ async function waitForLocatorText(
 // clipboard capture observes the public browser API without OS permissions.
 async function assertHomepageIntegrationSamples(baseUrl: string) {
 	const { page, errors } = await loadRoute(baseUrl, '/', {
-		// The sample is already visible in SSR HTML. Let the hydration entry's
-		// dynamic imports settle before the first single-shot interaction.
-		waitForNetworkIdle: true,
 		beforeNavigation: async (page) => {
 			await page.addInitScript(() => {
 				const writes: string[] = [];
@@ -968,20 +970,24 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 		// restores the ordering globalSetup used to guarantee, without putting the
 		// other ~90 projects back behind the build.
 		await waitForReadyState(inject('productionReadyFile'), 460_000);
-		DEV_PORT = await getFreePort();
 		// Fresh optimize-deps cache → prove the declared dependency graph handles
 		// a deterministic cold start without an "Outdated Optimize Dep" reload.
+		// Removed before the port is reserved, so no work sits between releasing
+		// the reservation and spawning the server that binds it.
 		rmSync(join(WEBSITE, 'node_modules/.vite'), { recursive: true, force: true });
-		server = spawnServer([
-			'exec',
-			'vite',
-			'--configLoader',
-			'runner',
-			'--port',
-			String(DEV_PORT),
-			'--strictPort',
-		]);
-		await waitForServer(server, `http://localhost:${DEV_PORT}/`, 60_000);
+		// Assigned as it spawns, so afterAll stops the child even if this hook
+		// times out while the server is still starting.
+		DEV_PORT = await startServerOnFreePort(
+			(port) =>
+				(server = spawnServer(
+					['exec', 'vite', '--configLoader', 'runner', '--port', String(port), '--strictPort'],
+					// Vitest's NODE_ENV=test disables the devtools event client. Run
+					// the dev server in the same environment as an ordinary Vite boot.
+					{ NODE_ENV: 'development' },
+				)),
+			(port) => `http://localhost:${port}/`,
+			60_000,
+		);
 		// Answering a request does not mean the client module graph is compiled:
 		// Vite transforms it on demand, and the route cases below run four-at-a-time.
 		// Warm their route-specific graphs serially under the setup budget so the
@@ -993,6 +999,32 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 			const warmup = await loadRoute(`http://localhost:${DEV_PORT}`, route, {
 				timeout: 120_000,
 			});
+			if (route === '/devtools') {
+				// The devtools client mounts after hydration from modules a cold dev
+				// server may only discover and optimize on this first visit. Vite
+				// recovers from that with a page reload, which a slow runner can miss
+				// and leave the trigger absent. Reload once, logging what the first
+				// attempt saw, and fail with the page errors if it still never appears.
+				const trigger = () =>
+					warmup.page.getByRole('button', { name: 'Open TanStack Devtools', exact: true });
+				try {
+					await trigger().waitFor({ timeout: 60_000 });
+				} catch (first) {
+					console.warn(
+						`/devtools warm-up: no trigger after 60s at ${warmup.page.url()}; reloading once.`,
+						{ error: String(first), errors: [...warmup.errors] },
+					);
+					await warmup.page.reload({ waitUntil: 'load' });
+					try {
+						await trigger().waitFor({ timeout: 60_000 });
+					} catch (second) {
+						throw new Error(
+							`/devtools never showed the TanStack Devtools trigger: ${String(second)}\n` +
+								`page errors: ${JSON.stringify(warmup.errors)}`,
+						);
+					}
+				}
+			}
 			await warmup.page.close();
 		}
 		// Covers the production-build wait above, the cold dev boot, and the warm-up.
@@ -1013,6 +1045,79 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 				const real = errors.filter((e) => !e.includes('Failed to load resource'));
 				expect(real).toEqual([]);
 				expect(main.length).toBeGreaterThan(0);
+			} finally {
+				await page.close();
+			}
+		},
+	);
+
+	it.concurrent(
+		'the devtools demo inspects live state and preserves its panel across host updates',
+		{ timeout: 60_000 },
+		async ({ expect }) => {
+			const { page, errors } = await loadRoute(`http://localhost:${DEV_PORT}`, '/devtools', {
+				viewport: { width: 1440, height: 1000 },
+			});
+			const pollOptions = { timeout: PLAYWRIGHT_ACTION_TIMEOUT };
+			try {
+				await page.getByRole('button', { name: 'Open TanStack Devtools', exact: true }).click();
+				await page.getByRole('button', { name: 'Octane', exact: true }).click();
+				const panel = page.locator('.odt-root');
+				await panel.waitFor();
+				const demo = page.locator('main:has(> h1)').filter({
+					has: page.getByRole('heading', { name: 'Octane DevTools demo', exact: true }),
+				});
+				await panel.locator('.odt-tree-row').filter({ hasText: 'Counter' }).click();
+				await demo.getByRole('button', { name: 'count: 0', exact: true }).click();
+				await demo.getByRole('button', { name: 'total += 5 (0)', exact: true }).click();
+				await expect
+					.poll(
+						async () =>
+							(await panel.locator('.odt-kv-val').allTextContents()).map((value) => value.trim()),
+						pollOptions,
+					)
+					.toEqual(['1', '5']);
+				expect(await panel.locator('.odt-tree-row').allTextContents()).not.toEqual(
+					expect.arrayContaining([expect.stringContaining('OctaneDevtoolsPanel')]),
+				);
+
+				await panel.getByRole('button', { name: 'Profiler', exact: true }).click();
+				await demo.getByRole('button', { name: 'count: 1', exact: true }).click();
+				await expect
+					.poll(() => panel.locator('.odt-commit-row').allTextContents(), pollOptions)
+					.toEqual(expect.arrayContaining([expect.stringContaining('Counter')]));
+				await page.getByRole('button', { name: 'Close TanStack Devtools', exact: true }).click();
+				await page.getByRole('button', { name: 'Open TanStack Devtools', exact: true }).click();
+				expect(await panel.locator('.odt-tab-active').textContent()).toBe('Profiler');
+
+				await panel.getByRole('button', { name: 'Transitions & Suspense', exact: true }).click();
+				await demo.locator('input').fill('199');
+				await expect
+					.poll(() => demo.locator('li').allTextContents(), pollOptions)
+					.toEqual(['Item 199']);
+				await expect
+					.poll(() => panel.locator('.odt-stat').textContent(), pollOptions)
+					.toBe('Pending transitions: 0');
+				await expect
+					.poll(() => panel.locator('.odt-boundary').allTextContents(), pollOptions)
+					.toEqual(expect.arrayContaining([expect.stringMatching(/resolved\s*Suspense/)]));
+				expect(await demo.textContent()).toContain('boundary A loaded');
+				expect(await demo.textContent()).toContain('boundary B loaded');
+
+				await panel.getByRole('button', { name: 'Performance', exact: true }).click();
+				await demo.locator('input').fill('198');
+				await expect
+					.poll(() => panel.locator('.odt-h').allTextContents(), pollOptions)
+					.toEqual([
+						'Slowest mounts (self time)',
+						'Queue-delay hotspots',
+						'Recent commit self-time',
+					]);
+
+				await page.locator('.navlinks a[href="/docs"]').click();
+				await page.locator('.prose').waitFor();
+				await panel.waitFor({ state: 'detached' });
+				expect(errors.filter((error) => !error.includes('Failed to load resource'))).toEqual([]);
 			} finally {
 				await page.close();
 			}
@@ -1380,15 +1485,17 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 
 	it.concurrent(
 		'resets a new documentation page to the top without animating from the old section',
-		async () => {
+		async ({ expect }) => {
 			const { page, errors } = await loadRoute(
 				`http://localhost:${DEV_PORT}`,
 				'/docs/build-tools',
 				{
 					waitForNetworkIdle: true,
+					viewport: { width: 1100, height: 850 },
 				},
 			);
 			try {
+				await page.evaluate(() => document.fonts.ready);
 				await page.click('.on-this-page a[href="#renderer-targets"]');
 				await page.waitForFunction(
 					() =>
@@ -1400,6 +1507,40 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 					{ timeout: PLAYWRIGHT_ACTION_TIMEOUT },
 				);
 				expect(await page.evaluate(() => scrollY)).toBeGreaterThan(0);
+				await page.waitForFunction(() => {
+					const indicator = document.querySelector('.on-this-page .toc-indicator')!;
+					const target = document.querySelector('.on-this-page a[href="#renderer-targets"]')!;
+					return (
+						Number(getComputedStyle(indicator).opacity) === 1 &&
+						Math.abs(indicator.getBoundingClientRect().top - target.getBoundingClientRect().top) < 1
+					);
+				});
+
+				// Observe the first rendered frames, not just the final scroll position:
+				// a stale bootstrap can briefly select the last row and animate the bar
+				// upward even though the router has already restored scrollY to zero.
+				await page.evaluate(() => {
+					(window as any).__octaneTocFrames = new Promise((resolve) => {
+						const frames: { active: string | null; opacity: number; offset: number }[] = [];
+						const sample = () => {
+							if (document.querySelector('.prose h1')?.textContent === 'Quick start') {
+								const indicator = document.querySelector('.on-this-page .toc-indicator')!;
+								const first = document.querySelector('.on-this-page a[href="#scaffold"]')!;
+								frames.push({
+									active:
+										document
+											.querySelector('.on-this-page a[aria-current="true"]')
+											?.getAttribute('href') ?? null,
+									opacity: Number(getComputedStyle(indicator).opacity),
+									offset: indicator.getBoundingClientRect().top - first.getBoundingClientRect().top,
+								});
+							}
+							if (frames.length === 12) resolve(frames);
+							else requestAnimationFrame(sample);
+						};
+						requestAnimationFrame(sample);
+					});
+				});
 
 				await page.click('.sidebar-link[href="/docs/quick-start"]');
 				await page.waitForFunction(
@@ -1413,6 +1554,35 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 				// The new document is already at its initial position on its first
 				// rendered frame; it must not animate upward from the old page's anchor.
 				expect(await page.evaluate(() => scrollY)).toBe(0);
+				const frames = await page.evaluate(
+					() =>
+						(window as any).__octaneTocFrames as Promise<
+							{ active: string | null; opacity: number; offset: number }[]
+						>,
+				);
+				for (const frame of frames) {
+					if (frame.active !== null) expect(frame.active).toBe('#scaffold');
+					if (frame.opacity > 0) {
+						expect(frame.active).toBe('#scaffold');
+						expect(Math.abs(frame.offset)).toBeLessThan(1);
+					}
+				}
+				expect(frames.some((frame) => frame.opacity > 0)).toBe(true);
+				// The table override forwards native table sections as template children.
+				// Exercise a fresh client mount as well as the initial SSR adoption.
+				await page.click('.sidebar-link[href="/docs/build-tools"]');
+				await page.waitForFunction(
+					() => document.querySelector('.prose h1')?.textContent === 'Build tools',
+				);
+				expect(await page.locator('.table-scroll thead th').allTextContents()).toEqual([
+					'Goal',
+					'Integration',
+				]);
+				expect(await page.locator('.table-scroll tbody td code').allTextContents()).toEqual([
+					'@octanejs/vite-plugin',
+					'@octanejs/rspack-plugin',
+					'@octanejs/rsbuild-plugin',
+				]);
 				const real = errors.filter((error) => !error.includes('Failed to load resource'));
 				expect(real).toEqual([]);
 			} finally {
@@ -1442,10 +1612,27 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 						getComputedStyle(document.querySelector('.sidebar-panel')!).visibility === 'visible',
 				);
 
-				await page.click('.on-this-page a[href="#rspack"]');
-				// The first click intentionally starts collapsing the mobile panel. Fire
-				// the competing Link activation through the DOM so this cancellation
-				// test does not race Playwright's hit-testing against that CSS animation.
+				await page.evaluate(async () => {
+					const panel = document.querySelector('.sidebar-panel')!;
+					await Promise.allSettled(panel.getAnimations().map((animation) => animation.finished));
+				});
+				// Hold the real closing animation until the replacement document wins.
+				// Separate browser actions otherwise let the close finish first on a
+				// busy runner, which exercises a completed jump rather than cancellation.
+				const closingAnimations = await page.evaluateHandle(async () => {
+					const panel = document.querySelector<HTMLElement>('.sidebar-panel')!;
+					panel.style.transitionDuration = '60s';
+					document.querySelector<HTMLElement>('.on-this-page a[href="#rspack"]')!.click();
+					await new Promise(requestAnimationFrame);
+					const animations = panel.getAnimations();
+					for (const animation of animations) animation.pause();
+					return animations;
+				});
+				expect(await closingAnimations.evaluate((animations) => animations.length)).toBeGreaterThan(
+					0,
+				);
+				expect(await page.evaluate(() => location.hash)).toBe('');
+				// The closing panel cannot be hit-tested; activate its real router Link.
 				await page.locator('.sidebar-link[href="/docs/quick-start"]').dispatchEvent('click');
 				await page.waitForFunction(
 					() =>
@@ -1455,9 +1642,14 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 					{ timeout: PLAYWRIGHT_ACTION_TIMEOUT },
 				);
 
-				// Let the superseded panel-close promise settle. It must not append the
-				// old page's section hash or move the replacement document afterward.
-				await page.waitForTimeout(400);
+				// Release the superseded close. It must not append the old page's
+				// section hash or move the replacement document afterward.
+				await closingAnimations.evaluate(async (animations) => {
+					for (const animation of animations) animation.finish();
+					await Promise.allSettled(animations.map((animation) => animation.finished));
+				});
+				await closingAnimations.dispose();
+				await page.evaluate(() => new Promise(requestAnimationFrame));
 				expect(await page.evaluate(() => location.hash)).toBe('');
 				expect(await page.evaluate(() => scrollY)).toBe(0);
 				const real = errors.filter((error) => !error.includes('Failed to load resource'));
@@ -1587,14 +1779,13 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 
 	it.concurrent(
 		'the first router event after hydration does not remount the app',
-		async () => {
-			const { page, errors } = await loadRoute(`http://localhost:${DEV_PORT}`, '/', {
-				waitForNetworkIdle: true,
-			});
+		async ({ expect }) => {
+			const { page, errors } = await loadRoute(`http://localhost:${DEV_PORT}`, '/');
 			try {
-				// Let hydrateStart's post-networkidle tail (router match commit +
-				// hydrateRoot) finish before firing the event.
-				await page.waitForTimeout(500);
+				// The hero's mount effect proves hydration committed before the event.
+				await expect
+					.poll(() => page.getByRole('log').innerText(), { timeout: PLAYWRIGHT_ACTION_TIMEOUT })
+					.toContain('count is now 0');
 				// A hash replaceState is the smallest router event: it reloads and
 				// commits a new location without changing matches. The hydrated tree
 				// must update in place — a remount would replace every DOM node (and
@@ -1633,6 +1824,77 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 		30_000,
 	);
 
+	it.concurrent.for([
+		{
+			name: 'an overlimit encoded hash',
+			hash: 'A'.repeat(MAX_PLAYGROUND_HASH_LENGTH + 1),
+			diagnostic: PLAYGROUND_SOURCE_LIMIT_ERROR,
+		},
+		{
+			name: 'an overlimit source payload',
+			hash: Buffer.from(
+				JSON.stringify({ l: 'tsrx', s: 'x'.repeat(MAX_PLAYGROUND_SOURCE_LENGTH + 1) }),
+			).toString('base64'),
+			diagnostic: PLAYGROUND_SOURCE_LIMIT_ERROR,
+		},
+		{ name: 'an unrelated malformed fragment', hash: 'not-a-workspace', diagnostic: '' },
+	])(
+		'playground handles $name before editor imports resolve and clears diagnostics after compilation',
+		{ timeout: 45_000 },
+		async ({ hash, diagnostic }, { expect }) => {
+			const page = await browser.newPage();
+			page.setDefaultTimeout(PLAYWRIGHT_ACTION_TIMEOUT);
+			const errors: string[] = [];
+			page.on('pageerror', (error) => errors.push(String(error)));
+			page.on('console', (message) => {
+				if (message.type() === 'error') errors.push(message.text());
+			});
+			let releaseEditor!: () => void;
+			const editorGate = new Promise<void>((resolve) => {
+				releaseEditor = resolve;
+			});
+			let heldImports = 0;
+			await page.route('**/src/lib/shiki-codemirror.ts*', async (route) => {
+				heldImports++;
+				await editorGate;
+				await route.continue();
+			});
+			try {
+				await page.goto(`http://localhost:${DEV_PORT}/playground#${hash}`, {
+					waitUntil: 'domcontentloaded',
+				});
+				// Hold an actual editor dependency, not a timer: the diagnostic must be
+				// visible while boot is still unable to create either CodeMirror view.
+				await expect
+					.poll(() => heldImports, { timeout: PLAYWRIGHT_ACTION_TIMEOUT })
+					.toBeGreaterThan(0);
+				await page.locator('.pg-loading').waitFor();
+				expect(await page.locator('.pg-grid.ready').count()).toBe(0);
+				if (diagnostic) {
+					await waitForLocatorText(page.locator('.pg-error'), diagnostic);
+				} else {
+					expect(await page.locator('.pg-error').count()).toBe(0);
+				}
+
+				releaseEditor();
+				await page.locator('.pg-grid.ready').waitFor();
+				const preview = page.frameLocator('iframe[title="Playground preview"]');
+				const heading = preview.locator('h2');
+				await waitForLocatorText(heading, 'Count: 0');
+				await page.locator('.pg-error').waitFor({ state: 'detached' });
+				await preview.getByRole('button', { name: 'Increment' }).click();
+				await waitForLocatorText(heading, 'Count: 1');
+				// An unrelated render must not reapply the initial URL diagnostic.
+				await page.locator('[aria-label="Result view"] button', { hasText: 'Compiled' }).click();
+				expect(await page.locator('.pg-error').count()).toBe(0);
+				expect(errors.filter((error) => !error.includes('Failed to load resource'))).toEqual([]);
+			} finally {
+				releaseEditor();
+				await page.close();
+			}
+		},
+	);
+
 	it.concurrent(
 		'playground highlights every control-flow keyword in the compiled code',
 		async () => {
@@ -1641,13 +1903,74 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 		45_000,
 	);
 
+	// Keep disk edits after the concurrent batch so other pages cannot observe
+	// a partially updated document or route graph.
+	it(
+		'hot-updates generated MDX twice while preserving the surrounding interactive page',
+		{ concurrent: false, timeout: 180_000 },
+		async () => {
+			const file = join(WEBSITE, 'src/content/home-sample.mdx');
+			const original = readFileSync(file, 'utf8');
+			const initialText = 'hooks next to output, no rules of hooks';
+			expect(original).toContain(initialText);
+			const { page, errors } = await loadRoute(`http://localhost:${DEV_PORT}`, '/', {
+				waitForNetworkIdle: true,
+			});
+			try {
+				const sample = page.locator('.hero-code-body');
+				const count = page.locator('.hero-code .demo-count');
+				await count.click();
+				await page.waitForFunction(
+					() => document.querySelector('.demo-count-value')?.textContent === '1',
+				);
+				for (const text of ['first generated template edit', 'second generated template edit']) {
+					// A loaded runner can take longer than one action budget to compile
+					// and push the update, and the file watcher can drop a write that
+					// lands right after the previous one. Rewrite the edit while waiting.
+					const edited = original.replace(initialText, text);
+					for (let attempt = 0; ; attempt++) {
+						writeFileSync(file, edited);
+						try {
+							await page.waitForFunction(
+								(expected) =>
+									document.querySelector('.hero-code-body')?.textContent?.includes(expected),
+								text,
+								{ timeout: 15_000 },
+							);
+							break;
+						} catch (error) {
+							if (attempt === 3) throw error;
+						}
+					}
+					expect(await sample.textContent()).toContain(text);
+					// Reloading or remounting the parent would reset this sibling's state.
+					expect(await count.locator('.demo-count-value').textContent()).toBe('1');
+				}
+				await count.click();
+				await page.waitForFunction(
+					() => document.querySelector('.demo-count-value')?.textContent === '2',
+				);
+				await page.reload({ waitUntil: 'networkidle' });
+				expect(await sample.textContent()).toContain('second generated template edit');
+				await count.click();
+				await page.waitForFunction(
+					() => document.querySelector('.demo-count-value')?.textContent === '1',
+				);
+				expect(errors).toEqual([]);
+			} finally {
+				writeFileSync(file, original);
+				await page.close();
+			}
+		},
+	);
+
 	// Editing a route and the router invalidates both the client and SSR module
 	// graphs. A full reload on that hot server must still hydrate through one
 	// current router graph. Keep this last: Vite's cache-busting timestamps stay
 	// in the server graph for the rest of its lifetime.
 	//
-	// `sequential` is load-bearing, not stylistic: this is the only case that
-	// edits files on disk, so it would corrupt any sibling sharing the dev server.
+	// `sequential` is load-bearing, not stylistic: edits on disk would corrupt
+	// any concurrent sibling sharing the dev server.
 	// Declared last, it runs once the concurrent batch above has drained.
 	it(
 		'hydrates cleanly on reload after HMR edits (hot server)',

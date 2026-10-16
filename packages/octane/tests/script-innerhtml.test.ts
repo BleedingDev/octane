@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { compile } from 'octane/compiler';
 import * as ServerRuntime from 'octane/server';
-import { flushSync, hydrateRoot } from '../src/index.js';
+import { flushSync, hydrateRoot, resetFloatResourceState } from '../src/index.js';
 import { loadCompiledFixtureSource, loadServerFixture } from './_server-fixture.js';
 import { collectPipeableStream } from './_server-stream.js';
 import { mount } from './_helpers.js';
@@ -341,6 +342,27 @@ describe('<script> content contract', () => {
 		);
 	});
 
+	it('rejects a static script body that an HTML end tag would cut short', () => {
+		for (const mode of ['client', 'server'] as const) {
+			for (const endTag of ['</ScRiPt>', '</SCRIPT >']) {
+				expect(() =>
+					compile(
+						`export function App() @{\n\t<script type="application/json">{"b":"${endTag}"}</script>\n}\n`,
+						'script-end-tag.tsrx',
+						{ mode },
+					),
+				).toThrow(/can end a script in HTML/);
+			}
+			expect(() =>
+				compile(
+					`export function App() @{\n\t<script type="application/json">{"b":"<\\/ScRiPt>"}</script>\n}\n`,
+					'script-end-tag.tsrx',
+					{ mode },
+				),
+			).not.toThrow();
+		}
+	});
+
 	it('hydrates a value-position static script without rewriting its server-safe text', () => {
 		const { html } = ServerRuntime.renderToString(server.ConditionalStaticJsonScript, {
 			show: true,
@@ -512,6 +534,57 @@ describe('<style> raw-text hydration', () => {
 			root.unmount();
 			warning.mockRestore();
 			container.remove();
+		}
+	});
+});
+
+describe('owned executable templates', () => {
+	it('keeps repeated async scripts at their authored SSR sites without resource deduplication', () => {
+		const { html } = ServerRuntime.renderToString(server.OwnedAsyncScripts, {});
+		const fragment = parseFragment(html);
+		const scripts = [...fragment.querySelectorAll('section > script')];
+		expect(scripts).toHaveLength(2);
+		for (const script of scripts) {
+			expect(script.getAttribute('src')).toBe('/execution.js');
+			expect(script.getAttribute('nonce')).toBe('owned-nonce');
+			expect(script.hasAttribute('__executeOnMount')).toBe(false);
+		}
+	});
+});
+
+describe('script option compatibility', () => {
+	it('retains ordinary resource deduplication and lifetime with literal false', () => {
+		const warning = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const mounted = mount(client.OrdinaryAsyncScripts);
+		try {
+			expect(mounted.findAll('script')).toHaveLength(0);
+			const scripts = document.head.querySelectorAll('script[src="/ordinary-resource.js"]');
+			expect(scripts).toHaveLength(1);
+			expect(scripts[0].hasAttribute('__executeOnMount')).toBe(false);
+			mounted.unmount();
+			expect(scripts[0].isConnected).toBe(true);
+			expect(warning).not.toHaveBeenCalled();
+			const html = ServerRuntime.renderToString(server.OrdinaryAsyncScripts, {}).html;
+			const fragment = parseFragment(html);
+			expect(fragment.querySelectorAll('script')).toHaveLength(1);
+			expect(fragment.querySelectorAll('section > script')).toHaveLength(0);
+			expect(fragment.querySelector('script')!.hasAttribute('__executeOnMount')).toBe(false);
+		} finally {
+			mounted.unmount();
+			document.head
+				.querySelectorAll('script[src="/ordinary-resource.js"]')
+				.forEach((script) => script.remove());
+			resetFloatResourceState();
+			warning.mockRestore();
+		}
+	});
+
+	it('preserves an opaque component destination namespace', () => {
+		const mounted = mount(client.ForeignExecutingScript);
+		try {
+			expect(mounted.find('script').namespaceURI).toBe('http://www.w3.org/2000/svg');
+		} finally {
+			mounted.unmount();
 		}
 	});
 });

@@ -14,6 +14,8 @@ export interface OctaneRendererRuleOptions {
 
 /** @experimental Static source restrictions enforced for a renderer. */
 export interface OctaneRendererValidationOptions {
+	/** If provided, reject authored host tags outside this set. Component names are unaffected. */
+	allowedTags?: readonly string[];
 	/** Explicit host tags that represent raw text and must obey `textParents`. */
 	textHosts?: readonly string[];
 	/** Host elements that may directly contain authored primitive text. */
@@ -70,6 +72,8 @@ export interface OctaneCssModuleConstantModule {
 }
 
 export interface OctaneVitePluginOptions {
+	/** Opt into a typed compiler intermediate; Vite emits JavaScript with composed source maps. */
+	output?: 'js' | 'ts';
 	/** Override HMR code generation. It defaults to on while Vite is serving. */
 	hmr?: boolean;
 	/** Force every transform to server (`true`) or client (`false`) code generation. */
@@ -91,6 +95,15 @@ export interface OctaneVitePluginOptions {
 	knownAttributeSpreads?: readonly KnownAttributeSpread[];
 	/** Opt in to fixed primitive child props by name. Keep text and IDs live to share extracted programs. */
 	domBindingFixedProps?: readonly string[];
+	/**
+	 * Bind signal handles that reach opaque holes in every module. By default
+	 * only modules with an import from `octane/signals` (a type-only
+	 * `SignalHandle` import is enough) do, so plain apps do not ship the signal
+	 * binding runtime. Enable it for untyped components that render handles from
+	 * a lazily loaded signals engine.
+	 * @default false
+	 */
+	opaqueSignalHandles?: boolean;
 	/**
 	 * @experimental Infer primitive child text from a TypeScript project in
 	 * one-shot production builds. Serve and watched builds retain syntax

@@ -7,18 +7,17 @@
 import { hasKeys } from '@tanstack/router-core';
 import type { AnyRouter } from '@tanstack/router-core';
 import type { OctaneNode } from 'octane';
-import { routerContext as RouterContext } from './context.ts';
+import { routerContext as RouterContext } from './context';
 import { Matches } from './Matches.tsrx';
 import { SafeFragment } from './SafeFragment.tsrx';
 
 // Upstream's `RouterProps` is `Omit<RouterOptions<…>, 'context'> & { router }` —
 // extra props reconfigure the instance via `router.update()`. The octane binding
 // keeps the router-typed member strict and the option passthrough permissive.
-export type RouterProps =
-	{
-		router: AnyRouter;
-		context?: Record<string, any>;
-	} & Record<string, any>;
+export type RouterProps = {
+	router: AnyRouter;
+	context?: Record<string, any>;
+} & Record<string, any>;
 
 export function RouterContextProvider(props: RouterProps & { children?: OctaneNode }) @{
 	const { router, children, ...rest } = props;

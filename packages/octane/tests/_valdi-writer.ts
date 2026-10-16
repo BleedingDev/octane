@@ -41,7 +41,7 @@ function propsFromPairs(pairs: any[] | undefined): Record<string, any> {
 	return props;
 }
 
-export function createWriterRecorder() {
+export function createWriterRecorder(abi = 1) {
 	let roots: WrittenNode[] = [];
 	const elements: WrittenNode[] = [];
 	const components: Array<{ component: Component; props: Record<string, any> }> = [];
@@ -109,7 +109,7 @@ export function createWriterRecorder() {
 
 	const adapter = {
 		assertValdiCompilerAbi(version: number) {
-			if (version !== 1) throw new Error(`Unsupported writer ABI ${version}`);
+			if (version > abi) throw new Error(`Unsupported writer ABI ${version}`);
 		},
 		jsx: {
 			makeNodePrototype(tag: string, pairs: any[] | undefined): Prototype {
@@ -135,6 +135,30 @@ export function createWriterRecorder() {
 			setAttributeString: typedAttribute('string'),
 			setAttributeFunction: typedAttribute('function'),
 			setAttributeStyle: setAttribute,
+			appendText(value: unknown) {
+				if (value == null || typeof value === 'boolean') return;
+				if (typeof value !== 'number' && typeof value !== 'string')
+					throw new TypeError('Writer text must be a string or number');
+				current().children.push({
+					tag: '#text',
+					key: undefined,
+					props: { value: String(value) },
+					children: [],
+				});
+			},
+			renderText(prototype: Prototype, value: unknown, key: string | undefined) {
+				if (value == null || typeof value === 'boolean') return;
+				if (!Array.isArray(value) && typeof value !== 'number' && typeof value !== 'string')
+					throw new TypeError('Writer text must be a string, number, or array');
+				const node = {
+					tag: prototype.tag,
+					key: key ?? (entry(keys, [...path, prototype]).value ??= `test-key-${nextKey++}`),
+					props: { value },
+					children: [],
+				};
+				if (elements.length === 0) roots.push(node);
+				else current().children.push(node);
+			},
 			beginComponent(component: Component, prototype: Prototype, key: string | undefined) {
 				components.push({ component, props: { ...prototype.props } });
 				path.push(key ?? prototype);

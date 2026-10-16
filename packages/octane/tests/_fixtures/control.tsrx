@@ -1,14 +1,18 @@
 import { useState, useId } from 'octane';
 
 function ExpandButton({ click }: { click: () => void }) @{
-	<button class="shown" onClick={click}>{'expand'}</button>
+	<button class="shown" onClick={click}>
+		{'expand'}
+	</button>
 }
 
 export function Toggle() @{
 	const [on, setOn] = useState(true);
 	const [expanded, setExpanded] = useState(false);
 	<div>
-		<button id="swap" onClick={() => setOn(!on)}>{'swap'}</button>
+		<button id="swap" onClick={() => setOn(!on)}>
+			{'swap'}
+		</button>
 		<section>
 			@if (on) {
 				<>
@@ -28,7 +32,9 @@ export function SwitchToggle() @{
 	const [on, setOn] = useState(true);
 	const [expanded, setExpanded] = useState(false);
 	<div>
-		<button id="swap" onClick={() => setOn(!on)}>{'swap'}</button>
+		<button id="swap" onClick={() => setOn(!on)}>
+			{'swap'}
+		</button>
 		<section>
 			@switch (on) {
 				@case true: {
@@ -59,7 +65,9 @@ export function LiteToggle() @{
 	const [on, setOn] = useState(true);
 	const [expanded, setExpanded] = useState(false);
 	<div>
-		<button id="swap" onClick={() => setOn(!on)}>{'swap'}</button>
+		<button id="swap" onClick={() => setOn(!on)}>
+			{'swap'}
+		</button>
 		<section>
 			@if (on) {
 				<>
@@ -74,7 +82,9 @@ export function LiteToggle() @{
 }
 
 function SwapButton({ click }: { click: () => void }) @{
-	<button id="swap" onClick={click}>{'swap'}</button>
+	<button id="swap" onClick={click}>
+		{'swap'}
+	</button>
 }
 
 export function NestedLiteToggle() @{
@@ -97,23 +107,23 @@ export function NestedLiteToggle() @{
 }
 
 export function NestedDetail({ show }: { show: boolean }) @{
-	<p class="detail">
-		{show ? 'detail' : ''}
-	</p>
+	<p class="detail">{show ? 'detail' : ''}</p>
 }
 
 export function ReplacementDetail({ show }: { show: boolean }) @{
-	<span class="detail">
-		{show ? 'detail' : ''}
-	</span>
+	<span class="detail">{show ? 'detail' : ''}</span>
 }
 
 export function NestedComponentToggle({ UnknownComp }: { UnknownComp: typeof NestedDetail }) @{
 	const [on, setOn] = useState(true);
 	const [expanded, setExpanded] = useState(false);
 	<div>
-		<button id="swap" onClick={() => setOn(!on)}>{'swap'}</button>
-		<button id="expand" onClick={() => setExpanded(!expanded)}>{'expand'}</button>
+		<button id="swap" onClick={() => setOn(!on)}>
+			{'swap'}
+		</button>
+		<button id="expand" onClick={() => setExpanded(!expanded)}>
+			{'expand'}
+		</button>
 		<section>
 			@if (on) {
 				<div class="nested">
@@ -125,6 +135,47 @@ export function NestedComponentToggle({ UnknownComp }: { UnknownComp: typeof Nes
 			}
 		</section>
 	</div>
+}
+
+type ArmShow = 'off' | 'big' | 'small' | 'none';
+
+function SizedLeaf({ size }: { size: ArmShow }) @{
+	@switch (size) {
+		@case 'big': {
+			<div class="big">{'big'}</div>
+		}
+		@case 'small': {
+			<p class="small">{'small'}</p>
+		}
+	}
+}
+
+// The @else arm's only output is a hookless component's inner branch, so the
+// arm can take that branch's element as its own boundary.
+export function ArmOverLiteCall({ show }: { show: ArmShow }) @{
+	<section>
+		@if (show === 'off') {
+			<span class="off">{'off'}</span>
+		} @else {
+			<SizedLeaf size={show} />
+		}
+		<i class="tail">{'tail'}</i>
+	</section>
+}
+
+function OffOrSizedLeaf({ show }: { show: ArmShow }) @{
+	@if (show === 'off') {
+		<span class="off">{'off'}</span>
+	} @else {
+		<SizedLeaf size={show} />
+	}
+}
+
+export function ChainArmOverLiteCall({ show }: { show: ArmShow }) @{
+	<section>
+		<OffOrSizedLeaf show={show} />
+		<i class="tail">{'tail'}</i>
+	</section>
 }
 
 export function IfOnly() @{
@@ -144,11 +195,15 @@ export function HookInIf() @{
 	// toggling the branch destroys + recreates state (Block boundary semantics).
 	const [show, setShow] = useState(true);
 	<div>
-		<button id="top" onClick={() => setShow(!show)}>{'toggle'}</button>
+		<button id="top" onClick={() => setShow(!show)}>
+			{'toggle'}
+		</button>
 		<section>
 			@if (show) {
 				const [n, setN] = useState(0);
-				<button id="inner" onClick={() => setN(n + 1)}>{n as string}</button>
+				<button id="inner" onClick={() => setN(n + 1)}>
+					{n as string}
+				</button>
 			}
 		</section>
 	</div>

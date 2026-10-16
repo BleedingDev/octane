@@ -1,7 +1,9 @@
 # Octane benchmarks
 
 Benchmark Vite builds use `build.minify: 'esbuild'`. Untimed diagnostic builds
-that inspect function names or generated code keep minification disabled.
+that inspect function names or generated code keep minification disabled. The
+byte suites `bundle-size` and `bundle-reachability` instead build with Vite 8's
+default `'oxc'` minifier, because they measure what a Vite application ships.
 
 A set of self-contained benchmark suites, each a pnpm workspace of fixture apps
 (octane + reference frameworks) plus a Playwright/Node harness. Every suite can
@@ -68,6 +70,8 @@ changing the primary compiled React comparison.
 node benchmarks/bench.mjs                       # every suite, normal iterations
 node benchmarks/bench.mjs js-framework memo-wall   # only these suites
 node benchmarks/bench.mjs --quick js-framework  # reduced-iteration smoke pass
+pnpm bench:stable js-framework                 # median of five full harness runs
+node benchmarks/bench.mjs --repeat=3 dbmon      # choose a fixed repetition count
 node benchmarks/bench.mjs --list                # list suite names
 pnpm bench:all -- --quick                        # same via the root script
 ```
@@ -75,9 +79,10 @@ pnpm bench:all -- --quick                        # same via the root script
 For server-backed browser suites, the runner first production-builds each fixture
 app (`pnpm --filter <pkg> build`), starts its preview server
 (`pnpm --filter <pkg> preview`), waits for the strict port, runs the harness with
-`BENCH_JSON` pointed at a temp file, then kills the server **by port**
-(`lsof -ti tcp:<port>`). Suites run **sequentially** so ports and CPU never
-contend. A fixture is built at most once per runner invocation, even if multiple
+`BENCH_JSON` pointed at a temp file, then stops its preview process groups.
+Occupied ports are rejected rather than cleared. Suites run **sequentially**;
+a per-user host lock prevents another unified runner, including one in another
+worktree, from running alongside it. A fixture is built at most once per runner invocation, even if multiple
 suites reuse it. Collected results land in `benchmarks/results/<suite>.json`
 (gitignored), one file per suite.
 
@@ -97,6 +102,50 @@ servers per sample — that spawn/listen/first-byte cycle IS the measurement —
 and **codegen-size** / **bundle-size** / **bundle-reachability** /
 **three-bundle-size** /
 **lynx-bundle-size** are deterministic build/byte checks.
+
+## Repeatable local measurements
+
+Use `pnpm bench:stable <suite...>` for local performance work. It runs each
+suite five times in fresh harness processes, sequentially, and reports the
+**median of the five run scores**. `--repeat=N` chooses a fixed count. This
+reduces the influence of an unusually slow or fast process lifetime without
+discarding inconvenient runs or retrying until a threshold passes. It costs
+roughly N times the measurement time. Single-run defaults and `--quick` stay
+available for smoke checks; `--quick --repeat=N` repeats the smoke protocol.
+
+Preview builds and servers are reused across repetitions. Harnesses that build
+their own fixtures still perform their normal build each time. Each harness's
+sampling protocol is unchanged by `--repeat`. The local js-framework harness
+also [batches reversible short operations](js-framework/README.md) to avoid
+timer-resolution noise, using the same calibration as its paired PR harness.
+Timing results
+can still move with CPU contention, power state, temperature and browser or
+toolchain updates; no local wall-clock protocol can make them identical.
+
+The summary table includes the range and coefficient of variation (sample
+standard deviation / mean) of **run scores**, so persistent noise remains visible.
+Original merged suite summaries and target metadata are saved in `runs` and in
+`<suite>.run-N.json` alongside `<suite>.json`. Aggregated operations use
+`scoreKind: "run-median"`; timing `score` and legacy `median` are the median run score,
+and `min` is the median of the per-run minima for the existing comparison rule.
+`betweenRuns` holds the individual scores, range and `cvPercent`. These are
+not pooled timing distributions: within-run percentiles, errors and sample
+counts remain attached to their original runs. Byte/count operations keep their median-only fields and
+their original units and expose any between-run disagreement too.
+
+Missing/changed targets or operations and non-finite measurements fail
+aggregation. Any harness failure stops repetition, remains a failed run, and
+cannot overwrite a baseline. Completed repetitions are saved before aggregation
+so an incomplete run is inspectable. `--compare` requires the same repetition
+count as the baseline; re-record existing single-run baselines before comparing
+repeated results. Keep the same iterations, target selection, machine and
+toolchain when recording and comparing.
+
+The lock covers unified-runner invocations only: avoid standalone harnesses,
+builds, tests or other CPU-heavy work alongside measurements. The lock is
+released on normal exit and handled termination signals. After an unhandled
+crash or forced kill, the error prints the lock path, PID and checkout; verify
+that no benchmark is running before manually removing the stale lock.
 
 ## Browser sample preparation
 
@@ -134,6 +183,7 @@ node --test benchmarks/js-framework/timing.test.mjs
 | `--compare` | diff current numbers vs `baselines/local/<suite>.json` | on any regression |
 | `--ratios` | check `baselines/ratios.json` guards | on any breach |
 | `--quick` | reduced iterations / seconds per suite | — |
+| `--repeat=N` | median of N sequential fresh-process runs, retaining every result | on any harness failure or incompatible results |
 | `--baseline-dir=<dir>` | override the absolute-baseline dir | — |
 | `--results-dir=<dir>` | override where per-suite JSON is written | — |
 
@@ -145,12 +195,19 @@ node --test benchmarks/js-framework/timing.test.mjs
   explicit noise headroom. `.github/workflows/bench.yml` runs
   `node benchmarks/bench.mjs --quick --ratios` on manual dispatch + a weekly
   cron, uploads `benchmarks/results/` as an artifact, and fails on a breach.
+  Set the manual `full` input to `true` to use normal sample counts for a
+  website snapshot. The artifact includes `environment.json` with the source
+  revision, runner hardware, and toolchain versions. Framework comparisons must
+  use targets measured together; absolute timings from different machines are
+  not release-to-release performance evidence.
 - **`--record` / `--compare` are local-only.** Absolute timing baselines are
   specific to the recording machine; deterministic byte/count records are
   portable only across the same fixture and toolchain. Neither is a CI gate. See
   [`baselines/README.md`](baselines/README.md).
 
-**Pull request report:** `.github/workflows/pr-bench.yml` runs `js-framework` (Octane targets only), `bundle-size`, and `bundle-reachability` on every ready pull request, for both the base commit and the merge commit on the same runner. Byte suites run once per tree; `js-framework` runs base, head, head, base so runner drift during the job cancels out. [`pr-report.mjs`](pr-report.mjs) diffs the two result sets and `.github/workflows/pr-bench-comment.yml` posts the Markdown as one sticky comment. Byte and count changes are reported exactly; a timing change only becomes a verdict outside its combined margin of error (at least 5%), by more than one 0.1ms timer tick, with the fastest sample moving the same way. Timing verdicts are yellow because a single shared runner remains noisy; byte increases are red. The report is informational: it fails only when a suite fails on the merge commit. Reproduce it locally by running the same suites with `--results-dir` in two checkouts, then `node benchmarks/pr-report.mjs --base=<dir> --head=<dir>`. With `--rounds=<n>`, `js-framework` is read from `<dir>-js-1` … `<dir>-js-<n>` and a missing round fails the suite.
+**Pull request report:** `.github/workflows/pr-bench.yml` runs `bundle-size`, `bundle-reachability`, and a paired `js-framework` comparison (Octane targets only) on every ready pull request. The base is the merge commit's first parent, the main commit the pull request would land on, so every delta is the pull request's own; the report says separately how far main has moved past the pull request's recorded base. Byte suites run once per tree. [`js-framework/pair.mjs`](js-framework/pair.mjs), from the merge commit, builds and serves both trees' fixtures and drives them itself. It counts each operation's production-bundle calls (Chromium precise coverage in a `--jitless` browser) and DOM mutations (a `MutationObserver`), which are exact for a fixed build. It then times base and head in one browser, alternating per sample across 30 pairs and looping repeatable operations to about 20ms per sample, and reports the median head/base ratio with a 95% bootstrap interval. [`pr-report.mjs`](pr-report.mjs) diffs the two result sets and `.github/workflows/pr-bench-comment.yml` posts the Markdown as one sticky comment. The job fails when any js-framework work counter increases or when a suite fails on the merge commit; byte changes are reported only. Wall time is a report only: an operation is called slower or faster when its whole interval lies beyond ±3%. Reproduce it locally from one checkout with another as the base: `node benchmarks/js-framework/pair.mjs --base-tree=<checkout> --base-json=<dir>/base/js-framework.json --head-json=<dir>/head/js-framework.json`, the byte suites with `--results-dir` in each checkout, then `node benchmarks/pr-report.mjs --base=<dir>/base --head=<dir>/head`.
+
+**Post-merge size review:** `.github/workflows/size-review.yml` builds `bundle-size` and `bundle-reachability` on the commit before each push to main and on the pushed commit. When a bundle grew by at least 32 gzip bytes (override with the `SIZE_REVIEW_MIN_GZIP_BYTES` repository variable), Claude reviews the landed diff with read-only tools: where the bytes went, whether the growth is earned or slop, and how it could have been written smaller. [`size-review.mjs`](size-review.mjs) records each review as a comment on one rolling "Bundle size review" issue, opening a new issue only when none is open. Runs only ever add comments, so concurrent pushes cannot overwrite each other's entries, and a duplicate issue two of them opened is folded into the oldest and closed. Claude runs only when the `ANTHROPIC_API_KEY` repository secret is set; without it the issue records the measured growth alone. Run the workflow by hand with a `base` and `head` to review an earlier range.
 
 The **compare rule** is noise-aware: an op is a regression only if
 `score > 1.15× baseline` **and** `min > 1.10× baseline`; for sub-1ms ops it must
@@ -281,6 +338,7 @@ internally, get their own baseline and guard namespace.
 | `scheduler-responsiveness` | scheduler-responsiveness | none (builds) | real controlled typing during eight 512-subscriber store updates at 6× CPU throttling, with focus, caret, frame, and notification gates |
 | `suspense-recovery` | suspense-recovery | none (builds) | seven-framework visible async pending, rejection, retry, cancellation, and stale-response correctness |
 | `event-delegation` | event-delegation | none (builds) | 128 real native input events, 512 event-bearing hosts, capture/bubble accounting, and every controlled output |
+| `app-frame-hydration` | app-frame-hydration | none (headless Chromium) | production SSR + cold hydration of a ~1,650-Block signal-enabled app frame (small wrapper components, `@if` arms, `@for` rows, forwarded `style`) at 4× CPU throttling, with jitless render-entry, call, and heap counters and an optional paired `--base=<checkout>` comparison |
 | `behavior-root-events` | behavior-root-events | none (headless Chromium) | queued events across 1,000 and 8,000 distinct async behavior adoptions, with FIFO/exactly-once gates |
 | `application-composition` | application-composition | none (builds) | lifecycle resources, large forms, store fan-out, async recovery, form submission, and navigation teardown in one app |
 | `scaling-curves` | scaling-curves | none (builds) | independently correctness-gated controlled updates at 8, 32, 96, 256, and 512 components |
@@ -348,8 +406,8 @@ internally, get their own baseline and guard namespace.
 | `tsrx-renderer-selection` | tsrx-renderer-selection | none (Node-only) | ordered filename-to-renderer classification with semantic checksums, comparing retained normalized config against equivalent raw revalidation |
 | `tsrx-native-change-analysis` | tsrx-native-change-analysis | none (Node-only) | native-onChange analysis plus client/server compilation for 500/4,000 hostless JSX sites, paired with an AST-identical marker control that conservatively forces the scan |
 | `tsrx-vite-preflight-parsing` | tsrx-vite-preflight-parsing | none (Node-only) | real production client/server Vite transforms with output/map/meta/dependency/classification checksums, exact-root adapter/authoritative parse counts for production, development, CSS, and shared-plugin multi-environment paths, host-owned TypeScript first/second client environment timings, plus shared-AST/reparsed classification controls |
-| `bundle-size` | bundle-size | none (builds) | shipped JS bytes: production builds of js-framework, TodoMVC, chat-stream, and weather-app, normalized minify, raw/gzip/brotli |
-| `bundle-reachability` | bundle-size | none (builds and executes in jsdom) | isolated public feature imports, exact production-bundle behavior, forbidden-module reachability, and committed raw/gzip/brotli budgets |
+| `bundle-size` | bundle-size | none (builds) | shipped JS bytes: production builds of js-framework, TodoMVC, chat-stream, weather-app, and the Octane-only bindings app, Vite's default Oxc minifier for every framework, raw/gzip/brotli |
+| `bundle-reachability` | bundle-size | none (builds and executes in jsdom) | isolated public feature imports, exact production-bundle behavior, forbidden-module reachability, and reported raw/gzip/brotli bytes |
 | `three-renderer` | three | Octane Three, R3F, plain Three | 1,000-object lifecycle, reconstruction/disposal, frame subscribers, and raycast events |
 | `three-bundle-size` | three | none (builds, then checks in Chromium) | minimal/full-catalogue shipped JS bytes for Octane Three, R3F, and plain Three |
 
@@ -359,19 +417,28 @@ numbers). They are the regression gates for
 `docs/compiled-output-optimization-plan.md`: `codegen-size` is the seconds-fast
 per-commit signal (its corpus is FIXED — editing the corpus list invalidates the
 baseline, re-record when you change it), `bundle-size` is the cross-framework
-comparison (all targets built with `minify: 'esbuild'`).
+comparison (all targets built with Vite 8's default `minify: 'oxc'`; Vite's
+`'esbuild'` mode turns off Rolldown's minifier and the dead-code elimination
+that comes with it).
 The separate `codegen-size` CSS targets also build the real Rspack/CssExtract
 adapter with named exports and authenticated immutable default maps. They compare
 identical source with the option off/on, keep framework imports external for byte
 measurement, and verify equal emitted CSS and full-runtime SSR output. Their
 same-run ratios catch an adapter that silently stops supplying compiler proofs.
+The `rspack-void-*` targets build the same adapter's imported void-root proofs
+with the runtime bundled, because the saving is the generic root renderer the
+minifier drops. Each control's post loader routes the root import through a
+re-export the adapter leaves unproven; every other module stays byte-identical,
+and both variants must render the same DOM in jsdom. The `hydrate` pair is the
+octanejs/octane#1839 shape, and the `tree` pair is `createRoot` over four imported
+void components with an update.
 `lynx-bundle-size` instead uses the pinned Rspeedy native encoder unchanged and
 bounds the incremental decoded/encoded cost of IFR against the equivalent
 background-rendered preview graph; its semantic checks remain source/build
 evidence rather than native execution.
 
-`bundle-size` classifies every build's emitted JavaScript into an `app` bucket
-(modules under the app's own src/) and a `framework` bucket (node_modules + the
+`bundle-size` classifies each comparative build's emitted JavaScript into an
+`app` bucket (modules under the app's own src/) and a `framework` bucket (node_modules + the
 Octane workspace runtime + virtual helpers) and reports both, plus totals:
 `app_*` / `fw_*` / `js_*` ×
 raw/gzip/brotli. The harness models each emitted JavaScript file as an
@@ -383,22 +450,51 @@ runtime cost separately. App-shaped
 sets use `todo_*`, `chat_*`, and `weather_*` operation prefixes; weather's shared
 service and formatting modules count as app code in both framework builds.
 
-`bundle-size/app-budgets.json` independently caps all four complete Octane TSRX
-applications, while `bundle-size/jsx-budgets.json` separately caps the Octane JSX
-rows application. Each fixture has application, framework, and total raw, gzip,
-and brotli ceilings: forty-five deterministic limits in total. The harness
-publishes those committed values as separate same-run `octane-tsrx-budget` and
-`octane-jsx-budget` targets, and forty-five `maxRatio: 1` guards enforce them
-alongside the existing cross-framework comparisons. Independent dialect budgets
-allow either runtime to shrink without making the other dialect look larger by
-comparison. Ceilings retain at least 32 bytes of headroom and are rounded to
-32-byte boundaries, so small changes in another framework cannot hide Octane
-application or runtime growth. Refresh a ceiling only with a reviewed explanation
-and a production measurement using the pinned CI Node version.
+The Octane-only `wayfinder_js_*` rows measure all production client JavaScript
+with Wayfinder's normal chunking and no app/framework split. The build runs in
+place, so a local benchmark run overwrites `examples/wayfinder/dist`. Hidden
+source maps gate the absence of unused form-action and Fragment-ref descriptor
+capabilities from this application's generated hydration entry; bytes remain
+report-only.
 
-`bundle-reachability` builds twenty-four independent public-entry feature fixtures
-across thirty-two production builds with the production Octane compiler,
-disabled HMR/profiling, and normalized esbuild minification. The seven package
+The `threadline_{oxc,esbuild}_js_*` and `pagecraft_{oxc,esbuild}_js_*` rows also
+use the real applications' normal Vite configs and chunking. Each sums every
+emitted client JS asset, including deferred chunks, with raw/gzip/brotli reported
+separately for both minifiers. Outputs remain under `bundle-size/dist`; there is
+no app/framework split or committed byte budget. Threadline additionally gates
+the absence of generic component and return rendering from every client chunk's
+source map under both minifiers, with a retained void-component control. Its
+private static icons must retain paired START/END shared-renderer provenance in
+the actual App transform, without fixing their call-site counts. Runtime and
+hydration behavior stay in the owning tests.
+Compare the same operation names in base/head results. When an older base lacks
+these rows, its size is unknown, not zero; an initial change needs a matched
+local comparison, including a restored-baseline control.
+
+The `bindings_*` set is an Octane-only application,
+[`bundle-size/apps/bindings`](bundle-size/apps/bindings/octane-tsrx), that
+renders components and hooks from `@octanejs/radix`, `@octanejs/base-ui`,
+`@octanejs/aria`, `@octanejs/mantine-hooks`, `@octanejs/usehooks-ts`,
+`@octanejs/floating-ui`, and `@octanejs/motion`. Bindings ship their source, so
+the build compiles them with the production Octane compiler and they count as
+`app` bytes. It is the only row whose bytes move with compiler output for plain
+`.ts` binding hooks.
+
+The `shell_*` set, [`bundle-size/apps/app-shell`](bundle-size/apps/app-shell), is the smallest app that combines the features a production Octane app uses together: `hydrateRoot`, a `lazy` page under `Suspense`, `ViewTransition`, `startTransition`, and a `useSignal$` counter. It has under 1 kB of app code, so its bytes are almost all runtime. Its `react` twin is the same component on React 19.3 with `alien-signals`. It pins React 19.3 exactly, the first stable release with `<ViewTransition>`, because the default catalog is still on 19.2. The set has no ceiling build, so its signal and `alien-signals` imports do not widen the rows ceilings.
+
+The companion `shell_client_*` row builds that same app and lazy page through a
+`createRoot` entry for both frameworks. `shell_js_gzip - shell_client_js_gzip`
+is the additional complete client JS shipped when this app hydrates;
+`shell_fw_gzip - shell_client_fw_gzip` attributes the framework share under the
+same forced chunk split. Raw and Brotli, and each app share, are reported too.
+All emitted JS counts, including the lazy page. Both rows use the same
+production Oxc settings as every comparative app. The byte deltas are reported
+in pull request benchmarks and have no pass/fail budget.
+
+`bundle-reachability` builds twenty-nine independent public-entry feature fixtures
+across thirty-eight production builds with the production Octane compiler,
+disabled HMR/profiling, and each bundler's default production minifier: Vite's
+`'oxc'` and esbuild's `minify: true`. The seven package
 side-effect fixtures and the behavior-only fixture each run through both Vite
 and esbuild. Each measured IIFE
 executes unchanged in an isolated jsdom realm; its visible DOM, interaction,
@@ -416,6 +512,17 @@ registers an externally owned range, handles a native click, and disposes its
 owners and handlers while preserving the original nodes. Both production builds
 reject renderer, compiler, and server modules.
 
+The `split-shell` fixture ships the way a production Rolldown and oxc application
+does: ESM chunks whose `codeSplitting` groups put Octane's signal engine and the
+rest of the octane package in chunks of their own. Its client hydrates a
+server-rendered shell through a dynamic import after activating a renderer-free
+behavior island, with native signal reads, a `<Hydrate when={visible()}>`
+boundary, a lazy route behind `useTransition`, `@try` over `use()`, a portal, and
+a keyed list. It reports the whole application and each group's chunk, rejects
+Octane modules in application chunks, and checks through the source map that
+the runtime chunk drops the unused ViewTransition and Activity drivers. Its
+chunks run in jsdom linked into one script, unminified and untreeshaken.
+
 The generated SPA scenario loads the actual CLI entry and complete landing-page
 templates without maintaining duplicate fixture sources; its compiled bundle
 must render the public page while excluding the reusable-root runtime. The three
@@ -428,40 +535,38 @@ component, and verifies `unmount`; its broader reachable runtime is
 real and must not be disguised as the specialized entry. `root-static-local`
 keeps the original same-file compiled render/unmount control and its existing
 static-root ceiling, so losing that specialization fails independently of the
-escaped generic contract. `prop-attributes` binds opaque props to named
+escaped generic contract. `root-callback-local` keeps a private root inside a
+controller whose retained `replace` and `dispose` callbacks are its only later
+uses, so render and unmount calls that outlive the creating function stay
+specialized. `prop-attributes` binds opaque props to named
 attributes and text in a module with no signals import. Those opaque values are
 potential signal bindings, so the fixture pins that they keep the narrow scalar
 writers and never retain the generic attribute route with its form-control
 writers and DOM routing tables.
 
-`bundle-size/minimal-budgets.json` supplies explicit raw, gzip, and brotli byte
-ceilings for every feature. Budgets leave about 3% deterministic headroom, with
-small byte-aligned allowances for tiny isolated entries. Each scenario publishes
-its committed ceiling as a
-same-run `*-budget` reference target, so ninety-nine `maxRatio: 1` entries in
-`baselines/ratios.json` enforce all three metrics in the existing weekly/manual
-Bench CI workflow. The behavior fixture runner also enforces its ceilings directly.
-Full PR and main CI run both behavior builds once in test shard 1/4, so changes
-that grow this renderer-free closure fail before merge. Run that focused gate
-with `node benchmarks/bundle-size/run-minimal.mjs behavior-root`; an unknown or
-empty scenario name fails instead of skipping the builds. The same shard also
-enforces the unchanged committed raw, gzip, and brotli ceilings for the recovered
-same-file static-root, hooks, prop-driven attribute, and local Context fixtures:
+`hydrate-frame` is the shape of a server-rendered application frame. A
+production server build of the same modules renders its markup with
+`renderToString`, and the measured client bundle hydrates it: native signal
+reads, a keyed `@for`, a `@try`/`@pending`/`@catch` boundary over settled data,
+forwarded style objects, a portal opened after hydration, and an
+`octane/behavior` island beside the root. Its oracle requires the server nodes
+to be adopted, not rebuilt. It never starts a transition or renders an
+`<Activity>`, so its ceiling also holds those graphs out of a hydrating
+Suspense application.
+
+Every scenario publishes deterministic raw, gzip, and brotli bytes. They are
+reported, never gated: the pull request benchmark comment lists each change. An
+unknown or empty scenario name fails instead of skipping the builds.
+
+### Measuring bundle bytes
 
 ```bash
-node benchmarks/bundle-size/run-minimal.mjs --budgets root-static-local root-chained-jsx hooks-state prop-attributes context
+node benchmarks/bundle-size/run-minimal.mjs [scenario...]
+node benchmarks/bundle-size/run.mjs [target...]
 ```
 
-`--budgets` applies direct byte enforcement to the selected scenarios (or all
-scenarios when no selection is supplied). Report mode still emits paired budget
-targets for the existing ratio runner. Generic roots, hydration, and SSR remain
-in that wider suite; some currently exceed their historical ceilings, so the
-focused PR gate does not claim those regressions are resolved. Run the complete
-executable and byte guard directly with:
-
-```bash
-node benchmarks/bench.mjs --quick --ratios bundle-reachability
-```
+Positional arguments narrow either command to some scenarios or targets while
+you iterate. Both fail only on a reachability or root-specialization violation.
 
 ## Adding a suite
 

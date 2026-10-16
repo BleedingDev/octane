@@ -5,11 +5,9 @@
 // itself before React hydrates. Octane hydration claims the server's arm, so the
 // client takes the arm the server took and ScriptOnce adopts, then drops, the
 // server's script.
-import {
-	getScrollRestorationScriptForRouter,
-} from '@tanstack/router-core/scroll-restoration-script';
+import { getScrollRestorationScriptForRouter } from '@tanstack/router-core/scroll-restoration-script';
 import type { AnyRouter } from '@tanstack/router-core';
-import { useRouter } from './context.ts';
+import { useRouter } from './context';
 import { ScriptOnce } from './ScriptOnce.tsrx';
 
 function rendersScript(router: AnyRouter): boolean {

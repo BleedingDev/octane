@@ -1,3 +1,5 @@
+'use strong';
+
 // ClientOnly / useHydrated — port of react-router's ClientOnly.tsx. Renders
 // children only once the client has hydrated: `useHydrated` reads a constant
 // external store whose server snapshot is `false` and client snapshot is
@@ -7,18 +9,21 @@
 // call sites).
 import { useSyncExternalStore } from 'octane';
 import type { OctaneNode } from 'octane';
-import { splitSlot, subSlot } from './internal.ts';
+import { splitSlot, subSlot } from './internal';
 
 const subscribe = () => () => {};
 
 export function useHydrated(...args: Array<unknown>) {
 	const [, slot] = splitSlot(args);
-	return useSyncExternalStore(subscribe, () => true, () => false, subSlot(slot, 'hydrated'));
+	return useSyncExternalStore(
+		subscribe,
+		() => true,
+		() => false,
+		subSlot(slot, 'hydrated'),
+	);
 }
 
 export function ClientOnly(props: { children?: OctaneNode; fallback?: OctaneNode }) @{
 	const hydrated = useHydrated();
-	<>
-		{hydrated ? props.children : props.fallback ?? null}
-	</>
+	<>{hydrated ? props.children : (props.fallback ?? null)}</>
 }

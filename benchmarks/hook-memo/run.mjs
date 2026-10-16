@@ -39,6 +39,7 @@ const exportsMap = JSON.parse(
 ).exports;
 
 const REPEATS = 32;
+const renderValuesOnly = process.argv.includes('--render-values');
 const DRIVER = { name: 'driver', component: 'Driver', control: true, conditional: true };
 const CASES = [
 	DRIVER,
@@ -58,6 +59,12 @@ const CASES = [
 		hitArraysPerRender: 2,
 	},
 	{ name: 'manual_slot_hook', component: 'ManualSlotHook', pairs: 2, hitArraysPerRender: 2 },
+	{
+		name: 'strong_manual_slot_hook',
+		component: 'StrongManualSlotHook',
+		pairs: 2,
+		hitArraysPerRender: 2,
+	},
 	{ name: 'null_deps', component: 'NullDeps', alwaysFresh: true },
 	{ name: 'conditional', component: 'Conditional', conditional: true },
 ];
@@ -66,15 +73,26 @@ const APP_FILES = [
 	path.join(ROOT, 'plain-hooks.ts'),
 	path.join(ROOT, 'returned-jsx.tsx'),
 	path.join(ROOT, 'manual-hooks.ts'),
+	path.join(ROOT, 'strong-manual-hooks.ts'),
 ];
 const SHAPE_FILE = path.join(ROOT, 'cache-shapes.tsrx');
 const SHAPE_ENTRY = path.join(ROOT, 'cache-shapes-entry.mjs');
+const RENDER_VALUE_FILE = path.join(ROOT, 'render-values.tsrx');
+const RENDER_VALUE_ENTRY = path.join(ROOT, 'render-values-entry.mjs');
+const KEYED_RENDER_VALUE_FILE = path.join(ROOT, 'keyed-render-values.tsrx');
+const KEYED_RENDER_CASES = [
+	'KeyedFragment',
+	'KeyedScopedFragment',
+	'KeyedTryFragment',
+	'KeyBeforeSpread',
+	'KeyAfterSpread',
+];
 const val = (score) => ({ score, median: score, min: score, samples: 1 });
 const bytes = (source) => Buffer.byteLength(source);
 const gzipBytes = (source) => gzipSync(source, { level: zlibConstants.Z_BEST_COMPRESSION }).length;
 const print = (ast) => esrapPrint(ast, esrapTsx()).code;
-const instrument = (source, filename, owner) =>
-	instrumentJavaScript(source, filename, owner, { parseModule, builders, print });
+const instrument = (source, filename, owner, options) =>
+	instrumentJavaScript(source, filename, owner, { parseModule, builders, print }, options);
 const asJavaScript = (source, filename) =>
 	transformSync(source, {
 		loader: filename.endsWith('.ts') ? 'ts' : 'js',
@@ -113,6 +131,7 @@ function compileApplication(inlineHookMemo) {
 	for (const [filename, manualSlots] of [
 		[APP_FILES[1], false],
 		[APP_FILES[3], true],
+		[APP_FILES[4], true],
 	]) {
 		const plainSource = fs.readFileSync(filename, 'utf8');
 		const slotted = slotHooks(plainSource, filename, {
@@ -180,7 +199,7 @@ async function bundleApplication(sources, outfile, entry = path.join(ROOT, 'entr
 }
 
 function sourceOwner(map, generatedFile) {
-	const applicationFiles = new Set(APP_FILES);
+	const applicationFiles = new Set([...APP_FILES, RENDER_VALUE_FILE, KEYED_RENDER_VALUE_FILE]);
 	const owners = map.sources.map((source) => {
 		const filename = path.resolve(path.dirname(generatedFile), map.sourceRoot || '', source);
 		if (applicationFiles.has(filename)) return 'application';
@@ -255,10 +274,11 @@ function summarizedCounters(counters) {
 // own work (root transaction and retry bookkeeping) is unrelated to memo hooks.
 // Subtracting the hook-free driver's same-phase counts leaves only the work a
 // scenario's hooks add. The driver keeps its own ops and guards, and raw
-// per-phase counts stay in the JSON metadata.
+// per-phase counts stay in the JSON metadata. Teardown has no shared render
+// overhead: each component's cleanup is reported in full.
 function memoCounters(measurements, fixture, phase) {
 	const counters = measurements[`${fixture.name}_${phase}`].counters;
-	if (fixture.control) return counters;
+	if (fixture.control || phase === 'unmount') return counters;
 	const driver = measurements[`${DRIVER.name}_${phase}`].counters;
 	return Object.fromEntries(
 		Object.entries(counters).map(([kind, count]) => {
@@ -448,6 +468,146 @@ function compileCacheShapes() {
 	return new Map([[SHAPE_FILE, output.code]]);
 }
 
+function exerciseRenderValues(bundle) {
+	const results = {};
+	for (const name of ['InlineRenderValue', 'WrappedRenderValue']) {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const root = bundle.createRoot(container);
+		const render = (label, tick) =>
+			bundle.flushSync(() => root.render(bundle[name], { label, tick }));
+		render('initial', 0);
+		const input = container.querySelector('input');
+		const span = container.querySelector('span');
+		assert.ok(input);
+		assert.ok(span);
+		input.value = 'typed';
+		input.focus();
+		const phases = {};
+		for (const phase of ['hit', 'miss']) {
+			globalThis[COUNTER_GLOBAL] = emptyCounters();
+			let descriptorValues = 0;
+			for (let index = 0; index < REPEATS; index++) {
+				const label = phase === 'hit' ? 'initial' : `label:${index}`;
+				const tick = (phase === 'hit' ? 0 : REPEATS) + index + 1;
+				render(label, tick);
+				assert.equal(container.querySelector('output').textContent, String(tick));
+				assert.equal(container.querySelector('span'), span);
+				assert.equal(span.textContent, label);
+				assert.equal(container.querySelector('input'), input);
+				assert.equal(input.value, 'typed');
+				assert.equal(document.activeElement, input);
+				if (container.querySelector('section').getAttribute('data-kind') !== 'function') {
+					descriptorValues++;
+				}
+			}
+			phases[phase] = {
+				functions: globalThis[COUNTER_GLOBAL].application_functions,
+				descriptorValues,
+			};
+		}
+		results[name] = {
+			phases,
+			semantics: {
+				label: span.textContent,
+				tick: container.querySelector('output').textContent,
+				typed: input.value,
+			},
+		};
+		root.unmount();
+		assert.equal(container.innerHTML, '');
+		container.remove();
+	}
+	assert.deepEqual(results.InlineRenderValue.semantics, results.WrappedRenderValue.semantics);
+	return results;
+}
+
+function exerciseKeyedRenderValues(bundle) {
+	const results = {};
+	for (const name of KEYED_RENDER_CASES) {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const root = bundle.createRoot(container);
+		const render = (id, label) =>
+			bundle.flushSync(() => root.render(bundle[name], { id, label, spread: { key: id, label } }));
+		render('first', 'initial');
+		let input = container.querySelector('input');
+		let span = container.querySelector('span');
+		assert.ok(input);
+		assert.ok(span);
+		input.value = 'typed';
+		input.focus();
+		const phases = {};
+		for (const phase of ['same_key', 'changed_key']) {
+			globalThis[COUNTER_GLOBAL] = emptyCounters();
+			for (let index = 0; index < REPEATS; index++) {
+				const label = `label:${index}`;
+				render(phase === 'same_key' ? 'first' : `key:${index}`, label);
+				const nextInput = container.querySelector('input');
+				const nextSpan = container.querySelector('span');
+				assert.equal(nextSpan.textContent, label);
+				if (phase === 'same_key') {
+					assert.equal(nextInput, input);
+					assert.equal(nextSpan, span);
+					assert.equal(input.value, 'typed');
+					assert.equal(document.activeElement, input);
+				} else {
+					assert.notEqual(nextInput, input);
+					assert.notEqual(nextSpan, span);
+					assert.equal(nextInput.value, 'draft');
+				}
+				input = nextInput;
+				span = nextSpan;
+			}
+			phases[phase] = { ...globalThis[COUNTER_GLOBAL] };
+		}
+		results[name] = { phases, semantics: { label: span.textContent, value: input.value } };
+		root.unmount();
+		assert.equal(container.innerHTML, '');
+		container.remove();
+	}
+	return results;
+}
+
+// Descriptor construction is an output-cost contract, so it belongs with ratio
+// guards rather than runtime correctness assertions. Resolve imported aliases
+// through the AST so formatting and temporary names do not affect the count.
+function descriptorCalls(source, filename) {
+	const ast = parseModule(source, filename);
+	const helpers = new Set([
+		'createElement',
+		'createElementAt',
+		'createHostElement',
+		'createElementFromConfig',
+		'createScopedValue',
+		'createScopedElement',
+		'nativeCreateScopedValue',
+		'nativeCreateScopedElement',
+	]);
+	const aliases = new Set();
+	for (const node of ast.body) {
+		if (node.type !== 'ImportDeclaration') continue;
+		for (const specifier of node.specifiers) {
+			if (helpers.has(specifier.imported?.name)) aliases.add(specifier.local.name);
+		}
+	}
+	let calls = 0;
+	function walk(node) {
+		if (!node || typeof node !== 'object') return;
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child);
+			return;
+		}
+		if (node.type === 'CallExpression' && aliases.has(node.callee?.name)) calls++;
+		for (const [key, value] of Object.entries(node)) {
+			if (key === 'loc' || key === 'metadata' || key === 'comments' || key[0] === '_') continue;
+			if (value && typeof value === 'object') walk(value);
+		}
+	}
+	walk(ast);
+	return calls;
+}
+
 // A source-level ABI observation, deliberately separate from behavioral tests.
 // AST membership counts emitted named reads/writes on the DOM slot array and
 // cache-region calls; neither result depends on formatting or minified names.
@@ -608,13 +768,13 @@ const runMetadata = {
 	cases: CASES,
 	fixtureSha256: createHash('sha256')
 		.update(
-			APP_FILES.map(
-				(filename) => path.basename(filename) + '\n' + fs.readFileSync(filename, 'utf8'),
-			).join('\n'),
+			(renderValuesOnly ? [RENDER_VALUE_FILE, KEYED_RENDER_VALUE_FILE] : APP_FILES)
+				.map((filename) => path.basename(filename) + '\n' + fs.readFileSync(filename, 'utf8'))
+				.join('\n'),
 		)
 		.digest('hex'),
 	entrySha256: createHash('sha256')
-		.update(fs.readFileSync(path.join(ROOT, 'entry.mjs')))
+		.update(fs.readFileSync(renderValuesOnly ? RENDER_VALUE_ENTRY : path.join(ROOT, 'entry.mjs')))
 		.digest('hex'),
 	observerSha256: createHash('sha256')
 		.update(fs.readFileSync(path.join(ROOT, 'instrument.mjs')))
@@ -631,10 +791,12 @@ const targets = [];
 const onePerRender = {};
 let expectedSemantics;
 try {
-	for (const [name, inlineHookMemo] of [
-		['runtime-form', false],
-		['inline', true],
-	]) {
+	for (const [name, inlineHookMemo] of renderValuesOnly
+		? []
+		: [
+				['runtime-form', false],
+				['inline', true],
+			]) {
 		const sources = compileApplication(inlineHookMemo);
 		const cleanFile = path.join(tempDir, `${name}-clean.mjs`);
 		const { code: cleanCode, map } = await bundleApplication(sources, cleanFile);
@@ -712,67 +874,206 @@ try {
 			);
 		}
 	}
-	const shapeSources = compileCacheShapes();
-	const shapeCode = shapeSources.get(SHAPE_FILE);
-	const shapeFile = path.join(tempDir, 'cache-shapes-clean.mjs');
-	const { code: shapeBundle } = await bundleApplication(shapeSources, shapeFile, SHAPE_ENTRY);
-	fs.writeFileSync(shapeFile, shapeBundle);
-	if (process.env.BENCH_SHAPE_ARTIFACT) {
-		const artifact = path.resolve(process.env.BENCH_SHAPE_ARTIFACT);
-		const { code: profileBundle } = await bundleApplication(
-			shapeSources,
-			artifact,
-			path.join(ROOT, 'cache-shapes-profile-entry.mjs'),
+	if (!renderValuesOnly) {
+		const shapeSources = compileCacheShapes();
+		const shapeCode = shapeSources.get(SHAPE_FILE);
+		const shapeFile = path.join(tempDir, 'cache-shapes-clean.mjs');
+		const { code: shapeBundle } = await bundleApplication(shapeSources, shapeFile, SHAPE_ENTRY);
+		fs.writeFileSync(shapeFile, shapeBundle);
+		if (process.env.BENCH_SHAPE_ARTIFACT) {
+			const artifact = path.resolve(process.env.BENCH_SHAPE_ARTIFACT);
+			const { code: profileBundle } = await bundleApplication(
+				shapeSources,
+				artifact,
+				path.join(ROOT, 'cache-shapes-profile-entry.mjs'),
+			);
+			fs.writeFileSync(artifact, profileBundle);
+		}
+		const shapeSnapshot = exerciseCacheShapes(await import(pathToFileURL(shapeFile).href));
+		const shapeCounts = compilerCacheShapeCounts(shapeCode);
+		assert.equal(shapeCounts.flat_region_calls, 0, 'flat control gained compiler memo work');
+		const shapeSizes = codeSizes(shapeSources, shapeBundle);
+		const shapeOps = {
+			...Object.fromEntries(Object.entries(shapeSizes).map(([key, value]) => [key, val(value)])),
+			...Object.fromEntries(Object.entries(shapeCounts).map(([key, value]) => [key, val(value)])),
+		};
+		const shapeHash = createHash('sha256').update(JSON.stringify(shapeSnapshot)).digest('hex');
+		targets.push({
+			name: 'compiler-cache-shapes',
+			ops: shapeOps,
+			meta: {
+				fixtureSha256: createHash('sha256').update(fs.readFileSync(SHAPE_FILE)).digest('hex'),
+				entrySha256: createHash('sha256').update(fs.readFileSync(SHAPE_ENTRY)).digest('hex'),
+				semanticsSha256: shapeHash,
+				snapshot: shapeSnapshot,
+				counts: shapeCounts,
+			},
+		});
+		console.log(
+			`cache-shapes: ${shapeCounts.named_reads} named reads, ${shapeCounts.named_writes} named writes, ${shapeCounts.region_calls} region calls; semantics ${shapeHash}`,
 		);
-		fs.writeFileSync(artifact, profileBundle);
 	}
-	const shapeSnapshot = exerciseCacheShapes(await import(pathToFileURL(shapeFile).href));
-	const shapeCounts = compilerCacheShapeCounts(shapeCode);
-	assert.equal(shapeCounts.flat_region_calls, 0, 'flat control gained compiler memo work');
-	const shapeSizes = codeSizes(shapeSources, shapeBundle);
-	const shapeOps = {
-		...Object.fromEntries(Object.entries(shapeSizes).map(([key, value]) => [key, val(value)])),
-		...Object.fromEntries(Object.entries(shapeCounts).map(([key, value]) => [key, val(value)])),
-	};
-	const shapeHash = createHash('sha256').update(JSON.stringify(shapeSnapshot)).digest('hex');
-	targets.push({
-		name: 'compiler-cache-shapes',
-		ops: shapeOps,
-		meta: {
-			fixtureSha256: createHash('sha256').update(fs.readFileSync(SHAPE_FILE)).digest('hex'),
-			entrySha256: createHash('sha256').update(fs.readFileSync(SHAPE_ENTRY)).digest('hex'),
-			semanticsSha256: shapeHash,
-			snapshot: shapeSnapshot,
-			counts: shapeCounts,
-		},
-	});
-	console.log(
-		`cache-shapes: ${shapeCounts.named_reads} named reads, ${shapeCounts.named_writes} named writes, ${shapeCounts.region_calls} region calls; semantics ${shapeHash}`,
-	);
-	const payload = {
-		suite: 'hook-memo',
-		iterations: 1,
-		targets: [
-			...targets,
-			{
-				name: 'cache-shape-reference',
-				ops: { named_reads: val(1), named_writes: val(1) },
-				meta: { description: 'One named array property per source-level cache access.' },
-			},
-			{
-				name: 'one-per-render',
-				ops: onePerRender,
-				meta: {
-					description:
-						'Fixed source-creation ceilings: one per render, per required fresh callback, or explicitly budgeted caller array.',
+	if (renderValuesOnly) {
+		const renderValueSource = fs.readFileSync(RENDER_VALUE_FILE, 'utf8');
+		const renderValueCompiled = compile(renderValueSource, RENDER_VALUE_FILE, {
+			mode: 'client',
+			dev: false,
+			hmr: false,
+			strong: true,
+		});
+		assert.equal(renderValueCompiled.diagnostics.length, 0);
+		const renderValueSources = new Map([[RENDER_VALUE_FILE, renderValueCompiled.code]]);
+		const keyedSource = fs.readFileSync(KEYED_RENDER_VALUE_FILE, 'utf8');
+		const keyedCounts = {};
+		for (const runtime of ['compat', 'native']) {
+			const source =
+				runtime === 'native'
+					? keyedSource.replace("'use strong';", "'use strong';\nimport 'octane/signals';")
+					: keyedSource;
+			for (const mode of ['client', 'server']) {
+				const compiled = compile(source, KEYED_RENDER_VALUE_FILE, {
+					mode,
+					dev: false,
+					hmr: false,
+					strong: true,
+					requireDirective: true,
+				});
+				assert.equal(compiled.diagnostics.length, 0);
+				keyedCounts[`${runtime}_${mode}_descriptor_calls`] = descriptorCalls(
+					compiled.code,
+					KEYED_RENDER_VALUE_FILE + '.js',
+				);
+				if (runtime === 'native' && mode === 'client')
+					renderValueSources.set(KEYED_RENDER_VALUE_FILE, compiled.code);
+			}
+		}
+		const renderValueFile = path.join(tempDir, 'render-values-clean.mjs');
+		const renderValueBundle = await bundleApplication(
+			renderValueSources,
+			renderValueFile,
+			RENDER_VALUE_ENTRY,
+		);
+		fs.writeFileSync(renderValueFile, renderValueBundle.code);
+		if (process.env.BENCH_RENDER_VALUES_ARTIFACT)
+			fs.writeFileSync(
+				path.resolve(process.env.BENCH_RENDER_VALUES_ARTIFACT),
+				renderValueBundle.code,
+			);
+		const cleanRenderApi = await import(pathToFileURL(renderValueFile));
+		const cleanRenderValues = exerciseRenderValues(cleanRenderApi);
+		const cleanKeyedValues = exerciseKeyedRenderValues(cleanRenderApi);
+		const observedRenderValueFile = path.join(tempDir, 'render-values-observed.mjs');
+		fs.writeFileSync(
+			observedRenderValueFile,
+			instrument(
+				renderValueBundle.code,
+				renderValueFile,
+				sourceOwner(renderValueBundle.map, renderValueFile),
+				{ objects: true },
+			),
+		);
+		globalThis[COUNTER_GLOBAL] = emptyCounters();
+		const observedRenderValueApi = await import(pathToFileURL(observedRenderValueFile));
+		assert.ok(
+			globalThis[COUNTER_GLOBAL].application_functions > 0,
+			'observer must reach compiled application initializers',
+		);
+		const observedRenderValues = exerciseRenderValues(observedRenderValueApi);
+		const observedKeyedValues = exerciseKeyedRenderValues(observedRenderValueApi);
+		for (const name of KEYED_RENDER_CASES) {
+			const result = observedKeyedValues[name];
+			assert.deepEqual(result.semantics, cleanKeyedValues[name].semantics);
+			targets.push({
+				name,
+				ops: Object.fromEntries(
+					Object.entries(result.phases).flatMap(([phase, counters]) =>
+						Object.entries(counters).map(([counter, count]) => [`${phase}_${counter}`, val(count)]),
+					),
+				),
+				meta: result,
+			});
+		}
+		targets.push({
+			name: 'keyed-render-values',
+			ops: Object.fromEntries(
+				Object.entries({
+					...keyedCounts,
+					...codeSizes(renderValueSources, renderValueBundle.code),
+				}).map(([metric, count]) => [metric, val(count)]),
+			),
+			meta: { fixtureSha256: createHash('sha256').update(keyedSource).digest('hex') },
+		});
+		console.log(
+			`keyed-render-values: ${JSON.stringify(keyedCounts)}; update/remount and observer controls passed`,
+		);
+		for (const [name, component] of [
+			['render-values-inline', 'InlineRenderValue'],
+			['render-values-wrapper', 'WrappedRenderValue'],
+		]) {
+			const result = observedRenderValues[component];
+			assert.deepEqual(result.semantics, cleanRenderValues[component].semantics);
+			assert.equal(
+				result.phases.hit.descriptorValues,
+				cleanRenderValues[component].phases.hit.descriptorValues,
+			);
+			assert.equal(
+				result.phases.miss.descriptorValues,
+				cleanRenderValues[component].phases.miss.descriptorValues,
+			);
+			targets.push({
+				name,
+				ops: {
+					hit_functions: val(result.phases.hit.functions),
+					miss_functions: val(result.phases.miss.functions),
+					descriptor_values: val(
+						result.phases.hit.descriptorValues + result.phases.miss.descriptorValues,
+					),
 				},
+				meta: {
+					...result,
+					fixtureSha256: createHash('sha256').update(renderValueSource).digest('hex'),
+				},
+			});
+			console.log(
+				`${name}: ${result.phases.hit.functions} hit / ${result.phases.miss.functions} miss function expressions over ${REPEATS} fresh-props renders`,
+			);
+		}
+		targets.push({
+			name: 'render-values-reference',
+			ops: {
+				hit_functions: val(REPEATS),
+				miss_functions: val(REPEATS),
+				descriptor_values: val(REPEATS * 2),
+				...Object.fromEntries(Object.keys(keyedCounts).map((name) => [name, val(1)])),
 			},
-		],
+		});
+	}
+	const payload = {
+		suite: renderValuesOnly ? 'render-values' : 'hook-memo',
+		iterations: 1,
+		targets: renderValuesOnly
+			? targets
+			: [
+					...targets,
+					{
+						name: 'cache-shape-reference',
+						ops: { named_reads: val(1), named_writes: val(1) },
+						meta: { description: 'One named array property per source-level cache access.' },
+					},
+					{
+						name: 'one-per-render',
+						ops: onePerRender,
+						meta: {
+							description:
+								'Fixed source-creation ceilings: one per render, per required fresh callback, or explicitly budgeted caller array.',
+						},
+					},
+				],
 		meta: runMetadata,
 	};
 	if (process.env.BENCH_JSON)
 		fs.writeFileSync(process.env.BENCH_JSON, JSON.stringify(payload, null, '\t') + '\n');
-	console.log('Hook-memo value/identity and observer controls passed.');
+	console.log(`${payload.suite}: value/identity and observer controls passed.`);
 } finally {
 	delete globalThis[COUNTER_GLOBAL];
 	await window.happyDOM.close();

@@ -1,53 +1,61 @@
 import { acorn, tsPlugin, getCommentHandlers, parseModule as parseTsrx } from '@tsrx/core';
 import { isolateOutputOptions, publishOutput } from './parser-output.js';
+import { adoptTemplateShape } from './parser-template-shape.js';
 
 // The TypeScript parser currently enters type context after consuming `{`, so a
 // first generic call signature is tokenized as JSX. Enter before its first token;
 // leave before consuming `}` so the following ordinary JavaScript stays intact.
-const TypeScriptParser = acorn.Parser.extend(
-	tsPlugin({ jsx: true }),
-	(Base) =>
-		class extends Base {
-			tsParseDeclaration(node, value, next) {
-				// `module` has additional TSRX semantics. The compatibility parser must
-				// never reinterpret a server block as an ordinary TypeScript namespace.
-				if (value === 'module') throw new SyntaxError('TSRX module requires the TSRX parser');
-				const declaration = super.tsParseDeclaration(node, value, next);
-				if (value === 'namespace') {
-					for (
-						let current = declaration;
-						current?.type === 'TSModuleDeclaration';
-						current = current.body
-					) {
-						current.kind = 'namespace';
-						current.metadata = { path: [], module_keyword: 'namespace' };
+const createTypeScriptParser = (jsx) =>
+	acorn.Parser.extend(
+		tsPlugin({ jsx }),
+		(Base) =>
+			class extends Base {
+				tsParseDeclaration(node, value, next) {
+					// `module` has additional TSRX semantics. The compatibility parser must
+					// never reinterpret a server block as an ordinary TypeScript namespace.
+					if (value === 'module' && jsx) {
+						throw new SyntaxError('TSRX module requires the TSRX parser');
 					}
+					const declaration = super.tsParseDeclaration(node, value, next);
+					if (value === 'namespace' || value === 'module') {
+						for (
+							let current = declaration;
+							current?.type === 'TSModuleDeclaration';
+							current = current.body
+						) {
+							current.kind = value;
+							current.metadata = { path: [], module_keyword: value };
+						}
+					}
+					return declaration;
 				}
-				return declaration;
-			}
-			finishNode(node, type) {
-				const finished = super.finishNode(node, type);
-				if (type === 'TSModuleDeclaration' && finished.global) {
-					finished.kind = 'global';
-					delete finished.global;
+				finishNode(node, type) {
+					const finished = super.finishNode(node, type);
+					if (type === 'TSModuleDeclaration' && finished.global) {
+						finished.kind = 'global';
+						delete finished.global;
+					}
+					return finished;
 				}
-				return finished;
-			}
-			tsParseInterfaceBody() {
-				const previous = this.inType;
-				let members;
-				this.inType = true;
-				try {
-					this.expect(acorn.tokTypes.braceL);
-					members = this.tsParseList('TypeMembers', this.tsParseTypeMember.bind(this));
-				} finally {
-					this.inType = previous;
+				tsParseInterfaceBody() {
+					const previous = this.inType;
+					let members;
+					this.inType = true;
+					try {
+						this.expect(acorn.tokTypes.braceL);
+						members = this.tsParseList('TypeMembers', this.tsParseTypeMember.bind(this));
+					} finally {
+						this.inType = previous;
+					}
+					this.expect(acorn.tokTypes.braceR);
+					return members;
 				}
-				this.expect(acorn.tokTypes.braceR);
-				return members;
-			}
-		},
-);
+			},
+	);
+const TypeScriptParser = createTypeScriptParser(true);
+// `.ts`, `.mts`, and `.cts` source has no JSX, so `<T>value` is a type assertion
+// and `module` is TypeScript's own keyword, shaped as the native parser shapes it.
+const TypeScriptModuleParser = createTypeScriptParser(false);
 
 function supportsTypeScriptRetry(program) {
 	let genericSyntax = false;
@@ -82,11 +90,11 @@ function supportsTypeScriptRetry(program) {
 	return genericSyntax && !tsrxSyntax;
 }
 
-function parseTypeScript(source, options) {
+function parseTypeScript(source, options, Parser = TypeScriptParser) {
 	const comments = [];
 	const { onComment, add_comments } = getCommentHandlers(source, comments);
 	const keywordTokens = options?.keywordTokens ? [] : null;
-	const program = TypeScriptParser.parse(source, {
+	const program = Parser.parse(source, {
 		sourceType: 'module',
 		ecmaVersion: 'latest',
 		locations: true,
@@ -111,7 +119,7 @@ function parseTypeScript(source, options) {
 							});
 					},
 	});
-	if (!supportsTypeScriptRetry(program))
+	if (Parser === TypeScriptParser && !supportsTypeScriptRetry(program))
 		throw new SyntaxError('Unsupported TSRX compatibility retry');
 	add_comments(program);
 	if (keywordTokens !== null) program.tsrx_keyword_tokens = keywordTokens;
@@ -119,8 +127,40 @@ function parseTypeScript(source, options) {
 	return program;
 }
 
+/**
+ * Parse a `.ts`, `.mts`, or `.cts` module with TypeScript's grammar, keeping
+ * `import type`, parameter properties, `declare` fields, and every annotation.
+ * Returns null for declaration files, the `.object.ts` dialect, and every other
+ * filename, and when the grammar rejects the source, so the TSRX lanes decide.
+ */
+export function parseTypeScriptModule(source, filename, options) {
+	const pathname = typeof filename === 'string' ? filename.split(/[?#]/, 1)[0] : '';
+	if (!/\.[cm]?ts$/.test(pathname) || /\.d\.[cm]?ts$|\.object\.ts$/.test(pathname)) return null;
+	const output = isolateOutputOptions(options);
+	let program;
+	try {
+		program = parseTypeScript(source, output, TypeScriptModuleParser);
+	} catch (error) {
+		if (error instanceof SyntaxError) return null;
+		throw error;
+	}
+	publishOutput(options, output);
+	return program;
+}
+
 /** Preserve TSRX parsing and recovery; retry rejected ordinary TS/JSX modules. */
 export function parseModule(source, filename, options) {
+	return adoptTemplateShape(parseAuthoredModule(source, filename, options));
+}
+
+/** `parseModule` for the editor's type-only output, which core prints. */
+export function parseEditorModule(source, filename, options) {
+	return adoptTemplateShape(parseAuthoredModule(source, filename, options), true);
+}
+
+function parseAuthoredModule(source, filename, options) {
+	const typeScript = parseTypeScriptModule(source, filename, options);
+	if (typeScript !== null) return typeScript;
 	const primary = isolateOutputOptions(options);
 	let program;
 	try {

@@ -1,4 +1,3 @@
-import * as React from 'octane';
 import type { RadialBarDataItem, RadialBarProps } from '../polar/RadialBar.tsrx';
 import { Sector } from '../shape/Sector.tsrx';
 import type { ShapeAnimationProps } from './types';
@@ -19,10 +18,9 @@ export interface RadialBarSectorProps extends RadialBarDataItem, ShapeAnimationP
 	isActive: boolean;
 }
 
-type RadialBarSectorComponentProps =
-	RadialBarSectorProps & {
-		option: Exclude<RadialBarProps['shape'], undefined> | RadialBarProps['activeShape'];
-	};
+type RadialBarSectorComponentProps = RadialBarSectorProps & {
+	option: Exclude<RadialBarProps['shape'], undefined> | RadialBarProps['activeShape'];
+};
 
 export function RadialBarSector({ option, ...shapeProps }: RadialBarSectorComponentProps) {
 	return <Shape option={option} DefaultShape={defaultRadialBarShape} shapeProps={shapeProps} />;

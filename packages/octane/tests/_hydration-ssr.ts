@@ -22,10 +22,9 @@ type HydrationBinding =
 	| 'select'
 	| 'solana-kit'
 	| 'testing-library'
-	| 'tanstack-pacer'
 	| 'tanstack-query'
 	| 'tanstack-virtual'
-	| 'tanstack-table';
+	| 'tiptap';
 
 const repositoryRoot = resolve(import.meta.dirname, '../../..');
 
@@ -129,9 +128,6 @@ function bindingAliases(binding: HydrationBinding) {
 		return [{ find: /^@octanejs\/react-map-gl$/, replacement: resolve(source, 'index.ts') }];
 	}
 
-	if (binding === 'tanstack-table')
-		return [{ find: /^@octanejs\/tanstack-table$/, replacement: resolve(source, 'index.ts') }];
-
 	if (binding === 'tanstack-virtual') {
 		return [{ find: /^@octanejs\/tanstack-virtual$/, replacement: resolve(source, 'index.ts') }];
 	}
@@ -140,14 +136,10 @@ function bindingAliases(binding: HydrationBinding) {
 		return [{ find: /^@octanejs\/tanstack-query$/, replacement: resolve(source, 'index.ts') }];
 	}
 
-	if (binding === 'tanstack-pacer') {
+	if (binding === 'tiptap') {
 		return [
-			{ find: /^@octanejs\/tanstack-pacer$/, replacement: resolve(source, 'index.ts') },
-			{ find: /^@octanejs\/tanstack-pacer\/(.*)$/, replacement: `${source}/$1/index.ts` },
-			{
-				find: /^@octanejs\/tanstack-store$/,
-				replacement: resolve(repositoryRoot, 'packages/tanstack-store/src/index.ts'),
-			},
+			{ find: /^@octanejs\/tiptap$/, replacement: resolve(source, 'index.ts') },
+			{ find: /^@octanejs\/tiptap\/menus$/, replacement: resolve(source, 'menus/index.ts') },
 		];
 	}
 
@@ -286,11 +278,11 @@ function hydrationTracePlugin() {
 	const contextFile = resolve(repositoryRoot, 'packages/tanstack-query/src/context.ts');
 	const sources = new Map([runtimeFile, contextFile].map((id) => [id, readFileSync(id, 'utf8')]));
 	const transformed: Array<{ id: string; sourceSha256: string }> = [];
-	const replace = (source: string, before: string, after: string, id: string) => {
-		if (source.split(before).length !== 2) {
+	const replace = (source: string, before: string, after: string, id: string, count = 1) => {
+		if (source.split(before).length !== count + 1) {
 			throw new Error(`Hydration SSR trace source preimage mismatch: ${id}`);
 		}
-		return source.replace(before, () => after);
+		return source.replaceAll(before, () => after);
 	};
 	const plugin: Plugin = {
 		name: 'octane-test-hydration-ssr-trace',
@@ -318,6 +310,13 @@ function hydrationTracePlugin() {
 					traced,
 					'\tregisterContext(ctx);\n',
 					'\tregisterContext(ctx);\n\t__testHydrationTrace.context(ctx);\n',
+					id,
+					2,
+				);
+				traced = replace(
+					traced,
+					'\tscope.$$ctxValues.set(props.context, props.value);\n',
+					'\tconst __testHydrationContext = props.context;\n\tscope.$$ctxValues.set(__testHydrationContext, props.value);\n\t__testHydrationTrace.provider(__testHydrationContext, scope, CURRENT_SCOPE);\n',
 					id,
 				);
 				traced = replace(

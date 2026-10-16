@@ -3,11 +3,11 @@ import { cpSync, existsSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { octaneMdx } from '@octanejs/mdx/vite';
-import { threeRenderers } from '@octanejs/three/config';
 import { tanstackStart } from '@octanejs/tanstack-start/plugin/vite';
 import { nitro } from 'nitro/vite';
 import { websiteMdxOptions } from './mdx-options.ts';
 import { playgroundRuntime } from './playground-runtime.ts';
+import octaneConfig from './octane.config.ts';
 
 // The upstream shadcn CLI fetches registry items directly from /r. Keep the
 // deployed tree derived from the package's checked generated output so website
@@ -26,6 +26,13 @@ function prepareShadcnRegistry(): void {
 }
 
 prepareShadcnRegistry();
+
+// Nitro takes its preset from NITRO_PRESET, otherwise from the build host:
+// Vercel, or Cloudflare Workers Builds (which sets WORKERS_CI).
+const nitroPreset = process.env.NITRO_PRESET;
+const cloudflare = nitroPreset
+	? nitroPreset.startsWith('cloudflare')
+	: Boolean(process.env.WORKERS_CI);
 
 // Does any pre-bundled dependency resolve to a checkout OUTSIDE node_modules —
 // a `link:` override in pnpm-workspace.yaml pointing at a sibling repo?
@@ -138,36 +145,16 @@ const PREBUNDLED = [
 	// the SVGLoader example module) to avoid a mid-session optimize pass.
 	'three',
 	'three/examples/jsm/loaders/SVGLoader.js',
-	// Visx primitives are raw workspace sources; these are the runtime
-	// dependencies reached by the site's Bar/Axis/Group/Scale surface.
-	// Resolve them through their owner under pnpm's isolated layout.
-	'@octanejs/visx > classnames',
-	'@octanejs/visx > d3-interpolate',
-	'@octanejs/visx > d3-path',
-	'@octanejs/visx > d3-scale',
-	'@octanejs/visx > d3-shape',
-	'@octanejs/visx > d3-time',
-	'@octanejs/visx > reduce-css-calc',
-	'@octanejs/visx > svg-path-properties',
-	// TanStack DevTools panel-host island. The whole island is reached only
-	// through @octanejs/tanstack-devtools's raw .tsrx source and the host's
-	// internal dynamic import, so Vite's scanner sees none of it. Pre-declare
-	// the ENTIRE island so it optimizes in ONE startup pass: that keeps the
-	// host's lazy mount chunk on a hash consistent with its entry (no
-	// mid-mount re-optimize → no "504 Outdated Optimize Dep") and bundles the
-	// CJS dep dayjs with a synthesized `default` export. solid-js is pinned to
-	// 1.9.14 for this island via the pnpm override (Solid 2 dropped
-	// solid-js/web); remove this block once @tanstack/devtools ships Solid 2.
-	'@tanstack/devtools',
-	'@tanstack/devtools-ui',
-	'@tanstack/devtools-client',
-	'@tanstack/devtools-event-bus',
-	'@tanstack/devtools-event-client',
-	'dayjs',
-	'goober',
-	'@solid-primitives/event-listener',
-	'@solid-primitives/keyboard',
-	'@solid-primitives/resize-observer',
+	// @octanejs/three's raw store source, reached through the same deferred
+	// chunk.
+	'@octanejs/three > zustand/vanilla',
+	// The panel host and native event client are reached through raw workspace
+	// source, beyond Vite's scanner. Resolve each through its owning package:
+	// bare transitive entries are filtered out by isDeclarable under pnpm.
+	// Bundling both roots also follows the host's lazy mount/panel imports,
+	// avoiding a second optimize pass while the devtools island is mounting.
+	'@octanejs/tanstack-devtools > @tanstack/devtools',
+	'@octanejs/devtools > @tanstack/devtools-event-client',
 ];
 
 export default defineConfig({
@@ -186,17 +173,29 @@ export default defineConfig({
 		// the pass (explicit subSlot tags compose with it), unlike router/mdx.
 		octaneMdx(websiteMdxOptions),
 		tanstackStart({
+			compiled: true,
 			// Scene modules stay client-only during Start SSR, matching the website's
 			// existing Octane renderer contract while still shipping through Vite.
 			// devtools: true enables profiling instrumentation in dev (compiled out
 			// of prod) for the /devtools demo route's <TanStackDevtools> panel.
-			octane: { renderers: threeRenderers, devtools: true },
+			octane: { ...octaneConfig.compiler, devtools: true },
 		}),
 		nitro({
 			// Emit .gz/.br siblings for static assets; Nitro's static handler
-			// negotiates them from Accept-Encoding at request time.
-			compressPublicAssets: { gzip: true, brotli: true },
-			plugins: ['./nitro-html-compress.mjs'],
+			// negotiates them from Accept-Encoding at request time. Cloudflare
+			// compresses at its edge and its asset server never serves the siblings.
+			compressPublicAssets: cloudflare ? false : { gzip: true, brotli: true },
+			// Workers re-encode any response that carries Content-Encoding, so this
+			// plugin's HTML would reach the browser compressed twice.
+			plugins: cloudflare ? [] : ['./nitro-html-compress.mjs'],
+			// The production Cloudflare preset resolves server code with `workerd`
+			// only (Nitro's own workerd dev runner adds `worker`). solid-js exports
+			// its server build under `worker`, so without it the TanStack devtools
+			// island links against solid's browser build and the SSR build fails.
+			exportConditions: cloudflare ? ['worker'] : [],
+			cloudflare: {
+				wrangler: { name: 'octane-website', compatibility_date: '2026-07-14' },
+			},
 			// Keep production on the runtime selected by the previous Vercel
 			// adapter instead of deriving it from whichever Node version builds.
 			vercel: {

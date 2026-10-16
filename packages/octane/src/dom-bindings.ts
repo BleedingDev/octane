@@ -232,39 +232,47 @@ function assertBindingRoot(root: Element, descriptor: CompiledBindings<unknown>)
 	return root;
 }
 
+/** No child, or exactly one Text node. */
+function isTextLeaf(node: Element): boolean {
+	const first = node.firstChild;
+	return first === null || (!first.nextSibling && first.nodeType === 3);
+}
+
 function resolveFixedNodes(root: Element, descriptor: CompiledBindings<unknown>): Element[] {
 	assertBindingRoot(root, descriptor);
 	const nodes: Element[] = [];
 	const childIndices: number[] = [];
+	// Each parent's next unclaimed child. Walking siblings avoids rescanning a
+	// parent's live child list.
+	const cursors: Array<ChildNode | null> = [];
 	for (let i = 0; i < descriptor.nodes.length; i++) {
-		const [parent, tag, namespace, children, , text] = descriptor.nodes[i]!;
-		const node =
-			i === 0
-				? parent === -1
-					? root
-					: undefined
-				: parent >= 0 && parent < i && descriptor.nodes[parent]![3] !== null
-					? nodes[parent]?.children[childIndices[parent]++]
-					: undefined;
+		const [parent, tag, namespace, children, openChildren, text] = descriptor.nodes[i]!;
+		// An opaque or text parent's cursor is null, and an unvisited parent has none.
+		const node = (i === 0 ? (parent === -1 ? root : undefined) : cursors[parent]) as
+			Element | null | undefined;
 		if (
-			node === undefined ||
-			descriptor.nodes[i]![4] === true ||
+			node == null ||
+			openChildren === true ||
 			node.localName !== tag ||
 			node.namespaceURI !== namespaces[namespace] ||
-			(text
-				? node.childNodes.length > 1 || (node.firstChild !== null && node.firstChild.nodeType !== 3)
-				: children !== null &&
-					(node.childNodes.length !== children || node.children.length !== children))
+			(text && !isTextLeaf(node))
 		) {
 			throw new Error(formatClientError(318));
 		}
+		if (i !== 0) {
+			cursors[parent] = node.nextSibling;
+			childIndices[parent]++;
+		}
 		nodes.push(node);
 		childIndices.push(0);
+		cursors.push(text || children === null ? null : node.firstChild);
 	}
 	for (let i = 0; i < nodes.length; i++) {
 		if (childIndices[i] !== (descriptor.nodes[i]![3] ?? 0)) {
 			throw new Error(formatClientError(319));
 		}
+		// A child the server topology does not have.
+		if (cursors[i] !== null) throw new Error(formatClientError(318));
 	}
 	return nodes;
 }
@@ -304,6 +312,9 @@ function resolveAddressedNodes(root: Element, descriptor: CompiledBindings<unkno
 		current = current.nextElementSibling;
 	}
 	const childCounts = new Array<number>(descriptor.nodes.length).fill(0);
+	// A closed parent's next unclaimed child; undefined for open, opaque and text
+	// children. Walking siblings avoids rescanning a parent's live child list.
+	const cursors: Array<ChildNode | null | undefined> = [];
 	for (let i = 0; i < descriptor.nodes.length; i++) {
 		const [parent, tag, namespace, children, openChildren, text] = descriptor.nodes[i]!;
 		const node = nodes[i];
@@ -315,25 +326,26 @@ function resolveAddressedNodes(root: Element, descriptor: CompiledBindings<unkno
 				? parent !== -1 || node !== root
 				: parent < 0 ||
 					parent >= i ||
-					descriptor.nodes[parent]![3] === null ||
 					node.parentElement !== nodes[parent] ||
-					(descriptor.nodes[parent]![4] !== true &&
-						nodes[parent]!.children[childCounts[parent]!] !== node)) ||
+					// A parent without a cursor claims no children.
+					(descriptor.nodes[parent]![4] !== true && cursors[parent] !== node)) ||
 			(openChildren && children === null) ||
-			(text
-				? node.childNodes.length > 1 || (node.firstChild !== null && node.firstChild.nodeType !== 3)
-				: children !== null &&
-					!openChildren &&
-					(node.childNodes.length !== children || node.children.length !== children))
+			(text && !isTextLeaf(node))
 		) {
 			throw new Error(formatClientError(321));
 		}
-		if (parent !== -1) childCounts[parent]++;
+		if (parent !== -1) {
+			childCounts[parent]++;
+			if (cursors[parent] !== undefined) cursors[parent] = node.nextSibling;
+		}
+		cursors.push(text || children === null || openChildren ? undefined : node.firstChild);
 	}
 	for (let i = 0; i < descriptor.nodes.length; i++) {
 		if (childCounts[i] !== (descriptor.nodes[i]![3] ?? 0)) {
 			throw new Error(formatClientError(322));
 		}
+		// A child the server topology does not have.
+		if (cursors[i]) throw new Error(formatClientError(321));
 	}
 	return nodes;
 }
@@ -366,7 +378,11 @@ function normalizeFixedScalar(binding: BindingOperation, value: unknown): string
 			return value == null ||
 				type === 'function' ||
 				type === 'symbol' ||
-				(binding[1] === 'attr' && type === 'boolean')
+				(binding[1] === 'attr' &&
+					(type === 'boolean' ||
+						// React's numeric props, as the renderer and SSR write them. The
+						// compiler admits only these canonical spellings.
+						((binding[2] === 'start' || binding[2] === 'rowspan') && Number.isNaN(Number(value)))))
 				? null
 				: String(value);
 	}
@@ -697,14 +713,16 @@ export function __adoptBindings<Props>(
 				preparedControls!.get(i)!.commit();
 				continue;
 			}
-			if (next[i] === previous[i]) continue;
+			const prepared = next[i]!;
+			const last = previous[i];
+			if (prepared === last) continue;
 			const binding = bindings[i]!;
-			if (binding[1] === 'classToken') previous[i] = next[i]!;
+			if (binding[1] === 'classToken') previous[i] = prepared;
 			let written: string | null | void = undefined;
 			if (binding[1] === 'styleObject') {
 				const projection = projections?.get(i);
-				if (projection) projection.writeStyle(i, next[i]!);
-				else signalConnections!.get(i)!.write!(next[i]);
+				if (projection) projection.writeStyle(i, prepared);
+				else signalConnections!.get(i)!.write!(prepared);
 			} else if (binding[1] === 'classGroup') preparedGroups!.get(i)!.commit();
 			else if (
 				(binding[1] === 'styleProperty' || binding[1] === 'styleAttribute') &&
@@ -714,12 +732,12 @@ export function __adoptBindings<Props>(
 				let style = styles.get(i);
 				if (!style)
 					styles.set(i, (style = __createBindingStyleRestoration(nodes[binding[0]]!, binding)));
-				style.write(next[i] as string | null);
-			} else written = write(nodes[binding[0]]!, binding, next[i] as string | null);
+				style.write(prepared as string | null);
+			} else written = write(nodes[binding[0]]!, binding, prepared as string | null);
 			if (!disposed) {
-				previous[i] = next[i]!;
-				// Only fixed scalar and URL channels participate in this legacy handoff,
-				// publishing the value left in the DOM. New grouped/style/control
+				previous[i] = prepared;
+				// Only fixed scalar, URL and style channels participate in this legacy
+				// handoff, publishing the value left in the DOM. New grouped/control
 				// channels keep the native lease protocol.
 				if (
 					binding[1] === 'attr' ||
@@ -728,11 +746,16 @@ export function __adoptBindings<Props>(
 					binding[1] === 'class' ||
 					binding[1] === 'url' ||
 					binding[1] === 'styleProperty' ||
+					binding[1] === 'styleObject' ||
 					binding[1] === 'text'
 				) {
 					const [node, name] = owned[i]!;
 					let published = written as string | null;
-					if (binding[1] === 'styleProperty') {
+					// A whole style owns the entire inline style, so it publishes its
+					// canonical CSS text, as hydration reads it.
+					if (binding[1] === 'styleObject')
+						published = (node as HTMLElement | SVGElement).style.cssText;
+					else if (binding[1] === 'styleProperty') {
 						const style = (node as HTMLElement | SVGElement).style;
 						const value = style.getPropertyValue(binding[2]);
 						published =
@@ -1040,8 +1063,7 @@ export function __adoptBindings<Props>(
 			ancestry.push([node, node.parentNode]);
 		// Renderer seed/reveal sidecars are consumed before native hydration.
 		// Authored siblings still identify the exact host site across that cleanup.
-		const sibling = (node: Node, previous: boolean): Node | null => {
-			let next = previous ? node.previousSibling : node.nextSibling;
+		const skip = (next: Node | null, previous: boolean): Node | null => {
 			while (
 				next?.nodeType === 1 &&
 				(next as Element).localName === 'script' &&
@@ -1052,11 +1074,17 @@ export function __adoptBindings<Props>(
 				next = previous ? next.previousSibling : next.nextSibling;
 			return next;
 		};
+		const sibling = (node: Node, previous: boolean): Node | null =>
+			skip(previous ? node.previousSibling : node.nextSibling, previous);
+		const site = host.parentNode;
 		const previousSibling = sibling(host, true);
 		const nextSibling = sibling(host, false);
 		let handoff: BindingHandoff | undefined;
 		handle[BINDING_HANDOFF] = () => {
 			if (handoff !== undefined) return handoff;
+			// Any change of neighbor is a different site.
+			const adjacent = (recorded: Node | null, previous: boolean): boolean =>
+				sibling(host, previous) === recorded;
 			return (handoff = {
 				id: descriptor.id,
 				root: host,
@@ -1079,9 +1107,16 @@ export function __adoptBindings<Props>(
 					host.parentNode !== null &&
 					host.ownerDocument === document &&
 					ancestry.every(([node, parent]) => node.parentNode === parent) &&
-					sibling(host, true) === previousSibling &&
-					sibling(host, false) === nextSibling &&
+					adjacent(previousSibling, true) &&
+					adjacent(nextSibling, false) &&
 					host.getAttribute('data-octane-bindings') === descriptor.id,
+				// The authored node before the host still marks its site after the
+				// host leaves, including when an external clone now stands there.
+				displaced: (parent, node) =>
+					parent === site &&
+					node !== host &&
+					(node === null || node.parentNode === parent) &&
+					(node === null ? skip(parent.lastChild, true) : sibling(node, true)) === previousSibling,
 				active: () => !disposed,
 				retire: (publish) => dispose(undefined, publish, true),
 			});
@@ -1217,11 +1252,13 @@ export function __adoptScalarBindings<Props>(
 			position++
 		) {
 			const i = indices ? indices[position]! : position;
-			if (next[i] === previous[i]) continue;
+			const value = next[i]!;
+			const last = previous[i];
+			if (value === last) continue;
 			const binding = bindings[i]!;
-			const published = writeChannel(nodes[binding[0]]!, binding, next[i]!);
+			const published = writeChannel(nodes[binding[0]]!, binding, value);
 			if (!disposed) {
-				previous[i] = next[i];
+				previous[i] = value;
 				const node = owned[i]![0];
 				let claims = domBindingClaims.get(node);
 				if (claims === undefined) domBindingClaims.set(node, (claims = new Map()));

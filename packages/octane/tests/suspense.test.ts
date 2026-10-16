@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { mount, act, nextPaint } from './_helpers';
 import {
 	BasicSuspense,
@@ -23,6 +23,9 @@ import {
 	ThrownResourceSuspense,
 	ThrownResourceJsxSuspense,
 	PromiseThrownFromLayout,
+	BatchedFreshPromiseResume,
+	ConditionalUseResume,
+	UpdatedSiblingResume,
 } from './_fixtures/suspense.tsrx';
 
 interface Deferred<T> {
@@ -37,6 +40,23 @@ function deferred<T>(): Deferred<T> {
 		reject = rej;
 	});
 	return { promise, resolve, reject };
+}
+
+// An external store whose listeners are notified directly, outside any event.
+function toggleStore() {
+	let on = true;
+	const listeners = new Set<() => void>();
+	return {
+		read: () => on,
+		subscribe(listener: () => void) {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
+		},
+		turnOff() {
+			on = false;
+			for (const listener of listeners) listener();
+		},
+	};
 }
 
 function resourceReader<T>(promise: Promise<T>, wakeable: PromiseLike<T> = promise): () => T {
@@ -411,6 +431,75 @@ describe('Suspense — React conformance', () => {
 		expect(r.find('.both').textContent).toBe('X/Y');
 		r.unmount();
 	});
+
+	it.each([
+		['its own store', false],
+		['a parent store prop', true],
+	])(
+		'replays a shifted use() call with its own promise when %s changes in the resume task',
+		async (_, viaProps) => {
+			const toggle = toggleStore();
+			const x = deferred<string>();
+			const y = deferred<string>();
+			const props = { first: x.promise, second: y.promise, toggle, viaProps };
+			const r = mount(ConditionalUseResume, props);
+			await act(() => {
+				x.resolve('x1');
+				y.resolve('y1');
+			});
+			expect(r.find('i').textContent).toBe('x1/y1');
+
+			const y2 = deferred<string>();
+			r.update(ConditionalUseResume, { ...props, second: y2.promise });
+			expect(r.find('p').textContent).toBe('pending');
+			// The retry runs before the store's render, so the replay itself sees the
+			// store turned off. Its first use() call is now use(second), at the index
+			// where the suspended attempt stored the first promise.
+			await act(async () => {
+				y2.resolve('y2');
+				toggle.turnOff();
+			});
+			expect(r.find('i').textContent).toBe('off/y2');
+			r.unmount();
+		},
+	);
+
+	it('still reuses an unchanged sibling stored promise after an updated Block replays', async () => {
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const toggle = toggleStore();
+		// After its first read, every read mints a promise that never settles.
+		const fresh = (first: Promise<string>) => {
+			let reads = 0;
+			return {
+				get promise() {
+					return reads++ === 0 ? first : new Promise<string>(() => {});
+				},
+			};
+		};
+		try {
+			const initial = deferred<string>();
+			const r = mount(UpdatedSiblingResume, { toggle, source: fresh(initial.promise) });
+			await act(() => {
+				initial.resolve('one');
+			});
+			expect(r.find('b').textContent).toBe('one');
+
+			const next = deferred<string>();
+			r.update(UpdatedSiblingResume, { toggle, source: fresh(next.promise) });
+			expect(r.find('p').textContent).toBe('pending');
+			// StoreLabel renders its update first, then the reader replays with a
+			// fresh promise and must keep the one its suspended attempt stored.
+			await act(async () => {
+				next.resolve('two');
+				toggle.turnOff();
+			});
+			expect(r.find('i').textContent).toBe('off');
+			expect(r.find('b').textContent).toBe('two');
+			r.unmount();
+		} finally {
+			errors.mockRestore();
+		}
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -586,10 +675,73 @@ describe('Suspense — parallel boundaries (no waterfall)', () => {
 		expect(r.find('.both').textContent).toBe('C/D');
 		r.unmount();
 	});
+
+	// After its first read, every read mints a promise that never settles. The
+	// replay must keep the promise its batch suspended on, as an unbatched use()
+	// call keeps the promise stored at its position.
+	function freshSource(first: Promise<string>) {
+		let reads = 0;
+		return {
+			get promise() {
+				return reads++ === 0 ? first : new Promise<string>(() => {});
+			},
+		};
+	}
+
+	it('batched unwrap: a replay keeps the promise the batch suspended on', async () => {
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const d = deferred<string>();
+			const r = mount(BatchedFreshPromiseResume, { pair: false, first: freshSource(d.promise) });
+			expect(r.find('p').textContent).toBe('pending');
+			await act(() => {
+				d.resolve('ready');
+			});
+			expect(r.find('b').textContent).toBe('ready');
+			expect(r.findAll('p')).toHaveLength(0);
+
+			// An update starts a new episode: its batch suspends on the new promise.
+			const next = deferred<string>();
+			r.update(BatchedFreshPromiseResume, { pair: false, first: freshSource(next.promise) });
+			expect(r.find('p').textContent).toBe('pending');
+			await act(() => {
+				next.resolve('next');
+			});
+			expect(r.find('b').textContent).toBe('next');
+			r.unmount();
+		} finally {
+			errors.mockRestore();
+		}
+	});
+
+	it('batched unwrap: a use() between batched calls keeps its own promise on replay', async () => {
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const a = deferred<string>();
+			const label = deferred<string>();
+			const b = deferred<string>();
+			const r = mount(BatchedFreshPromiseResume, {
+				pair: true,
+				first: freshSource(a.promise),
+				label: label.promise,
+				second: freshSource(b.promise),
+			});
+			expect(r.find('p').textContent).toBe('pending');
+			await act(() => {
+				a.resolve('A');
+				label.resolve('label');
+				b.resolve('B');
+			});
+			expect(r.find('b').textContent).toBe('A/label/B');
+			r.unmount();
+		} finally {
+			errors.mockRestore();
+		}
+	});
 });
 
 describe('Suspense — useDeferredValue (React 18 stale-data pattern)', () => {
-	it('returns previous value while new value suspends; commits on microtask', async () => {
+	it('returns previous value while new value suspends; commits in a later task', async () => {
 		const d1 = deferred<string>();
 		const r = mount(DeferredSwap, { promise: d1.promise });
 		expect(r.find('.fallback').textContent).toBe('first load');
@@ -602,7 +754,7 @@ describe('Suspense — useDeferredValue (React 18 stale-data pattern)', () => {
 		// Update with a NEW pending promise. On the FIRST render after the prop
 		// change, useDeferredValue returns the PREVIOUS value (d1.promise), so
 		// use() reads the cached fulfilled state (no suspend) AND `props !== deferred`
-		// flips the class to 'stale'. A microtask later, useDeferredValue commits
+		// flips the class to 'stale'. A task later, useDeferredValue commits
 		// the new value; that re-render suspends → fallback shows briefly until
 		// d2 resolves and the body completes.
 		const d2 = deferred<string>();

@@ -11,7 +11,9 @@
 // megabytes of assets, so nothing loads until the panel comes into view. The
 // Web and Device tabs then both stay mounted: switching to the QR code and
 // back should not restart the example.
-import { useEffect, useRef, useState } from 'octane';
+'use strong';
+
+import { useEffect, useLayoutSnapshot, useRef, useState } from 'octane';
 import { bundleUrl, loadExample, resolveEntry, type LoadedExample } from './example-data.ts';
 import { DeviceScan } from './DeviceScan.tsrx';
 import { LynxPreview } from './LynxPreview.tsrx';
@@ -50,7 +52,11 @@ interface GoProps {
 export function Go(props: GoProps) @{
 	const panel = useRef<HTMLDivElement | null>(null);
 	const body = useRef<HTMLDivElement | null>(null);
-	const [near, setNear] = useState(false);
+	const [intersecting, setIntersecting] = useState(false);
+	const needsObserver = useLayoutSnapshot(() => typeof IntersectionObserver !== 'undefined', {
+		initial: true,
+	});
+	const near = intersecting || !needsObserver;
 	const [loaded, setLoaded] = useState<LoadedExample | null>(null);
 	const [error, setError] = useState('');
 	const [openFile, setOpenFile] = useState('');
@@ -64,17 +70,16 @@ export function Go(props: GoProps) @{
 	// assets — waits on this.
 	useEffect(() => {
 		const element = panel.current;
-		if (!element || near) return;
-		if (typeof IntersectionObserver === 'undefined') {
-			setNear(true);
-			return;
-		}
-		const observer = new IntersectionObserver((entries) => {
-			if (entries.some((entry) => entry.isIntersecting)) {
-				setNear(true);
-				observer.disconnect();
-			}
-		}, { rootMargin: PRELOAD_MARGIN });
+		if (!element || near || typeof IntersectionObserver === 'undefined') return;
+		const observer = new IntersectionObserver(
+			(entries) => {
+				if (entries.some((entry) => entry.isIntersecting)) {
+					setIntersecting(true);
+					observer.disconnect();
+				}
+			},
+			{ rootMargin: PRELOAD_MARGIN },
+		);
 		observer.observe(element);
 		return () => observer.disconnect();
 	});
@@ -139,16 +144,14 @@ export function Go(props: GoProps) @{
 	};
 	const onSeparatorKeyDown = (event: KeyboardEvent) => {
 		if (event.key === 'ArrowLeft') setPreviewWidth(clampPreview(previewWidth + KEYBOARD_STEP));
-		else if (event.key === 'ArrowRight') setPreviewWidth(
-			clampPreview(previewWidth - KEYBOARD_STEP),
-		);
+		else if (event.key === 'ArrowRight')
+			setPreviewWidth(clampPreview(previewWidth - KEYBOARD_STEP));
 		else if (event.key === 'Home') setPreviewWidth(clampPreview(DESIGN_WIDTH));
 		else return;
 		event.preventDefault();
 	};
 
-	const entry =
-		loaded ? resolveEntry(loaded.metadata, props.entry) : undefined;
+	const entry = loaded ? resolveEntry(loaded.metadata, props.entry) : undefined;
 	const sources = loaded?.source.files ?? [];
 	const current = sources.find(({ path }) => path === openFile) ?? sources[0];
 	const webBundle = entry?.webFile;
@@ -418,12 +421,14 @@ export function Go(props: GoProps) @{
 								aria-selected={source.path === current?.path}
 								title={source.path}
 								onClick={() => setOpenFile(source.path)}
-							>{fileLabel(source.path) as string}</button>
+							>
+								{fileLabel(source.path) as string}
+							</button>
 						}
 					</div>
 					<div class="go-source">
 						@if (current) {
-							<div class="go-source-code" dangerouslySetInnerHTML={{ __html: current.html }}></div>
+							<div class="go-source-code" dangerouslySetInnerHTML={current.html}></div>
 						} @else if (error) {
 							<p class="go-message go-message-error">
 								{'This example could not be loaded. ' + error}
@@ -459,14 +464,18 @@ export function Go(props: GoProps) @{
 								class={['go-tab', tab === 'web' && 'is-active']}
 								aria-selected={tab === 'web'}
 								onClick={() => setTab('web')}
-							>Web</button>
+							>
+								Web
+							</button>
 							<button
 								type="button"
 								role="tab"
 								class={['go-tab', tab === 'device' && 'is-active']}
 								aria-selected={tab === 'device'}
 								onClick={() => setTab('device')}
-							>Device</button>
+							>
+								Device
+							</button>
 						</div>
 						<div class="go-actions">
 							@if (showRefresh) {

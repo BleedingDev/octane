@@ -7,7 +7,13 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { bridgeReport, KNOWN_BINDINGS, KNOWN_BINDING_PACKAGE_DIRS } from './bridge.js';
+import {
+	bridgeReport,
+	KNOWN_BINDINGS,
+	KNOWN_BINDING_PACKAGE_DIRS,
+	UPSTREAM_ADAPTERS,
+} from './bridge.js';
+import { explainStrong, STRONG_EXPLAIN_TOOL } from './strong.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const PACKAGE_ROOT = resolve(dirname(__filename), '..');
@@ -21,6 +27,7 @@ export const BUNDLED_SKILLS = {
 	'bridge-react-package': 'skills/bridge-react-package.md',
 	'build-octane-software': 'skills/build-octane-software.md',
 	'migrate-react-component': 'skills/migrate-react-component.md',
+	'migrate-to-strong': 'skills/migrate-to-strong.md',
 	'react-divergences': 'skills/react-divergences.md',
 	'setup-ssr': 'skills/setup-ssr.md',
 };
@@ -28,13 +35,16 @@ export const BUNDLED_SKILLS = {
 export const REPO_SKILLS = {
 	'authoring-tsrx': '.rulesync/skills/authoring-tsrx/SKILL.md',
 	'bug-hunter': '.rulesync/skills/bug-hunter/SKILL.md',
+	'concise-code': '.rulesync/skills/concise-code/SKILL.md',
 	'create-a-pr': '.rulesync/skills/create-a-pr/SKILL.md',
 	'handle-issue': '.rulesync/skills/handle-issue/SKILL.md',
 	'octane-core-extend': '.rulesync/skills/octane-core-extend/SKILL.md',
+	'perf-review': '.rulesync/skills/perf-review/SKILL.md',
 	'performance-audit': '.rulesync/skills/performance-audit/SKILL.md',
 	// Stable entry point routes maintenance and React implementation ports.
 	'react-library-port': '.rulesync/skills/react-library-port/SKILL.md',
 	'octane-react-library-port': '.rulesync/skills/octane-react-library-port/SKILL.md',
+	'resolve-octane-defect': '.rulesync/skills/resolve-octane-defect/SKILL.md',
 	triage: '.rulesync/skills/triage/SKILL.md',
 	'update-bindings': '.rulesync/skills/update-bindings/SKILL.md',
 };
@@ -77,6 +87,7 @@ export const BENCHMARK_SUITES = [
 	'hydration-range-compaction',
 	'deferred-hydration-boundaries',
 	'hydration-render-phase-queue',
+	'app-frame-hydration',
 	'behavior-root-events',
 	'radix-collection-order',
 	'router-dispatch',
@@ -136,6 +147,7 @@ export const BENCHMARK_SUITES = [
 	'codegen-size',
 	'dom-binding-fixed-props',
 	'hook-memo',
+	'render-values',
 	'body-ownership',
 	'dom-attributes',
 	'transition-hooks',
@@ -507,7 +519,7 @@ function registerUserTools(server, repoRoot, repoMode) {
 		{
 			title: 'Octane skill',
 			description:
-				'Fetch an Octane agent skill by name. Call when starting work the skill covers: build-octane-software for engineering gates, bridge-react-package for porting a React library, migrate-react-component for JSX to .tsrx, react-divergences before assuming React behavior, setup-ssr for server rendering.' +
+				'Fetch an Octane agent skill by name. Call when starting work the skill covers: build-octane-software for engineering gates, bridge-react-package for porting a React library, migrate-react-component for JSX to .tsrx, migrate-to-strong for moving modules to Strong mode, react-divergences before assuming React behavior, setup-ssr for server rendering.' +
 				(repoMode ? ' Repo skills cover octane maintainer workflows.' : ''),
 			inputSchema: {
 				name: z.enum(Object.keys(skills)),
@@ -576,14 +588,30 @@ function registerUserTools(server, repoRoot, repoMode) {
 	);
 
 	server.registerTool(
+		STRONG_EXPLAIN_TOOL.name,
+		{
+			title: STRONG_EXPLAIN_TOOL.title,
+			description: STRONG_EXPLAIN_TOOL.description,
+			inputSchema: {
+				code: z.string().optional().describe(STRONG_EXPLAIN_TOOL.codeDescription),
+				recipe: z.string().optional().describe(STRONG_EXPLAIN_TOOL.recipeDescription),
+			},
+		},
+		async (input) => {
+			const { ok, text: body } = explainStrong(input);
+			return ok ? text(body) : { ...text(body), isError: true };
+		},
+	);
+
+	server.registerTool(
 		'octane_bindings',
 		{
 			title: 'List official Octane bindings',
 			description:
-				'Return the map of React packages that already have maintained @octanejs/* Octane ports. Check here before bridging by hand.',
+				'Return the map of React packages that already have maintained Octane ports, from @octanejs/* or the upstream library. Check here before bridging by hand.',
 			inputSchema: {},
 		},
-		async () => text(JSON.stringify(KNOWN_BINDINGS, null, 2)),
+		async () => text(JSON.stringify({ ...KNOWN_BINDINGS, ...UPSTREAM_ADAPTERS }, null, 2)),
 	);
 }
 

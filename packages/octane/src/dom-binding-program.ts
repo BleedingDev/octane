@@ -128,8 +128,8 @@ export function __activateBindingAdapters(
 		definition: Extract<BindingAdapter, { kind: 'ref' }>;
 		node: Element;
 		value: unknown;
-		dependencies?: readonly unknown[];
-		cleanup?: () => void;
+		dependencies?: readonly unknown[] | undefined;
+		cleanup?: (() => void) | undefined;
 	}> = [];
 	let disposed = false;
 	let cleaned = false;
@@ -412,13 +412,18 @@ interface RegionInstance {
 	items: Map<string, FragmentInstance> | null;
 	text: Text | null;
 	signal?: BindingSignalConnection;
-	signalPlan?: RegionPlan;
+	signalPlan?: RegionPlan | undefined;
 	signalFrame?: number;
 	unresolvedSlot?: boolean;
-	slot?: string;
+	slot?: string | undefined;
 	/** A `@try` region keeps showing `@catch` until its `reset` runs. */
-	caught?: { readonly error: unknown };
+	caught?: { readonly error: unknown } | undefined;
 	reset?: () => void;
+	/**
+	 * A `@try` region still shows the server's resolved body, which no client
+	 * preparation has committed. It stays while the client's own read is pending.
+	 */
+	adopted?: boolean;
 }
 
 interface FragmentInstance {
@@ -434,15 +439,15 @@ interface FragmentInstance {
 	signals?: Map<number, BindingSignalConnection>;
 	projections?: Map<number, BindingProjectionConnection>;
 	controls?: Map<number, BindingControlLease>;
-	signalPlan?: FragmentPlan;
+	signalPlan?: FragmentPlan | undefined;
 	signalFrame?: number;
 	environment: readonly unknown[];
 	fresh: boolean;
 	disposed: boolean;
 	activated: boolean;
 	controller?: AbortController;
-	cleanup?: BindingActivationCleanup;
-	updateAdapters?: () => void;
+	cleanup?: BindingActivationCleanup | undefined;
+	updateAdapters?: (() => void) | undefined;
 	/** Cleanups returned by mount-only effects; `null` once they have run. */
 	effects?: Array<() => void> | null;
 }
@@ -454,8 +459,8 @@ interface FragmentPlan {
 	initial: Array<string | boolean | readonly string[] | null> | null;
 	regions: RegionPlan[];
 	groups: Map<number, { commit(): void }>;
-	controls?: Map<number, BindingControlPrepared>;
-	adapters?: () => void;
+	controls?: Map<number, BindingControlPrepared> | undefined;
+	adapters?: (() => void) | undefined;
 }
 
 interface RegionPlan {
@@ -466,6 +471,8 @@ interface RegionPlan {
 	text: string | null;
 	slot?: string;
 	caught?: { readonly error: unknown };
+	/** Leave an adopted `@try` body in place, uncommitted and inactive. */
+	keep?: boolean;
 }
 
 interface Transaction {
@@ -476,24 +483,24 @@ interface Transaction {
 	contentEditable: boolean;
 	restoreStyles: boolean;
 	preservePresentation?: boolean;
-	signals?: ReturnType<typeof __createBindingSignals>;
-	styles?: ReturnType<typeof __createBindingStyles>;
-	projections?: ReturnType<typeof __createBindingProjections>;
-	controls?: ReturnType<typeof __createBindingControls>;
-	hostOperations?: BindingProgramHostOperations;
-	initialOperations?: BindingProgramInitializers;
-	list?: BindingListCapability;
-	tryRegions?: BindingTryCapability;
-	effects?: BindingEffectsCapability;
+	signals?: ReturnType<typeof __createBindingSignals> | undefined;
+	styles?: ReturnType<typeof __createBindingStyles> | undefined;
+	projections?: ReturnType<typeof __createBindingProjections> | undefined;
+	controls?: ReturnType<typeof __createBindingControls> | undefined;
+	hostOperations?: BindingProgramHostOperations | undefined;
+	initialOperations?: BindingProgramInitializers | undefined;
+	list?: BindingListCapability | undefined;
+	tryRegions?: BindingTryCapability | undefined;
+	effects?: BindingEffectsCapability | undefined;
 	notifySignal?(prepare: () => () => void): void;
-	reads?: BindingReadTracker;
+	reads?: BindingReadTracker | undefined;
 	refresh?: () => void;
 	run?: <T>(callback: () => T) => T;
 	waits?: WeakSet<object>;
 	preparing?: boolean;
 	frame: number;
-	published?: () => void;
-	preview?: BindingPreview;
+	published?: (() => void) | undefined;
+	preview?: BindingPreview | undefined;
 	consumer?: NativeTransitionNotify;
 }
 
@@ -625,7 +632,7 @@ export function __createStructuralBindingHandoff(
 				if (
 					region.definition.kind === 'text' &&
 					(node.nextSibling !== (region.text ?? region.range.end) ||
-						(region.text !== null && region.text.nextSibling !== region.range.end))
+						(region.text != null && region.text.nextSibling !== region.range.end))
 				)
 					return false;
 				next = region.range.end.nextSibling;
@@ -676,6 +683,19 @@ export function __createStructuralBindingHandoff(
 
 const stopped = {};
 const programRoots = /* @__PURE__ */ new WeakSet<Comment>();
+
+/**
+ * @internal An adopted program whose first preparation suspended has no live
+ * listeners yet. A caller that owes it replayed input registers `settled`,
+ * which runs once: after the first commit activates the view (true), or when
+ * the program is disposed without one (false). Returns false once committed.
+ */
+export const BINDING_FIRST_COMMIT = Symbol('octane.binding-first-commit');
+
+/** @internal */
+export interface BindingFirstCommit {
+	[BINDING_FIRST_COMMIT]?(settled: (activated: boolean) => void): boolean;
+}
 
 function requireActive(transaction: Transaction): void {
 	if (transaction.disposed) throw stopped;
@@ -921,9 +941,10 @@ function adoptRegion(region: RegionInstance, id: string, transaction: Transactio
 			transaction,
 		);
 	} else if (definition.kind === 'text') {
+		const end = range.end;
 		const text = range.start.nextSibling;
-		if (text !== range.end) {
-			if (text?.nodeType !== 3 || text.nextSibling !== range.end) mismatch();
+		if (text !== end) {
+			if (text?.nodeType !== 3 || text.nextSibling !== end) mismatch();
 			region.text = text as Text;
 		}
 	} else if (definition.kind === 'try') {
@@ -976,8 +997,10 @@ function adoptTry(
 	const body = rangeAt(node, range.end);
 	if (body.start.data !== HYDRATION_START || body.end.nextSibling !== range.end) mismatch();
 	const fragment = definition.arms[arm];
-	if (fragment) region.child = resolveFragment(fragment, id, body, false, transaction);
-	else if (body.start.nextSibling !== body.end) mismatch();
+	if (fragment) {
+		region.child = resolveFragment(fragment, id, body, false, transaction);
+		region.adopted = arm === 0;
+	} else if (body.start.nextSibling !== body.end) mismatch();
 }
 
 function createFragment(
@@ -1326,6 +1349,13 @@ function prepareTry(
 				// Tracked reads already reported their source before throwing. Only an
 				// opaque thenable needs its own wake-up.
 				if ((transaction.reads?.size() ?? 0) === observed) waitFor(thrown, transaction);
+				// Like the renderer's resolved server boundary, server content stays
+				// while the client's own read is pending, then hydrates in place.
+				if (region.adopted) {
+					candidate.arm = 0;
+					candidate.keep = true;
+					return;
+				}
 				candidate.arm = 1;
 				const pending = descriptor.arms[1];
 				if (pending)
@@ -1482,12 +1512,16 @@ function commitRegion(plan: RegionPlan, id: string, transaction: Transaction): v
 		transaction.list!.commit(plan, id, transaction);
 		return;
 	}
+	if (plan.keep) return;
 	const oldChild = region.child;
 	const child = plan.child?.instance ?? null;
 	region.child = child;
 	region.arm = plan.arm;
 	if (definition.kind === 'slot') region.slot = plan.slot;
-	else if (definition.kind === 'try') region.caught = plan.caught;
+	else if (definition.kind === 'try') {
+		region.caught = plan.caught;
+		region.adopted = false;
+	}
 	if (oldChild !== child) {
 		if (oldChild) releaseInstance(oldChild, transaction);
 		if (transaction.disposed) return;
@@ -1511,12 +1545,14 @@ function commitRegion(plan: RegionPlan, id: string, transaction: Transaction): v
 }
 
 function writeText(region: RegionInstance, value: string): void {
-	if (region.text === null) {
+	const text = region.text;
+	if (text === null) {
 		if (value !== '') {
-			region.text = region.range.start.ownerDocument.createTextNode(value);
-			region.range.end.parentNode!.insertBefore(region.text, region.range.end);
+			const end = region.range.end;
+			const node = (region.text = end.ownerDocument.createTextNode(value));
+			end.parentNode!.insertBefore(node, end);
 		}
-	} else if (region.text.data !== value) region.text.data = value;
+	} else if (text.data !== value) text.data = value;
 }
 
 function writeOperation(
@@ -1526,7 +1562,9 @@ function writeOperation(
 	group: { commit(): void } | undefined,
 	transaction: Transaction,
 ): void {
-	if (transaction.disposed || instance.disposed || value === instance.previous[index]) return;
+	if (transaction.disposed || instance.disposed) return;
+	const previous = instance.previous[index];
+	if (value === previous) return;
 	const operation = instance.definition.bindings[index]!;
 	if (operation[1] === 'classToken') instance.previous[index] = value;
 	if (operation[1] === 'styleObject') {
@@ -1611,7 +1649,8 @@ function activateInstance(instance: FragmentInstance, transaction: Transaction):
 		update?.();
 	}
 	for (const region of instance.regions) {
-		if (region.child) activateInstance(region.child, transaction);
+		// A kept server body activates with the commit that first prepares it.
+		if (region.child && !region.adopted) activateInstance(region.child, transaction);
 		if (region.items)
 			for (const child of region.items.values()) activateInstance(child, transaction);
 	}
@@ -1641,6 +1680,21 @@ function releaseEffects(instance: FragmentInstance, attempt: (callback: () => vo
 	const effects = instance.effects;
 	instance.effects = null;
 	if (effects) for (const cleanup of effects) attempt(cleanup);
+}
+
+/**
+ * Error path only: inspection allocates. Retiring the owner of a source this
+ * program observes (a document being left) notifies it, and the read that
+ * wakes then throws. Every capability that subscribes answers for its own.
+ */
+function observesRetiredSource(transaction: Transaction): boolean {
+	if (transaction.reads?.retired()) return true;
+	for (const instance of transaction.all) {
+		for (const region of instance.regions) if (region.signal?.retired()) return true;
+		for (const connections of [instance.signals, instance.projections, instance.controls])
+			for (const connection of connections?.values() ?? []) if (connection.retired()) return true;
+	}
+	return false;
 }
 
 function bindProgram<Props>(
@@ -1689,6 +1743,12 @@ function bindProgram<Props>(
 	let revision = 0;
 	let mounted = !mount;
 	let committed = false;
+	let firstCommit: ((activated: boolean) => void) | undefined;
+	const settleFirstCommit = (activated: boolean): void => {
+		const settled = firstCommit;
+		firstCommit = undefined;
+		settled?.(activated);
+	};
 	let unsubscribe: (() => void) | undefined;
 	const signal = options?.signal;
 	const dispose = (disposal?: { preserveDOM?: boolean }, publish?: () => void): void => {
@@ -1697,6 +1757,7 @@ function bindProgram<Props>(
 			return;
 		}
 		transaction.disposed = true;
+		settleFirstCommit(false);
 		signalUpdates?.clear();
 		signal?.removeEventListener('abort', abort);
 		let failed = false;
@@ -1809,10 +1870,11 @@ function bindProgram<Props>(
 				} catch (error) {
 					// A program that reads signals waits for them, like a suspended root
 					// keeping its server markup: the last committed DOM stays live and
-					// every source the preparation reached can retry it.
+					// every source the preparation reached can retry it. A retired
+					// observed source instead ends the presentation below.
 					if (
 						error === stopped ||
-						(error as Error | null)?.name === 'ScopeDisposedError' ||
+						(committed && observesRetiredSource(transaction)) ||
 						!transaction.reads?.fail(error, committed)
 					)
 						throw error;
@@ -1855,18 +1917,21 @@ function bindProgram<Props>(
 				}
 				transaction.candidates.clear();
 				activateInstance(instance!, transaction);
+				settleFirstCommit(true);
 			}
 		} catch (error) {
 			if (error === stopped) return;
+			// Retiring the owner of a source this program observes ends a live
+			// presentation, which keeps its last DOM; it is not an error. A read of
+			// an unrelated retired scope, or a presentation that never committed,
+			// still fails. Ask before dispose releases the observed sources.
+			const ended = committed && observesRetiredSource(transaction);
 			try {
 				dispose();
 			} catch {
 				/* The publication failure remains primary. */
 			}
-			// Retiring the data's owner (a document being left) notifies its readers.
-			// That ends a live presentation, which keeps its last DOM; it is not an
-			// error. A presentation that never committed still reports it.
-			if (committed && (error as Error | null)?.name === 'ScopeDisposedError') return;
+			if (ended) return;
 			throw error;
 		} finally {
 			transaction.preparing = false;
@@ -1972,6 +2037,7 @@ function bindProgram<Props>(
 							transaction.published?.();
 							for (const fragment of preview.fragments) transaction.candidates.delete(fragment);
 							activateInstance(instance!, transaction);
+							settleFirstCommit(true);
 						} finally {
 							busy = false;
 						}
@@ -1984,6 +2050,11 @@ function bindProgram<Props>(
 	const handle = {
 		refresh,
 		dispose,
+		[BINDING_FIRST_COMMIT](settled: (activated: boolean) => void): boolean {
+			if (committed || transaction.disposed) return false;
+			firstCommit = settled;
+			return true;
+		},
 		[BINDING_HANDOFF](): BindingHandoff {
 			const structural =
 				descriptor.root.handoff === 'structural' || descriptor.root.conditionalRest === true;

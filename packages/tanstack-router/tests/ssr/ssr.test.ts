@@ -9,6 +9,52 @@ import { renderReactHeadContent } from './_react-head-oracle.js';
 import type { ServerManifest } from '@tanstack/router-core';
 
 describe('@octanejs/tanstack-router SSR', () => {
+	it('preserves absent and empty head content without merging distinct user tags', async () => {
+		const router = makeSsrRouter();
+		router.routeTree.options.head = () => ({
+			styles: [{ id: 'empty-style' }, { id: 'empty-style', children: '' }],
+			scripts: [{ src: '/empty.js' }, { src: '/empty.js', children: '' }],
+		});
+		attachRouterServerSsrUtils({
+			router,
+			manifest: { routes: {}, inlineStyle: { attrs: { id: 'manifest-empty' } } },
+		});
+		await router.load();
+		try {
+			const { html } = renderToStaticMarkup(ManagedHeadOwners as any, {
+				router,
+				secondary: false,
+			});
+			expect(html.match(/<style\b[^>]*id="empty-style"[^>]*><\/style>/g)).toHaveLength(2);
+			expect(html.match(/<script\b[^>]*src="\/empty.js"[^>]*><\/script>/g)).toHaveLength(2);
+			expect(html).toMatch(/<style\b[^>]*id="manifest-empty"[^>]*><\/style>/);
+			expect(html).not.toContain('undefined');
+		} finally {
+			router.serverSsr!.cleanup();
+		}
+	});
+
+	it('keeps internal script metadata out of runtime-supplied attributes', async () => {
+		const router = makeSsrRouter();
+		const attrs = Object.freeze({
+			src: '/entry.js',
+			__executeOnMount: 'caller-value',
+			'data-owner': 'route',
+		});
+		router.routeTree.options.scripts = () => [attrs];
+		attachRouterServerSsrUtils({ router, manifest: undefined });
+		await router.load();
+		try {
+			const { html } = renderToStaticMarkup(RouterServer as any, { router });
+			expect(html).toContain('src="/entry.js"');
+			expect(html).toContain('data-owner="route"');
+			expect(html).not.toContain('__executeOnMount');
+			expect(attrs.__executeOnMount).toBe('caller-value');
+		} finally {
+			router.serverSsr!.cleanup();
+		}
+	});
+
 	// Per TanStack/router PR #7847 snapshot 753f919e,
 	// packages/octane-router/tests/conformance/ssr.test.ts:14.
 	// @parity-case adapted:tanstack-router-ssr

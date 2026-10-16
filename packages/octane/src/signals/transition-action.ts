@@ -8,23 +8,22 @@ import type {
 } from './graph.js';
 import { ScopeDisposedError, SignalFrameError } from './errors.js';
 import {
-	NativeAdoptionMiss,
 	NATIVE_TRANSITION_CONSUMER,
 	SIGNAL_DEPENDENT_NODE,
+	isNativeAdoptionMiss,
 	type NativeReadSource,
 	type NativeTransitionConsumer,
 	type NativeTransitionNotify,
 	type SignalDependencyNotify,
 } from './read-protocol.js';
+import type { DerivedBinding } from './computations.js';
+import type { ScopeImpl } from './engine.js';
 import {
 	activeCandidate,
-	addCandidateWriter,
 	candidateGraph as bridge,
-	candidateWriters,
+	candidateHooks,
 	CandidateUnsupportedError,
-	removeCandidateWriter,
 	swapActiveSignalCandidate,
-	swapCandidateInvalidation,
 	withoutSignalCandidate,
 } from './transition-state.js';
 
@@ -67,17 +66,17 @@ export interface SignalActionNode {
 	revision: number;
 	readonly epoch: number;
 	readonly stop: () => void;
-	producer?: CandidateProducer;
+	producer?: CandidateProducer | undefined;
 	written?: boolean;
 	withdrawn?: boolean;
-	urgentOperations?: Array<(previous: unknown) => unknown>;
+	urgentOperations?: Array<(previous: unknown) => unknown> | undefined;
 	sources?: Partial<Record<SignalReadMode, NativeCandidateSource>>;
 }
 
 interface PreparationWake {
-	notify?: (event: { kind: 'retry' | 'invalid'; token: object }) => void;
-	validate?: () => boolean;
-	token?: object;
+	notify?: ((event: { kind: 'retry' | 'invalid'; token: object }) => void) | undefined;
+	validate?: (() => boolean) | undefined;
+	token?: object | undefined;
 	queued: boolean;
 	invalid: boolean;
 }
@@ -105,6 +104,69 @@ function queuePreparationWake(watch: PreparationWake, invalid = false): void {
 
 function settlePreparationWake(watch: PreparationWake): void {
 	queuePreparationWake(watch);
+}
+
+let candidateWriteCount = 0;
+let candidateWriters: WeakMap<ScopedNode, Set<SignalActionFrame>> | undefined;
+
+function addCandidateWriter(node: ScopedNode, frame: SignalActionFrame): void {
+	if (candidateWriteCount++ === 0) {
+		candidateWriters = new WeakMap();
+		candidateHooks.urgentWrite = recordUrgentWrite;
+	}
+	let writers = candidateWriters!.get(node);
+	if (!writers) candidateWriters!.set(node, (writers = new Set()));
+	writers.add(frame);
+}
+
+function removeCandidateWriter(node: ScopedNode, frame: SignalActionFrame): void {
+	const writers = candidateWriters!.get(node)!;
+	writers.delete(frame);
+	if (writers.size === 0) candidateWriters!.delete(node);
+	if (--candidateWriteCount === 0) candidateWriters = candidateHooks.urgentWrite = undefined;
+}
+
+function recordUrgentWrite(node: ScopedNode, value: unknown): (() => void)[] | undefined {
+	let releases: (() => void)[] | undefined;
+	const writers = candidateWriters?.get(node);
+	if (writers)
+		for (const frame of writers) {
+			const release = frame.recordUrgentWrite(node, value);
+			if (release) (releases ??= []).push(release);
+		}
+	return releases;
+}
+
+/**
+ * Candidate state is private; the owner's ordinary node and binding maps stay
+ * untouched. Every graph owner is a scope (engine.ts).
+ */
+function forkScopeCandidate(
+	owner: ScopeImpl,
+	node: ScopedNode,
+	target: ScopedNode,
+	frame: SignalActionFrame,
+): CandidateProducer | undefined {
+	// A render's private declaration view forks like the cell it presents.
+	const view = owner.nodes.get(node.key) === node ? undefined : bridge.declarationViewFork(node);
+	if (
+		(owner.nodes.get(node.key) !== node && view === undefined) ||
+		owner.readBarrier ||
+		owner.frames?.size
+	) {
+		throw new CandidateUnsupportedError(formatClientError(135));
+	}
+	if (view !== undefined) return view(target, frame);
+	const resource = owner.resources?.get(node);
+	if (resource) return candidateHooks.resource!.call(resource, target);
+	const binding = owner.derivedBindings?.get(node);
+	if (binding) {
+		// A scalar binding forks itself; a general derived binding has a producer.
+		const fork = binding.forkCandidate ?? candidateHooks.derived;
+		if (!fork) throw new CandidateUnsupportedError(formatClientError(136));
+		return fork.call(binding as DerivedBinding<unknown>, target, frame);
+	}
+	target.compute = node.compute;
 }
 
 /**
@@ -143,7 +205,7 @@ export class SignalActionFrame {
 		this.demand?.add(node);
 		const existing = this.entries?.get(node);
 		if (existing) return existing.target;
-		if (bridge.historical() || node.owner.readBarrier || !node.owner.forkCandidate) {
+		if (bridge.historical() || node.owner.readBarrier) {
 			throw new CandidateUnsupportedError(formatClientError(207));
 		}
 		bridge.assertAlive(node.owner);
@@ -172,7 +234,7 @@ export class SignalActionFrame {
 		(this.entries ??= new Map()).set(node, entry);
 		(this.originals ??= new Map()).set(target, node);
 		try {
-			entry.producer = node.owner.forkCandidate(node, target, this);
+			entry.producer = forkScopeCandidate(node.owner as ScopeImpl, node, target, this);
 			const compute = target.compute;
 			if (compute) target.compute = () => this.run(() => compute(target));
 		} catch (error) {
@@ -370,7 +432,7 @@ export class SignalActionFrame {
 			else if (
 				error instanceof ScopeDisposedError ||
 				error instanceof SignalFrameError ||
-				error instanceof NativeAdoptionMiss
+				isNativeAdoptionMiss(error)
 			)
 				invalid ??= 'stale';
 			else if (!handled) {
@@ -509,7 +571,8 @@ export class SignalActionFrame {
 								if (currentChanged || retainedChanged) changed.push(node);
 							}
 							this.active = false;
-							const previous = swapCandidateInvalidation(true);
+							const deferred = candidateHooks.defer;
+							candidateHooks.defer = true;
 							try {
 								for (const node of changed) {
 									if (node.subs) {
@@ -518,7 +581,7 @@ export class SignalActionFrame {
 									}
 								}
 							} finally {
-								swapCandidateInvalidation(previous);
+								candidateHooks.defer = deferred;
 							}
 							for (const { entry } of prepared) {
 								entry.node.flags = bridge.flags.Mutable | bridge.flags.Watching;
@@ -639,6 +702,8 @@ export class SignalActionFrame {
 		while (entry.target.deps) bridge.graph.unlink(entry.target.deps, entry.target);
 		while (entry.target.subs) bridge.graph.unlink(entry.target.subs);
 		bridge.releaseRetention(entry.target);
+		// A thenable the target threw must not retain it, or its owner, once released.
+		if (entry.target.wakeup) entry.target.wakeup.node = undefined;
 		entry.target.compute = undefined;
 	}
 

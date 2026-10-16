@@ -4,17 +4,17 @@ import { useState as useThreeState } from '@octanejs/three/renderer';
 import { FileLoader } from 'three';
 import type { Mesh } from 'three';
 
-type ThreeBrowserProof =
-	typeof globalThis & {
-		__octaneThreeFrameCount?: number;
-		__octaneThreeAsset?: string;
-		__octaneThreeSceneReady?: boolean;
-		__octaneThreeState?: RootState;
-		__octaneThreeEventLog?: Array<Record<string, unknown>>;
-		__octaneThreePointerId?: number;
-		__octaneThreeRemoveOnDown?: boolean;
-		__octaneThreeReleaseOnUp?: boolean;
-	};
+type ThreeBrowserProof = typeof globalThis & {
+	__octaneThreeFrameCount?: number;
+	__octaneThreeAsset?: string;
+	__octaneThreeSceneReady?: boolean;
+	__octaneThreeState?: RootState;
+	__octaneThreeEventLog?: Array<Record<string, unknown>>;
+	__octaneThreePointerId?: number;
+	__octaneThreeRemoveOnDown?: boolean;
+	__octaneThreeReleaseOnUp?: boolean;
+	__octaneThreeSelectOnClick?: boolean;
+};
 
 function BrowserAsset(props) @{
 	const proof = globalThis as ThreeBrowserProof;
@@ -24,7 +24,7 @@ function BrowserAsset(props) @{
 	<group name={'browser-asset-' + props.copy + ':' + asset.trim()} />
 }
 
-export function Scene() @{
+export function Scene({ onSelect }: { onSelect?: () => void }) @{
 	const proof = globalThis as ThreeBrowserProof;
 	const state = useThree((value) => value);
 	const [visible, setVisible] = useThreeState(true);
@@ -77,7 +77,10 @@ export function Scene() @{
 						event.target.releasePointerCapture(event.pointerId);
 					}
 				}}
-				onClick={(event) => record('click', event)}
+				onClick={(event) => {
+					record('click', event);
+					if (proof.__octaneThreeSelectOnClick === true) onSelect?.();
+				}}
 			>
 				<boxGeometry args={[2, 2, 2]} />
 				<meshBasicMaterial color={16711680} toneMapped={false} />

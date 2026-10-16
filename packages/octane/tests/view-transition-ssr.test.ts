@@ -33,10 +33,12 @@ import {
 	ListExitApp,
 	QueuedHydrationApp,
 } from './_fixtures/view-transition-ssr.tsrx';
+import * as Jsx from './_fixtures/view-transition-ssr-jsx.tsx';
 
 const FIXTURE = join(process.cwd(), 'packages/octane/tests/_fixtures/view-transition-ssr.tsrx');
 
 const server = loadServerFixture(FIXTURE);
+const serverJsx = loadServerFixture('packages/octane/tests/_fixtures/view-transition-ssr-jsx.tsx');
 function collector() {
 	const collection = createPipeableCollector();
 	return { ...collection, dest: collection.destination };
@@ -150,6 +152,63 @@ describe('ReactDOMFizzViewTransition (ported)', () => {
 		const root2 = hydrateRoot(container, AnnotationsApp, {});
 		root2.unmount();
 		container.innerHTML = '';
+	});
+
+	// A .tsx parent passes descriptor children, which ssrChild already frames as
+	// one childSlot range; a second frame made the client's adoption mismatch.
+	for (const name of [
+		'ComponentChild',
+		'HostChild',
+		'TextChild',
+		'ArrayChild',
+		'EmptyChild',
+		'SuspenseChild',
+	] as const) {
+		it(`hydrates a .tsx ${name} without regenerating it`, async () => {
+			container.innerHTML = ServerRT.renderToString(serverJsx[name], {}).html;
+			const span = container.querySelector('span')!;
+			const content = () => Array.from(span.childNodes).filter((node) => node.nodeType !== 8);
+			const serverContent = content();
+			const onRecoverableError = vi.fn();
+			let root!: ReturnType<typeof hydrateRoot>;
+			await act(() => {
+				root = hydrateRoot(container, Jsx[name], {}, { onRecoverableError });
+			});
+			expect(onRecoverableError).not.toHaveBeenCalled();
+			// Adopted, not rebuilt: the span and every server element and text node under it survive.
+			expect(container.querySelector('span')).toBe(span);
+			const clientContent = content();
+			expect(clientContent).toHaveLength(serverContent.length);
+			for (const [index, node] of serverContent.entries()) expect(clientContent[index]).toBe(node);
+			expect(vt(span.firstElementChild)?.['vt-update']).toBe(
+				name === 'TextChild' || name === 'EmptyChild' ? undefined : 'none',
+			);
+			root.unmount();
+		});
+	}
+
+	it('frames compiler HTML children exactly like a compiled children body', () => {
+		const carrier = ServerRT.renderToString(
+			(_props: object, scope: never) =>
+				ServerRT.ssrComponent(
+					scope,
+					ServerRT.ViewTransition,
+					{ default: 'none', children: ServerRT.ssrHtml('<i id="glyph">x</i>') },
+					false,
+				),
+			{},
+		).html;
+		const viaBody = ServerRT.renderToString(
+			(_props: object, scope: never) =>
+				ServerRT.ssrComponent(
+					scope,
+					ServerRT.ViewTransition,
+					{ default: 'none', children: () => ServerRT.ssrHtml('<i id="glyph">x</i>') },
+					false,
+				),
+			{},
+		).html;
+		expect(carrier).toBe(viaBody);
 	});
 
 	// Per ReactDOMFizzViewTransition-test.js:142
@@ -1124,6 +1183,9 @@ describe('ReactDOMFizzViewTransition (ported)', () => {
 		}
 	});
 
+	// As in React, hydration keeps the server's style rather than patching it:
+	// an authored static style that differs is reported only by a development
+	// build, as a difference that won't be patched up, and the host is adopted.
 	it.each([false, true])(
 		'checks authored static scope styles during hydration (mismatch=%s)',
 		(mismatch) => {
@@ -1133,10 +1195,15 @@ describe('ReactDOMFizzViewTransition (ported)', () => {
 			const root = hydrateRoot(container, StaticScopeStyleApp, {});
 			try {
 				const hydrated = container.querySelector<HTMLElement>('#static-scope-style')!;
-				expect(hydrated === host).toBe(!mismatch);
-				expect(hydrated.style.color).toBe('red');
+				expect(hydrated).toBe(host);
+				expect(hydrated.style.color).toBe(mismatch ? 'blue' : 'red');
 				expect(hydrated.style.getPropertyValue('view-transition-scope')).toBe('none');
 				expect(hydrated.style.getPropertyPriority('view-transition-scope')).toBe('important');
+				if (mismatch && process.env.NODE_ENV !== 'production') {
+					expect(errorSpy).toHaveBeenCalledWith(
+						expect.stringContaining("This won't be patched up"),
+					);
+				}
 			} finally {
 				root.unmount();
 				if (mismatch) errorSpy.mockClear();

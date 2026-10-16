@@ -443,12 +443,27 @@ is checked again against the active driver. Renderer-specific host/property
 validation belongs to renderer capability metadata or the driver, not to DOM
 attribute, class, or style rules in the universal core.
 
-Volar prepends a file-local `@jsxImportSource` pragma only when the selected
-descriptor declares `intrinsics`. Its mappings are shifted back to authored
-TSRX offsets, so DOM and non-DOM files can assign conflicting types to names
-such as `line`, `path`, `audio`, and `source`. Renderer-local module
-augmentation extends only that renderer's catalogue; it does not merge into a
-process-global intrinsic namespace.
+Volar prints a file-local `@jsxImportSource` pragma as part of the mapped
+type-only output. Without an explicit override, a leading authored pragma
+wins, followed by the selected descriptor's `intrinsics`; DOM files default
+to Octane's JSX types (or `octane/strong` in strong mode). DOM and non-DOM files
+can therefore assign conflicting types to names such as `line`, `path`,
+`audio`, and `source` without merging into a process-global namespace.
+
+Editor integrations that check shared sources against a portable JSX surface
+can pass `intrinsics` to `compileToVolarMappings`:
+
+```ts
+compileToVolarMappings(source, filename, {
+  renderers,
+  intrinsics: '@example/portable-intrinsics',
+});
+```
+
+The type-only override takes precedence over an authored pragma and the
+renderer defaults. The chosen renderer and its diagnostics still describe
+the runtime target. The override changes neither runtime compilation nor the
+original source, and mappings still refer to authored TSRX positions.
 
 Universal source maps compose the lowered intermediate map back to the
 original TSRX source. Boundary lowering likewise preserves the authored file
@@ -959,6 +974,16 @@ their host is replaced, hidden, or unmounted. They are opt-in for local direct
 roots and host properties the driver can update in place. Transported roots,
 DOM-owned bridges, event props, and specialized compact `universalFor` leaf
 descriptors do not support this path.
+
+Both of these optional host paths stay out of renderers that never use them.
+The first `universalHostBinding()` call installs the subscription, flush, and
+binding-only transaction code, so a root without bindings never reaches it.
+Template programs are opted into by the driver: the `templateProgramMount`,
+`templateProgramRuns`, and `collapsedTemplateMount` capabilities take effect
+only when the driver also passes `templates: universalHostTemplates`. Without
+it those trees mount and update through ordinary host commands. The Lynx
+background driver passes it; Three does not, and so ships none of the program
+preparation, collapsed-template, or compact template update code.
 
 Transition/deferred/action/form compatibility APIs currently execute without a
 separate lane scheduler, and `memo` does not yet provide a render bailout;

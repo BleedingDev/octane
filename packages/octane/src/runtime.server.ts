@@ -1,3 +1,5 @@
+declare const process: { env: { NODE_ENV?: string } };
+
 export { trustHTML, type TrustedHTML } from './trusted-html.js';
 export { readNativeDomStyle, readNativeDomProps } from './signals/read-protocol.js';
 /**
@@ -27,6 +29,14 @@ export { readNativeDomStyle, readNativeDomProps } from './signals/read-protocol.
 // ---------------------------------------------------------------------------
 
 import { resolveHookPath } from './hook-slot-cache.js';
+import type {
+	useEffect as ClientUseEffect,
+	useImperativeHandle as ClientUseImperativeHandle,
+} from './runtime.js';
+import type {
+	LayoutSnapshotOptions,
+	LayoutSnapshotOptionsWithInitial,
+} from './layout-snapshot-types.js';
 import {
 	BINDING_OPEN_TAIL_SOURCE,
 	bindingRootMarker,
@@ -35,10 +45,12 @@ import {
 	type BindingKey,
 } from './dom-binding-protocol.js';
 import {
+	CLIENT_RENDER_ARM_COMMENT,
 	formatUseId,
 	HYDRATION_FOR_EMPTY,
 	HYDRATION_FOR_ITEMS,
 	HYDRATION_START,
+	TRY_CATCH_COMMENT,
 } from './hydration-markers.js';
 import {
 	ACTIVITY_TAG,
@@ -101,6 +113,7 @@ import {
 	// static-markup emission of `ssrEmitElement`.
 	VOID_ELEMENTS,
 } from './constants.js';
+import { READ_ONLY_VALUE_INPUT_TYPES } from './dom-tables.js';
 import {
 	createIndependentHydrateManifest,
 	serializeIndependentHydrateManifest,
@@ -131,8 +144,7 @@ import {
 	HYDRATE_MEDIA_ATTR,
 	HYDRATE_VISIBLE_MARGIN_ATTR,
 	HYDRATE_VISIBLE_THRESHOLD_ATTR,
-	TRY_CATCH_COMMENT,
-} from './hydration-markers.js';
+} from './hydration/strategy-attributes.js';
 import { streamedSignalBootstrapJs } from './server/early-signals.js';
 import {
 	applyElementDefaultProps,
@@ -162,7 +174,9 @@ import {
 } from './html-tree-validation.js';
 import { sanitizeURL, sanitizeURLAttribute } from './sanitize-url.js';
 import {
+	COMPONENT_FLAG_AUTHOR_CHILDREN,
 	COMPONENT_FLAG_BOUNDARY,
+	COMPONENT_FLAGS_AUTHOR_BOUNDARY,
 	hasComponentFlags,
 	markComponentFlags,
 } from './component-flags.js';
@@ -220,6 +234,8 @@ function isSignalHandle(value: unknown): value is SignalHandle<unknown> {
 }
 
 function readSignalBinding(handle: SignalHandle<unknown>): unknown {
+	if (SHELL_WITNESS !== null && process.env.NODE_ENV !== 'production')
+		witnessShellHost('signal', handle.kind);
 	// Server bindings must contribute their historical value to the hydration
 	// snapshot. Only client bindings bypass the component-wide read collector.
 	if (RESOLVED !== null && !SERVER_SIGNAL_OWNER_ACTIVE) {
@@ -283,6 +299,8 @@ function unwrapSsrSignalControlValue(value: unknown): unknown {
 /** @internal Preserve a writable control's identity until the final JSX winner is known. */
 export function ssrSignalControlValue(value: unknown, site: string): unknown {
 	if (!isWritableSignal(value)) return ssrSignalValue(value);
+	if (SHELL_WITNESS !== null && process.env.NODE_ENV !== 'production')
+		witnessShellHost('signal', value.kind);
 	if (RESOLVED !== null && !SERVER_SIGNAL_OWNER_ACTIVE) {
 		return withServerSignalBinding(() => serverSignalControlValue(value, site));
 	}
@@ -302,9 +320,12 @@ function serverSignalControlValue(value: SignalHandle<unknown>, site: string): u
 	} satisfies SsrSignalControlValue;
 }
 
-const NATIVE_ARRAY_MAP = Array.prototype.map;
+// Load-time snapshots, wrapped like the client runtime's so that a server
+// bundle which never maps a list drops them instead of keeping dead reads.
+const NATIVE_ARRAY_MAP = /* @__PURE__ */ (() => Array.prototype.map)();
 const NATIVE_REFLECT_APPLY = Reflect.apply;
-const NATIVE_ARRAY_SPECIES_GETTER = Object.getOwnPropertyDescriptor(Array, Symbol.species)?.get;
+const NATIVE_ARRAY_SPECIES_GETTER = /* @__PURE__ */ (() =>
+	Object.getOwnPropertyDescriptor(Array, Symbol.species)?.get)();
 
 /** Server twin of the compiler's guarded native-array map ABI. */
 export function mapSlot(receiver: any, method: any, callback?: (...args: any[]) => any): any {
@@ -344,7 +365,7 @@ export function mapSlot(receiver: any, method: any, callback?: (...args: any[]) 
 	return true;
 }
 
-interface SSRScope {
+export interface SSRScope {
 	parent: SSRScope | null;
 	/** Context Provider values stamped on this scope (lazily allocated). */
 	$$ctxValues: Map<unknown, unknown> | null;
@@ -365,7 +386,7 @@ interface SsrElementContext {
 	parent: SsrElementContext | null;
 	namespace: ParserNamespace;
 	childrenNamespace: ParserNamespace;
-	location?: string;
+	location?: string | undefined;
 }
 
 type ServerComponent = (props: any, scope: SSRScope, extra?: any) => string;
@@ -492,6 +513,16 @@ type ServerSignalInstanceKey = string | Frame;
 // and keep the enclosing owner and pending list keys (runtime.ts spells the
 // same constant; the client renders the same JSX through such renderers).
 const RENDERER_INVOCATION_SITE = 'r:';
+// A render function rendered as a child, such as a compiled nested `@{ … }`
+// block, keeps its own instance for its declarations. Its owner records the
+// owner it renders inside, as an inline row's does (runtime.ts spells it the same).
+const TEMPLATE_INVOCATION_SITE = 't:';
+// Compiled children are part of the template that authored them, not of the
+// component rendering them. markChildrenBlock records the owner that template
+// renders in, and the children's owner links to it (runtime.ts does the same).
+// The key is local to this runtime copy, since an owner belongs to the request
+// state of the copy that created it.
+const CHILDREN_SIGNAL_OWNER: unique symbol = Symbol() as any;
 let SIGNAL_COMPONENT_INSTANCE_KEY: ServerSignalInstanceKey = '';
 let SERVER_SIGNAL_OWNER_ACTIVE = false;
 let SIGNAL_CONTROL_SITE = '';
@@ -678,11 +709,11 @@ interface Frame {
 	namespace: 'html' | 'svg' | 'mathml' | undefined;
 	// Potential bindings retain identity on the existing invocation frame, not
 	// an owner or serialized ancestor path. Discovery jobs retain this same node.
-	signalParentKey?: ServerSignalInstanceKey;
-	signalInvocationSite?: string;
-	signalListKeys?: ServerSignalListKeys | null;
+	signalParentKey?: ServerSignalInstanceKey | undefined;
+	signalInvocationSite?: string | undefined;
+	signalListKeys?: ServerSignalListKeys | null | undefined;
 	signalKey?: unknown;
-	signalInstanceKey?: string;
+	signalInstanceKey?: string | undefined;
 }
 interface Job {
 	comp: ServerComponent;
@@ -768,6 +799,12 @@ let SSR_NESTING_WARNINGS: Set<string> | null | undefined = null;
 // allocated from DEV-only branches, so optimized server bundles erase it.
 let DEV_SSR_ATTRIBUTE_WARNINGS: Set<string> | null = null;
 let DEV_SSR_CUSTOM_HOST_DEPTH = 0;
+// Islands-only shell witness (RenderOptions.shellWitness), installed per
+// canonical pass of a development render that asked for it. Null otherwise,
+// including every production and discovery pass, so each witness site costs
+// one null check on a branch that already drops or reads the construct. The
+// environment check after it lets a production bundle drop the site entirely.
+let SHELL_WITNESS: ShellWitnessSink | null = null;
 
 // Walk a frame to its dotted path ('' for the root). Memoized per frame.
 function framePath(f: Frame): string {
@@ -961,15 +998,136 @@ function withSsrElementContext(
 	}
 }
 
-/** Compiler ABI: validate and scope one native element during a DEV SSR render. */
+/**
+ * Compiler ABI: validate and scope one native element during a DEV SSR render.
+ * `clientWork` lists the element's authored props that need client code and
+ * that the server output erases: its event handlers, `ref`, and a `value` or
+ * `checked` the user could edit.
+ */
 export function ssrElement(
 	tag: string,
 	location: string | undefined,
 	render: () => string,
 	htmlIntegrationPoint?: boolean,
+	clientWork?: string,
 ): string {
 	if (process.env.NODE_ENV === 'production' || SSR_NESTING_WARNINGS === null) return render();
+	if (clientWork !== undefined && SHELL_WITNESS !== null) {
+		for (const name of clientWork.split(' ')) {
+			reportShellWitness(
+				name === 'ref' ? 'ref' : name === 'value' || name === 'checked' ? 'control' : 'event',
+				name,
+				tag.toLowerCase(),
+				location,
+			);
+		}
+	}
 	return withSsrElementContext(tag, location, render, undefined, htmlIntegrationPoint);
+}
+
+/**
+ * Client work a server render serialized outside every independent
+ * `<Hydrate>` island (see `RenderOptions.shellWitness`).
+ */
+export interface ShellWitness {
+	/**
+	 * A delegated event handler or function form action, a ref, an effect or
+	 * store-subscription hook, a controlled form value the user can edit, or a
+	 * live signal-handle binding.
+	 */
+	readonly kind: 'event' | 'ref' | 'effect' | 'control' | 'signal';
+	/** The prop (`onClick`, `ref`, `value`), hook (`useEffect`), or signal kind (`derived`). */
+	readonly name: string;
+	/** The host element that carries the prop or binding. */
+	readonly tag?: string;
+	/** `file:line:column` of that element, present in development compiler output. */
+	readonly location?: string;
+	/** The rendering component, or for a hook the function that called it. */
+	readonly component?: string;
+}
+
+interface ShellWitnessSink {
+	readonly report: (witness: ShellWitness) => void;
+	/** One report per construct and site for the whole render, across passes. */
+	readonly seen: Set<string>;
+	/** Depth of independent Hydrate subtrees: islands activate on their own. */
+	islands: number;
+}
+
+function componentName(component: ServerComponent | null): string | undefined {
+	if (component === null) return undefined;
+	const displayName = (component as { displayName?: unknown }).displayName;
+	return typeof displayName === 'string' ? displayName : component.name || undefined;
+}
+
+/** Report one construct unless an independent island owns it or it was already reported. */
+function reportShellWitness(
+	kind: ShellWitness['kind'],
+	name: string,
+	tag: string | undefined,
+	location: string | undefined,
+	caller?: string,
+): void {
+	const sink = SHELL_WITNESS!;
+	if (sink.islands !== 0) return;
+	const component = caller ?? componentName(CURRENT_COMP);
+	const key = kind + ' ' + name + ' ' + (tag ?? '') + ' ' + (location ?? component ?? '');
+	if (sink.seen.has(key)) return;
+	sink.seen.add(key);
+	const witness: { -readonly [K in keyof ShellWitness]: ShellWitness[K] } = { kind, name };
+	if (tag !== undefined) witness.tag = tag;
+	if (location !== undefined) witness.location = location;
+	if (component !== undefined) witness.component = component;
+	sink.report(witness);
+}
+
+/** A prop or binding on the host element being serialized. */
+function witnessShellHost(kind: ShellWitness['kind'], name: string, tag?: string): void {
+	const element = CURRENT_SSR_ELEMENT;
+	reportShellWitness(kind, name, tag ?? element?.tag, element?.location);
+}
+
+/**
+ * An effect or subscription hook. A route's page and layout run inside its
+ * root wrapper's frame, so the hook's caller names the function more exactly
+ * than the frame does. Only reached for a witness, never on a static shell.
+ */
+function witnessShellHook(name: string, hook: Function): void {
+	if (SHELL_WITNESS!.islands !== 0) return;
+	let caller: string | undefined;
+	const capture = (Error as { captureStackTrace?: (target: object, above: Function) => void })
+		.captureStackTrace;
+	if (capture !== undefined) {
+		const trace: { stack?: string } = {};
+		capture(trace, hook);
+		// Only the hook's own caller: an anonymous frame names nothing.
+		const frame = /^\s*at (?:async )?([^\s(]+) \(/.exec(trace.stack?.split('\n')[1] ?? '');
+		if (frame !== null) caller = frame[1].slice(frame[1].lastIndexOf('.') + 1) || undefined;
+	}
+	reportShellWitness('effect', name, undefined, undefined, caller);
+}
+
+function isEventPropName(name: string): boolean {
+	if (name.length < 3 || name.charCodeAt(0) !== 111 /* o */ || name.charCodeAt(1) !== 110 /* n */)
+		return false;
+	const c = name.charCodeAt(2);
+	return c >= 65 && c <= 90;
+}
+
+/**
+ * A controlled `value`/`checked` diverges without the renderer only where the
+ * user can change it: React's controlled-without-a-handler rule, with the
+ * native editability of readOnly (input and textarea) and disabled controls.
+ */
+function witnessShellControls(tag: string, prop: (name: string) => unknown): void {
+	if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') return;
+	if (prop('disabled') || (tag !== 'select' && (prop('readOnly') || prop('readonly')))) return;
+	if (
+		prop('value') != null &&
+		!(tag === 'input' && READ_ONLY_VALUE_INPUT_TYPES.has(prop('type') as string))
+	)
+		witnessShellHost('control', 'value', tag);
+	if (tag === 'input' && prop('checked') != null) witnessShellHost('control', 'checked', tag);
 }
 
 /** Compiler ABI: validate one authored static or dynamic text child in DEV SSR. */
@@ -1082,6 +1240,9 @@ const SCOPED_VALUE_PROPERTIES: PropertyDescriptorMap = {
 			return this[SCOPED_VALUE_RESOLVER]().children;
 		},
 	},
+	// Ordinary descriptors own this internal field only when a site exists, and
+	// a deferred value cannot know without resolving its record. Keep it readable
+	// but non-enumerable so the value enumerates the same public keys.
 	__octaneInvocationSite: {
 		configurable: true,
 		enumerable: false,
@@ -1306,15 +1467,15 @@ function scopedValueDescriptor(resolve: () => ElementDescriptor): ElementDescrip
 	// resolver before the public accessor transitions so their distinct getters
 	// do not compete for the same initial V8 map.
 	Object.defineProperty(descriptor, SCOPED_VALUE_RESOLVER, { value: resolve });
-	Object.defineProperty(descriptor, 'type', SCOPED_VALUE_PROPERTIES.type);
-	Object.defineProperty(descriptor, 'props', SCOPED_VALUE_PROPERTIES.props);
-	Object.defineProperty(descriptor, 'key', SCOPED_VALUE_PROPERTIES.key);
-	Object.defineProperty(descriptor, 'ref', SCOPED_VALUE_PROPERTIES.ref);
-	Object.defineProperty(descriptor, 'children', SCOPED_VALUE_PROPERTIES.children);
+	Object.defineProperty(descriptor, 'type', SCOPED_VALUE_PROPERTIES['type']);
+	Object.defineProperty(descriptor, 'props', SCOPED_VALUE_PROPERTIES['props']);
+	Object.defineProperty(descriptor, 'key', SCOPED_VALUE_PROPERTIES['key']);
+	Object.defineProperty(descriptor, 'ref', SCOPED_VALUE_PROPERTIES['ref']);
+	Object.defineProperty(descriptor, 'children', SCOPED_VALUE_PROPERTIES['children']);
 	Object.defineProperty(
 		descriptor,
 		'__octaneInvocationSite',
-		SCOPED_VALUE_PROPERTIES.__octaneInvocationSite,
+		SCOPED_VALUE_PROPERTIES['__octaneInvocationSite'],
 	);
 	if (process.env.NODE_ENV !== 'production') Object.freeze(descriptor);
 	return descriptor;
@@ -1487,7 +1648,10 @@ function fragmentRefDescriptor(value: ElementDescriptor): ElementDescriptor {
 }
 
 /** Retain the exact range adopted by the client without attaching its ref. */
-function renderFragmentRefDescriptor(descriptor: ElementDescriptor, scope: SSRScope): string {
+function renderFragmentRefDescriptor(
+	descriptor: Pick<ElementDescriptor, 'ref' | 'children'>,
+	scope: SSRScope,
+): string {
 	return ssrHtml(
 		ssrFragmentMarker(true, descriptor.ref) +
 			ssrChild(descriptor.children, scope) +
@@ -1708,7 +1872,7 @@ export function cloneElement(
 		scopedChildren = Object.getOwnPropertyDescriptor(element, 'children')!.get;
 		if (scopedChildren === getScopedChildren) {
 			scopedResolver = (element as ElementDescriptor & DeferredChildren)[SCOPED_CHILDREN_RESOLVER];
-		} else if (scopedChildren === SCOPED_VALUE_PROPERTIES.children.get) {
+		} else if (scopedChildren === SCOPED_VALUE_PROPERTIES['children'].get) {
 			// A scoped value wrapping a scoped element reads its own resolver.
 			const get = scopedChildren;
 			scopedChildren = () => get!.call(element);
@@ -1741,13 +1905,14 @@ export function cloneElement(
 	if (n === 1) {
 		kids = children[0];
 	} else if (n > 1) {
+		POSITIONAL_CHILDREN.add(children);
 		kids = children;
 	} else if (scopedChildren !== undefined && !replacedChildren) {
 		Object.defineProperty(
 			props,
 			'children',
 			scopedResolver === undefined
-				? { configurable: true, enumerable: true, get: scopedChildren }
+				? { configurable: true, enumerable: true, get: scopedChildren! }
 				: SCOPED_CHILDREN_PROPERTY,
 		);
 		if (scopedResolver !== undefined) setScopedChildrenResolver(props, scopedResolver);
@@ -1772,7 +1937,7 @@ export function cloneElement(
 			descriptor,
 			'children',
 			scopedResolver === undefined
-				? { configurable: true, enumerable: true, get: scopedChildren }
+				? { configurable: true, enumerable: true, get: scopedChildren! }
 				: SCOPED_CHILDREN_PROPERTY,
 		);
 		if (scopedResolver !== undefined) setScopedChildrenResolver(descriptor, scopedResolver);
@@ -1798,7 +1963,7 @@ function cloneAndReplaceElementKey(element: ElementDescriptor, key: string): Ele
 	if (scopedChildren) {
 		const get = Object.getOwnPropertyDescriptor(element, 'children')!.get;
 		const copiedGetter =
-			get === SCOPED_VALUE_PROPERTIES.children.get ? () => get!.call(element) : get;
+			get === SCOPED_VALUE_PROPERTIES['children'].get ? () => get!.call(element) : get;
 		descriptor = {
 			$$kind: ELEMENT_TAG,
 			type: element.type,
@@ -1811,7 +1976,7 @@ function cloneAndReplaceElementKey(element: ElementDescriptor, key: string): Ele
 			'children',
 			get === getScopedChildren
 				? SCOPED_CHILDREN_PROPERTY
-				: { configurable: true, enumerable: true, get: copiedGetter },
+				: { configurable: true, enumerable: true, get: copiedGetter! },
 		);
 		if (get === getScopedChildren) {
 			setScopedChildrenResolver(
@@ -2192,35 +2357,21 @@ export function ssrTextPre(v: unknown): string {
 // separate children source. Scoped children must remain lazy. createElement
 // already mirrors positional children into props, so only legacy descriptors
 // with a distinct non-null children field need a repaired props object.
+/** The props a component descriptor renders its component with, its children among them. */
+function descriptorProps(d: ElementDescriptor): any {
+	// A scoped descriptor's children getter resolves deferred children; reading
+	// it here would run them in the parent's scope, before the component enters.
+	if (SCOPED_ELEMENT_PROPS.has(d.props)) return d.props;
+	const children = d.children;
+	return children == null || children === d.props?.children ? d.props : { ...d.props, children };
+}
+
 // `keyScoped` says the caller's `child-key` membrane already encodes `d.key`.
 function ssrComponentDescriptor(d: ElementDescriptor, scope: SSRScope, keyScoped?: 'key'): string {
-	if (SCOPED_ELEMENT_PROPS.has(d.props)) {
-		return ssrComponent(
-			scope,
-			d.type as ServerComponent,
-			d.props,
-			undefined,
-			d.key ?? undefined,
-			keyScoped,
-			d.__octaneInvocationSite,
-		);
-	}
-	const children = d.children;
-	if (children == null || children === d.props?.children) {
-		return ssrComponent(
-			scope,
-			d.type as ServerComponent,
-			d.props,
-			undefined,
-			d.key ?? undefined,
-			keyScoped,
-			d.__octaneInvocationSite,
-		);
-	}
 	return ssrComponent(
 		scope,
 		d.type as ServerComponent,
-		{ ...d.props, children },
+		descriptorProps(d),
 		undefined,
 		d.key ?? undefined,
 		keyScoped,
@@ -2312,7 +2463,15 @@ function ssrChildValue(
 	if (typeof v === 'function')
 		// Bare body/children functions can be recreated every parent pass. The
 		// client treats this as one child-slot body, not component-type identity.
-		return ssrComponent(scope, v as ServerComponent, {}, undefined, undefined, true);
+		return ssrComponent(
+			scope,
+			v as ServerComponent,
+			{},
+			undefined,
+			undefined,
+			true,
+			templateInvocationSite(v),
+		);
 	if (typeof v === 'object') {
 		if ((v as any).$$kind === ELEMENT_TAG) {
 			const d = v as ElementDescriptor;
@@ -2458,6 +2617,9 @@ function ssrHostElement(
 				devValidateSsrAriaProps(props, semanticTag, namespace);
 				devValidateSsrHostProps(props, semanticTag, namespace);
 				devValidateSsrFormProps(semanticTag, props, children);
+			}
+			if (isCtlTag && SHELL_WITNESS !== null && process.env.NODE_ENV !== 'production') {
+				witnessShellControls(semanticTag, (name) => props[name]);
 			}
 			for (const k in props) {
 				const val = props[k];
@@ -2761,6 +2923,7 @@ function ssrDescriptorPart(v: unknown, scope: SSRScope): string {
 			undefined,
 			undefined,
 			isChildrenBlock(v),
+			templateInvocationSite(v),
 		);
 		SSR_DESCRIPTOR_TEXT_TAIL = false;
 		return html;
@@ -2887,10 +3050,14 @@ export function ssrForBlock(content: string, hasItems: boolean): string {
 // overwhelmingly ASCII (site keys, prop names, route segments), so those units
 // come from a prebuilt table and only the rare non-ASCII unit pays the slow
 // path. The emitted bytes are unchanged.
-const ASCII_ASYNC_IDENTITY_UNITS: string[] = [];
-for (let code = 0; code < 128; code++) {
-	ASCII_ASYNC_IDENTITY_UNITS.push(code.toString(16).padStart(4, '0'));
-}
+//
+// The table is built once at module load by a pure-annotated call rather than a
+// top-level loop. A loop is a side effect no bundler can drop, so every server
+// bundle kept it even when nothing encodes an identity.
+const ASCII_ASYNC_IDENTITY_UNITS: readonly string[] = /* @__PURE__ */ Array.from(
+	{ length: 128 },
+	(_, code) => code.toString(16).padStart(4, '0'),
+);
 /**
  * @internal Exported for direct testing: a conflating or wrong-width encoding is
  * invisible through `prerender`, because occurrence tracking assigns list items
@@ -3351,6 +3518,8 @@ export function ssrAttr(
 			((tag === 'form' && name === 'action') ||
 				((tag === 'button' || tag === 'input') && name === 'formaction'))
 		) {
+			if (SHELL_WITNESS !== null && dev)
+				witnessShellHost('event', name === 'action' ? name : 'formAction', tag);
 			return '';
 		}
 		if (dev && !isCustomTag && tag !== undefined) {
@@ -3541,7 +3710,12 @@ function ssrAttrEntry(
 	namespace: AttributeNamespace = 'html',
 ): string {
 	namespace = resolveAttributeNamespace(namespace);
-	if (k === 'key' || k === 'ref' || k === 'children') return '';
+	if (k === 'key' || k === 'children') return '';
+	if (k === 'ref') {
+		if (SHELL_WITNESS !== null && process.env.NODE_ENV !== 'production' && v != null)
+			witnessShellHost('ref', k, tag);
+		return '';
+	}
 	if (
 		k === 'suppressHydrationWarning' ||
 		k === 'suppressContentEditableWarning' ||
@@ -3549,7 +3723,11 @@ function ssrAttrEntry(
 		k === '__octaneNativeChangeDiagnostic'
 	)
 		return '';
-	if (k.length > 2 && k[0] === 'o' && k[1] === 'n' && k[2] >= 'A' && k[2] <= 'Z') return '';
+	if (k.length > 2 && k[0] === 'o' && k[1] === 'n' && k[2] >= 'A' && k[2] <= 'Z') {
+		if (SHELL_WITNESS !== null && process.env.NODE_ENV !== 'production' && typeof v === 'function')
+			witnessShellHost('event', k, tag);
+		return '';
+	}
 	if (k === 'style') return ssrStyle(v);
 	if (k === 'className' || k === 'class') return ssrAttr('class', v, tag, namespace);
 	if (VALID_ATTR_NAME.test(k)) return ssrAttr(k, v, tag, namespace);
@@ -3688,6 +3866,15 @@ export function ssrAttrs(
 	// to this resolution and the original Map is no longer consulted by name.
 	const resolved = new Map<string, PropWriter>();
 	let needsWinningOrderSort = false;
+	// Spread writers reach the server only here; direct handler and ref props
+	// were erased by the compiler (see ssrElement).
+	if (SHELL_WITNESS !== null && dev && tag !== undefined) {
+		for (const { name, value } of props.values()) {
+			if (name === 'ref' ? value != null : isEventPropName(name) && typeof value === 'function')
+				witnessShellHost(name === 'ref' ? 'ref' : 'event', name, tag);
+		}
+		if (skipFormControls) witnessShellControls(tag, (name) => props.get(name)?.value);
+	}
 	for (const writer of props.values()) {
 		const { name: rawName, lastOrder } = writer;
 		if (
@@ -3758,7 +3945,7 @@ export function ssrAttrs(
 			const formProps: Record<string, unknown> = Object.create(null);
 			for (const { name, value } of ordered) formProps[name] = value;
 			const action =
-				tag === 'form' ? formProps.action : (formProps.formAction ?? formProps.formaction);
+				tag === 'form' ? formProps['action'] : (formProps['formAction'] ?? formProps['formaction']);
 			if (typeof action === 'function') devValidateSsrFormProps(tag, formProps);
 		}
 	}
@@ -4021,8 +4208,8 @@ export function ssrSpreadContent(
 	scope: SSRScope,
 ): string {
 	if (snapshot === null) return '';
-	const html = snapshot.dangerouslySetInnerHTML;
-	const child = snapshot.children;
+	const html = snapshot['dangerouslySetInnerHTML'];
+	const child = snapshot['children'];
 	if (html != null) {
 		if (typeof html !== 'object' || !('__html' in html)) {
 			throw new Error(formatServerError(6));
@@ -4090,6 +4277,12 @@ export function ssrFormAuthoringDiagnostics(
 		const props: Record<string, unknown> = Object.create(null);
 		for (const [name, value] of sources) props[name] = value;
 		devValidateSsrFormProps(tag, props);
+		if (
+			SHELL_WITNESS !== null &&
+			typeof (tag === 'form' ? props['action'] : (props['formAction'] ?? props['formaction'])) ===
+				'function'
+		)
+			witnessShellHost('event', tag === 'form' ? 'action' : 'formAction', tag);
 	}
 	return '';
 }
@@ -4344,7 +4537,7 @@ export function ssrOptionValueSources(sources: readonly SsrAttributeSource[]): u
 			continue;
 		}
 		if (Object.prototype.propertyIsEnumerable.call(Object(source), 'value')) {
-			value = (source as Record<string, unknown>).value;
+			value = (source as Record<string, unknown>)['value'];
 		}
 	}
 	return value;
@@ -4440,10 +4633,19 @@ interface MemoHookRec {
 interface RefHookRec {
 	ref: { current: unknown };
 }
+interface LayoutSnapshotHookRec {
+	snapshot: unknown;
+}
 interface NativeLocalHookRec {
 	nativeValue: unknown;
 }
-type AnyHookRec = HookRec | LinkedHookRec<any, any> | MemoHookRec | RefHookRec | NativeLocalHookRec;
+type AnyHookRec =
+	| HookRec
+	| LinkedHookRec<any, any>
+	| MemoHookRec
+	| RefHookRec
+	| LayoutSnapshotHookRec
+	| NativeLocalHookRec;
 type ServerHookSlot = symbol | string | number;
 
 // Server twin of the client slot ABI. Modules reserve disjoint ranges for
@@ -4626,9 +4828,11 @@ function stateHook<S, A>(
 // state (absent skips the restore; empty still clears what a discarded pass
 // added). The list is frozen so an accidental write fails loudly instead of
 // leaking state into an unrelated snapshot; nothing mutates the maps or sets.
+// Bundlers cannot prove `Object.freeze` pure, so the annotation lets a server
+// bundle without replay snapshots drop the list.
 const EMPTY_SNAPSHOT_MAP: Map<never, never> = new Map<never, never>();
 const EMPTY_SNAPSHOT_SET: Set<never> = new Set<never>();
-const EMPTY_SNAPSHOT_LIST = Object.freeze([]) as never[];
+const EMPTY_SNAPSHOT_LIST = /* @__PURE__ */ Object.freeze([]) as never[];
 
 function snapshotMap<K, V>(map: Map<K, V> | null | undefined): Map<K, V> | null {
 	return map == null ? null : map.size === 0 ? EMPTY_SNAPSHOT_MAP : new Map(map);
@@ -4860,7 +5064,7 @@ function replayUpdatedComponentBody(
 	return out;
 }
 
-type ServerSignalIdentityToken = string | { value: object | symbol; position?: number };
+type ServerSignalIdentityToken = string | { value: object | symbol; position?: number | undefined };
 
 interface ServerOpaqueSignalKeys {
 	ids: Map<string, number>;
@@ -5008,6 +5212,7 @@ function serverSignalOwner(
 	_frame: Frame | null,
 	rowInstanceKey?: string,
 	enclosingKeys?: ServerSignalListKeys | null,
+	enclosingOwner?: SignalRendererOwnerIdentity,
 ): SignalRendererOwnerIdentity | undefined {
 	// An async continuation can compose cached compiled HTML outside a render pass.
 	// Only an active pass may assign a request-owned signal instance.
@@ -5037,14 +5242,15 @@ function serverSignalOwner(
 			documentOwner: SignalOwner;
 			instanceOwner: object;
 			instanceKey: string;
-			enclosingOwner?: SignalRendererOwnerIdentity;
+			enclosingOwner?: SignalRendererOwnerIdentity | undefined;
 		} = {
 			scopeKey: resolved.signalOwner.scopeKey,
 			documentOwner: resolved.signalOwner,
 			instanceOwner: Object.freeze({}),
 			instanceKey,
 		};
-		if (rowInstanceKey !== undefined && enclosingKeys !== undefined) {
+		if (enclosingOwner !== undefined) identity.enclosingOwner = enclosingOwner;
+		else if (rowInstanceKey !== undefined && enclosingKeys !== undefined) {
 			// Match the client: an inline row records the owner it renders inside,
 			// so captured handles from that owner do not start a request per row.
 			// Server arms already render in their component's owner.
@@ -5171,6 +5377,11 @@ function renderComponentFramed(
 	// A fragment renderer's frame continues the list keys pending at its call
 	// site; `undefined` starts a component's own list scope.
 	rendererListKeys?: ServerSignalListKeys | null,
+	// The owner a template block renders inside (see TEMPLATE_INVOCATION_SITE).
+	enclosingOwner?: SignalRendererOwnerIdentity,
+	// Do not default a callback here: parameter initialization enlarges every
+	// recursive frame, reducing the maximum supported nesting of ordinary SSR.
+	compiledOnly?: true,
 ): string {
 	const previous = captureServerComponentContext();
 	const parentScope = parent ?? previous.scope;
@@ -5207,7 +5418,7 @@ function renderComponentFramed(
 		HOOK_PASS = hookPass;
 		try {
 			ACTIVE_PU_WARM_PLANS.length = warmPlanCheckpoint;
-			previous.owner = serverSignalOwner(frame);
+			previous.owner = serverSignalOwner(frame, undefined, undefined, enclosingOwner);
 			if (previous.owner === undefined) {
 				out = comp(props ?? {}, scope, undefined);
 			} else if (
@@ -5240,7 +5451,9 @@ function renderComponentFramed(
 			ACTIVE_PU_WARM_PLANS.length = warmPlanCheckpoint;
 			HOOK_PASS = previousHookPass;
 		}
-		const inner = serverComponentOutput(out, scope, previous.owner);
+		const inner = compiledOnly
+			? checkedCompiledOutput(out)
+			: serverComponentOutput(out, scope, previous.owner);
 		// Wrap the child's output in a hydration block range so the client's
 		// componentSlot can ADOPT it during hydration (its `<!--[-->`/`<!--]-->`
 		// become the slot's start/end markers, exactly like control-flow blocks).
@@ -5303,6 +5516,7 @@ export function ssrComponent(
 	identityScoped?: boolean | 'key',
 	invocationSite?: string,
 	bindingMarker?: string,
+	compiledOnly?: true,
 ): string {
 	// A runtime-resolved Activity is a symbol, not a callable component. Keep its
 	// original identity for async keys, then use the stable cold body below. A
@@ -5445,6 +5659,15 @@ export function ssrComponent(
 			signalInstanceKey,
 			bindingMarker,
 			renderer ? SIGNAL_LIST_KEYS : undefined,
+			// Only an enabled pass has instance declarations to resolve through it.
+			typeof signalInstanceKey !== 'string'
+				? undefined
+				: invocationSite === TEMPLATE_INVOCATION_SITE
+					? serverSignalOwner(pf)
+					: invocationSite === undefined
+						? childrenSignalOwner(comp)
+						: authorChildrenSignalOwner(comp, props),
+			compiledOnly,
 		);
 	} finally {
 		if (identityScoped !== true) ASYNC_SCOPE = previousIdentityScope;
@@ -5480,6 +5703,32 @@ export function ssrComponentNS(
 	} finally {
 		NEXT_COMPONENT_NAMESPACE = previous;
 	}
+}
+
+/** Server counterpart of componentSlotFromConfig's ordered config boundary. */
+export function ssrComponentFromConfig(
+	parent: SSRScope,
+	comp: ServerComponent | string | typeof Fragment | typeof Activity,
+	config: any,
+	invocationSite: string,
+	namespace: 'html' | 'svg' | 'mathml' | null = null,
+): string {
+	const key = hasElementConfigKey(config) ? '' + config.key : undefined;
+	const props = copyElementConfig(config);
+	applyElementDefaultProps(comp, props);
+	const body =
+		comp === Fragment
+			? props.ref != null || hasOwnProp.call(props, 'ref')
+				? renderFragmentRefDescriptor
+				: renderFragmentConfig
+			: comp;
+	return namespace === null
+		? ssrComponent(parent, body, props, false, key, undefined, invocationSite)
+		: ssrComponentNS(parent, body, props, namespace, false, key, invocationSite);
+}
+
+function renderFragmentConfig(props: { children?: unknown }, scope: SSRScope): string {
+	return ssrHtml(ssrChild(props.children, scope));
 }
 
 /** Run a renderable hole under a lexically proven parser namespace. */
@@ -5556,6 +5805,10 @@ function ssrIndependentHydrateSidecar(props: InternalHydrateProps, instanceId: s
 }
 
 function withServerIndependentIdentity<T>(prefix: string, idSeed: number, render: () => T): T {
+	// An independent island activates on its own, so its client work is not an
+	// islands shell's (see RenderOptions.shellWitness).
+	const island = SHELL_WITNESS;
+	if (island !== null) island.islands++;
 	const previous = SIGNAL_INSTANCE_PREFIX;
 	const previousInstance = SIGNAL_COMPONENT_INSTANCE_KEY;
 	const previousControl = SIGNAL_CONTROL_SITE;
@@ -5579,6 +5832,7 @@ function withServerIndependentIdentity<T>(prefix: string, idSeed: number, render
 		// The island hydrates in its own deterministic namespace. The parent
 		// still reserves the IDs consumed here when it adopts the outer wrapper.
 		ID_COUNTER = previousIdCounter + ID_COUNTER - idSeed;
+		if (island !== null) island.islands--;
 	}
 }
 
@@ -5708,7 +5962,7 @@ const PermanentStaticHydrate = /* @__PURE__ */ markComponentFlags(
 			PERMANENT_STATIC_HYDRATE_DEPTH--;
 		}
 	},
-	COMPONENT_FLAG_BOUNDARY,
+	COMPONENT_FLAGS_AUTHOR_BOUNDARY,
 	'PermanentStaticHydrate',
 );
 
@@ -5813,7 +6067,7 @@ const hydrate = /* @__PURE__ */ markComponentFlags(
 			),
 		);
 	},
-	COMPONENT_FLAG_BOUNDARY,
+	COMPONENT_FLAGS_AUTHOR_BOUNDARY,
 	'Hydrate',
 );
 
@@ -5854,7 +6108,7 @@ export const Suspense = /* @__PURE__ */ markComponentFlags(
 			),
 		);
 	},
-	COMPONENT_FLAG_BOUNDARY,
+	COMPONENT_FLAGS_AUTHOR_BOUNDARY,
 	'Suspense',
 	SUSPENSE_TAG,
 );
@@ -5924,10 +6178,10 @@ function vtSsrResolve(
 	kind: 'enter' | 'exit' | 'update' | 'share' | 'parentEnter' | 'parentExit',
 ): string {
 	const value = props[kind];
-	const resolved = typeof value === 'string' ? value : value?.default;
+	const resolved = typeof value === 'string' ? value : value?.['default'];
 	if (resolved != null) return resolved;
 	const fallback = props.default;
-	return (typeof fallback === 'string' ? fallback : fallback?.default) ?? 'auto';
+	return (typeof fallback === 'string' ? fallback : fallback?.['default']) ?? 'auto';
 }
 
 /** Find an opening tag's actual terminator without allocating scan state. */
@@ -6309,8 +6563,10 @@ function vtSsrStrip(html: string, rawHtml: boolean): string {
  * (docs/view-transitions-plan.md). Renders the children transparently in the
  * same nested-block byte shape the client produces (componentSlot's comp pair
  * around the body's childSlot pair — renderComponentFramed adds the outer
- * frame, the explicit ssrBlock below is the inner childSlot range), stamped
- * with the Fizz-parity `vt-*` annotations described above.
+ * frame; ssrChild already frames descriptor, primitive and array children as
+ * the inner childSlot range, so the explicit ssrBlock below adds it only for
+ * a compiled children body or a compiler HTML carrier), stamped with the
+ * Fizz-parity `vt-*` annotations described above.
  */
 export const ViewTransition = /* @__PURE__ */ markComponentFlags(
 	function ViewTransition(props: VtSsrProps, scope: SSRScope): string {
@@ -6357,9 +6613,16 @@ export const ViewTransition = /* @__PURE__ */ markComponentFlags(
 			attrs.push(['vt-parent-' + kind.toLowerCase() + '-x', value ?? (handler ? 'auto' : 'none')]);
 		}
 		const annotated = vtSsrAnnotate(inner, attrs);
-		return ssrHtml(ssrBlock(props.scope === 'element' ? vtSsrAnnotateScope(annotated) : annotated));
+		const body = props.scope === 'element' ? vtSsrAnnotateScope(annotated) : annotated;
+		// ssrChild already frames every child as one childSlot range except a compiled children body
+		// and a compiler HTML carrier, which reach here unframed.
+		const children = props.children;
+		const unframed =
+			typeof children === 'function' ||
+			(children !== null && typeof children === 'object' && SERVER_HTML in children);
+		return ssrHtml(unframed ? ssrBlock(body) : body);
 	},
-	COMPONENT_FLAG_BOUNDARY,
+	COMPONENT_FLAGS_AUTHOR_BOUNDARY,
 	'ViewTransition',
 );
 
@@ -6377,6 +6640,11 @@ export function addTransitionType(_type: string): void {}
  * error during render swaps to the fallback; a suspension rethrows so an outer
  * `<Suspense>`/`@pending` handles it (matching the client ErrorBoundary's explicit
  * suspension propagation). `reset` is a server no-op (no re-render).
+ *
+ * Routed through ssrTry, like the compiled catch-only boundary, so a caught arm
+ * carries the same catch marker and seed counts: the client's ErrorBoundary
+ * (a catch-only tryBlock) replays the body and adopts the fallback the server
+ * rendered instead of mistaking it for the body's content.
  */
 export const ErrorBoundary = /* @__PURE__ */ markComponentFlags(
 	function ErrorBoundary(
@@ -6384,28 +6652,24 @@ export const ErrorBoundary = /* @__PURE__ */ markComponentFlags(
 		scope: SSRScope,
 	): string {
 		return ssrHtml(
-			ssrBlock(
-				(() => {
-					try {
-						return withAsyncIdentity('error-boundary', 'content', () =>
-							ssrBlock(ssrChildrenHtml(props.children, scope)),
-						);
-					} catch (e) {
-						e = normalizeThrownServerThenable(e);
-						if (ssrIsSuspense(e)) throw e; // let an outer Suspense render its pending arm
-						const fb =
-							typeof props.fallback === 'function'
-								? (props.fallback as (err: unknown, reset: () => void) => unknown)(e, NOOP)
-								: props.fallback;
-						return withAsyncIdentity('error-boundary', 'catch', () =>
-							ssrBlock(ssrChild(fb, scope)),
-						);
-					}
-				})(),
+			ssrTry(
+				scope,
+				'jsx-error-boundary',
+				(_arg, s) => ssrChildrenHtml(props.children, s),
+				null,
+				(error, s, reset) =>
+					ssrChild(
+						typeof props.fallback === 'function'
+							? (props.fallback as (err: unknown, reset: () => void) => unknown)(error, reset)
+							: props.fallback,
+						s,
+					),
+				FRAME?.namespace ?? 'html',
+				true,
 			),
 		);
 	},
-	COMPONENT_FLAG_BOUNDARY,
+	COMPONENT_FLAGS_AUTHOR_BOUNDARY,
 	'ErrorBoundary',
 );
 
@@ -6434,6 +6698,62 @@ export function createContext<T>(defaultValue: T): Context<T> {
 		defineRemovedContextMembers(ctx);
 	}
 	return ctx;
+}
+
+/** The server counterpart of the client compiled-only context identity. */
+export function createCompiledContext<T>(defaultValue: T): Context<T> {
+	const ctx = function CompiledProvider(_props, _scope): string {
+		throw new TypeError(formatServerError(344));
+	} as Context<T>;
+	ctx.$$kind = CONTEXT_TAG;
+	ctx.defaultValue = defaultValue;
+	registerContext(ctx);
+	if (process.env.NODE_ENV !== 'production') defineRemovedContextMembers(ctx);
+	return ctx;
+}
+
+export function CompiledContext<T>(
+	props: { context: Context<T>; value: T; children?: unknown },
+	scope: SSRScope,
+): string {
+	if (scope.$$ctxValues === null) scope.$$ctxValues = new Map();
+	scope.$$ctxValues.set(props.context, props.value);
+	const children = props.children;
+	if (children == null) return ssrHtml('');
+	if (!isChildrenBlock(children)) {
+		throw new TypeError(formatServerError(345));
+	}
+	return ssrHtml(ssrChildrenHtml(children, scope));
+}
+
+function checkedCompiledOutput(out: unknown): string {
+	if (out === undefined) return '';
+	if (out !== null && typeof out === 'object' && SERVER_HTML in out) {
+		return (out as ServerHtml)[SERVER_HTML];
+	}
+	throw new TypeError(formatServerError(346));
+}
+
+export function CompiledOutlet(
+	props: { component: ServerComponent; props: unknown },
+	scope: SSRScope,
+): string {
+	if (typeof props.component !== 'function') {
+		throw new TypeError(formatServerError(346));
+	}
+	return ssrHtml(
+		ssrComponent(
+			scope,
+			props.component,
+			props.props,
+			false,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			true,
+		),
+	);
 }
 
 function renderServerContextProvider(
@@ -6594,7 +6914,7 @@ function reasonSnapshot(
 				out[key] = '[unavailable]';
 			}
 		}
-		if (keys.length > length) out.__octane_truncated__ = true;
+		if (keys.length > length) out['__octane_truncated__'] = true;
 		return out;
 	} finally {
 		state.active.delete(value);
@@ -6672,7 +6992,7 @@ function hydrationRejectionPayloadUnsafe(reason: unknown): HydrationRejectionPay
 				fields[key] = '[unavailable]';
 			}
 		}
-		if (keys.length > length) fields.__octane_truncated__ = true;
+		if (keys.length > length) fields['__octane_truncated__'] = true;
 		return { kind: 'error', name, message, fields };
 	}
 	if (typeof reason === 'function') {
@@ -6728,7 +7048,7 @@ function hasExternalHydrationOwner(thenable: PromiseLike<unknown>): boolean {
 // mirrors the client runtime's `use()` (see NotAnElementDescriptor there).
 export function use<T>(
 	usable: Context<T> | (PromiseLike<T> & { $$kind?: never }),
-	siteKey?: symbol | string,
+	siteKey?: ServerHookSlot,
 	directSite?: string,
 ): T;
 export function use<T>(
@@ -6928,14 +7248,14 @@ interface ServerPuCreation {
 	value: unknown;
 	site: ServerHookSlot | undefined;
 	frame: Frame | null;
-	nativeWitness?: NativeReadWitness | null;
+	nativeWitness?: NativeReadWitness | null | undefined;
 }
 
 interface ServerWarmEntry {
 	deps: unknown[];
 	value: unknown;
 	available: boolean;
-	nativeWitness?: NativeReadWitness | null;
+	nativeWitness?: NativeReadWitness | null | undefined;
 }
 
 type ServerMemoEvidence = ServerPuCreation | ServerWarmEntry;
@@ -7482,7 +7802,7 @@ export function useState<T = undefined>(): [
 ];
 export function useState<T>(
 	initial: T | (() => T),
-	slot?: symbol,
+	slot?: ServerHookSlot,
 ): [T, (next: T | ((value: T) => T)) => void, () => T];
 export function useState<T>(
 	initial?: T | (() => T),
@@ -7506,26 +7826,24 @@ export function useState<T>(
 	) as [T, (next: any) => void, () => T];
 }
 
-type AssertServerUseStateType<T extends true> = T;
-type _ServerUseStateAcceptsNoArguments = AssertServerUseStateType<
-	typeof useState extends <T = undefined>() => [
-		T | undefined,
-		(next: T | undefined | ((value: T | undefined) => T | undefined)) => void,
-		() => T | undefined,
-	]
-		? true
-		: false
->;
+/** @internal Server counterpart: no external integration callback runs during SSR. */
+export function __useCommittedState<T>(
+	initial: T | (() => T),
+	slot: ServerHookSlot | undefined,
+): [T, (next: T | ((value: T) => T)) => void, (next: T | ((value: T) => T)) => void] {
+	const [value, setter] = useState(initial, slot);
+	return [value, setter, setter];
+}
 
 /** Compiler-emitted useState variant for a tuple whose third member is observable. */
 export function __useStateWithGetter<T>(
 	initial: T | (() => T),
-	slot?: symbol,
-): [T, (next: any) => void, () => T];
+	slot?: ServerHookSlot,
+): [T, (next: T | ((value: T) => T)) => void, () => T];
 export function __useStateWithGetter<T>(
 	initial: T | (() => T),
 	slot?: ServerHookSlot,
-): [T, (next: any) => void, () => T] {
+): [T, (next: T | ((value: T) => T)) => void, () => T] {
 	// Mirror the public hook's legacy lone-slot compatibility before creating
 	// the getter cell, preserving authored alias arguments inside a custom path.
 	if (
@@ -7542,7 +7860,7 @@ export function __useStateWithGetter<T>(
 		() => (typeof initial === 'function' ? (initial as () => T)() : initial),
 		slot,
 		true,
-	) as [T, (next: any) => void, () => T];
+	) as [T, (next: T | ((value: T) => T)) => void, () => T];
 }
 
 export interface LinkedStatePrevious<Source, Value> {
@@ -7616,12 +7934,21 @@ function linkedStateHook<Source, Value>(
 	return [record.value, record.dispatch, getter];
 }
 
-export function useLinkedState<Source, Value>(
+// `Value` is the reconciler's return type and `Previous` the type of
+// `previous.value`; the client `useLinkedState` declaration explains the split.
+type LinkedStateValue<Value, Previous> = unknown extends Previous ? Value : Previous;
+type LinkedStateTuple<Value> = [
+	Value,
+	(next: Value | ((previous: Value) => Value)) => void,
+	() => Value,
+];
+
+export function useLinkedState<Source, Value extends Previous, Previous = Value>(
 	source: Source,
-	reconcile: (source: Source, previous: LinkedStatePrevious<Source, Value> | undefined) => Value,
-	options?: LinkedStateOptions<Source, Value>,
-	slot?: symbol,
-): [Value, (next: Value | ((previous: Value) => Value)) => void, () => Value];
+	reconcile: (source: Source, previous: LinkedStatePrevious<Source, Previous> | undefined) => Value,
+	options?: LinkedStateOptions<Source, Previous>,
+	slot?: ServerHookSlot,
+): LinkedStateTuple<LinkedStateValue<Value, Previous>>;
 export function useLinkedState<Source, Value>(
 	source: Source,
 	reconcile: (source: Source, previous: LinkedStatePrevious<Source, Value> | undefined) => Value,
@@ -7636,12 +7963,12 @@ export function useLinkedState<Source, Value>(
 }
 
 /** Compiler-emitted linked-state variant when its latest-value getter is observed. */
-export function __useLinkedStateWithGetter<Source, Value>(
+export function __useLinkedStateWithGetter<Source, Value extends Previous, Previous = Value>(
 	source: Source,
-	reconcile: (source: Source, previous: LinkedStatePrevious<Source, Value> | undefined) => Value,
-	options?: LinkedStateOptions<Source, Value>,
-	slot?: symbol,
-): [Value, (next: Value | ((previous: Value) => Value)) => void, () => Value];
+	reconcile: (source: Source, previous: LinkedStatePrevious<Source, Previous> | undefined) => Value,
+	options?: LinkedStateOptions<Source, Previous>,
+	slot?: ServerHookSlot,
+): LinkedStateTuple<LinkedStateValue<Value, Previous>>;
 export function __useLinkedStateWithGetter<Source, Value>(
 	source: Source,
 	reconcile: (source: Source, previous: LinkedStatePrevious<Source, Value> | undefined) => Value,
@@ -7659,7 +7986,7 @@ export function useReducer<S, A, I = S>(
 	reducer: (s: S, a: A) => S,
 	initialArg: I,
 	initOrSlot?: ((arg: I) => S) | symbol,
-	maybeSlot?: symbol,
+	maybeSlot?: ServerHookSlot,
 ): [S, (action: A) => void, () => S];
 export function useReducer<S, A, I = S>(
 	reducer: (s: S, a: A) => S,
@@ -7681,7 +8008,7 @@ export function __useReducerWithGetter<S, A, I = S>(
 	reducer: (s: S, a: A) => S,
 	initialArg: I,
 	initOrSlot?: ((arg: I) => S) | symbol,
-	maybeSlot?: symbol,
+	maybeSlot?: ServerHookSlot,
 ): [S, (action: A) => void, () => S];
 export function __useReducerWithGetter<S, A, I = S>(
 	reducer: (s: S, a: A) => S,
@@ -7699,10 +8026,76 @@ export function __useReducerWithGetter<S, A, I = S>(
 	) as [S, (action: A) => void, () => S];
 }
 
-export function useEffect(): void {}
-export const useLayoutEffect = useEffect;
-export const useInsertionEffect = useEffect;
-export function useImperativeHandle(): void {}
+// Effects never run on the server. An islands shell never runs them on the
+// client either, so a development render can witness each one it reaches.
+export function useEffect(
+	fn: Parameters<typeof ClientUseEffect>[0],
+	deps?: any[] | null,
+	slot?: ServerHookSlot,
+): void;
+export function useEffect(): void {
+	if (SHELL_WITNESS !== null && process.env.NODE_ENV !== 'production')
+		witnessShellHook('useEffect', useEffect);
+}
+export function useLayoutEffect(
+	fn: Parameters<typeof ClientUseEffect>[0],
+	deps?: any[] | null,
+	slot?: ServerHookSlot,
+): void;
+export function useLayoutEffect(): void {
+	if (SHELL_WITNESS !== null && process.env.NODE_ENV !== 'production')
+		witnessShellHook('useLayoutEffect', useLayoutEffect);
+}
+export function useLayoutSnapshot<T>(
+	measure: () => T,
+	options: LayoutSnapshotOptionsWithInitial<T>,
+	slot?: ServerHookSlot,
+): T;
+export function useLayoutSnapshot<T>(
+	measure: () => T,
+	options?: LayoutSnapshotOptions<T>,
+	slot?: ServerHookSlot,
+): T | undefined;
+export function useLayoutSnapshot<T>(
+	_measure: () => T,
+	options?: LayoutSnapshotOptions<any> | symbol,
+	slot?: ServerHookSlot,
+): T | undefined {
+	if (SHELL_WITNESS !== null && process.env.NODE_ENV !== 'production')
+		witnessShellHook('useLayoutSnapshot', useLayoutSnapshot);
+	if (typeof options === 'symbol') {
+		if (slot === undefined) slot = options;
+		options = undefined;
+	}
+	const position = hookPosition(slot);
+	if (position === null) return options?.initial;
+	// A server render may retry after a render-phase update. The initial snapshot
+	// belongs to the hook's first pass, just as on the client. Nothing dispatches
+	// to it, so it needs no state queue or dispatcher.
+	let record = position.list[position.index] as LayoutSnapshotHookRec | undefined;
+	if (record === undefined) {
+		record = { snapshot: options?.initial };
+		position.list[position.index] = record;
+	}
+	return record.snapshot as T | undefined;
+}
+// Insertion effects inject styles the server render already emitted.
+export function useInsertionEffect(
+	fn: Parameters<typeof ClientUseEffect>[0],
+	deps?: any[] | null,
+	slot?: ServerHookSlot,
+): void;
+export function useInsertionEffect(): void {}
+export function useImperativeHandle<T>(
+	ref: Parameters<typeof ClientUseImperativeHandle<T>>[0],
+	factory: () => T,
+	deps?: any[] | null,
+	slot?: ServerHookSlot,
+): void;
+export function useImperativeHandle(): void {
+	if (SHELL_WITNESS !== null && process.env.NODE_ENV !== 'production')
+		witnessShellHook('useImperativeHandle', useImperativeHandle);
+}
 
 let devMemoComputeDepth = 0;
 
@@ -7735,7 +8128,11 @@ function memoHookValue<T>(
 	return rec.value as T;
 }
 
-export function useMemo<T>(compute: () => T, deps?: readonly unknown[] | null, slot?: symbol): T;
+export function useMemo<T>(
+	compute: () => T,
+	deps?: readonly unknown[] | null,
+	slot?: ServerHookSlot,
+): T;
 export function useMemo<T>(
 	compute: () => T,
 	depsOrSlot?: readonly unknown[] | null | ServerHookSlot,
@@ -7752,7 +8149,7 @@ export function useMemo<T>(
 	return memoHookValue<T>(compute, true, depsOrSlot, maybeSlot);
 }
 
-export function useCallback<F>(fn: F, deps?: readonly unknown[] | null, slot?: symbol): F;
+export function useCallback<F>(fn: F, deps?: readonly unknown[] | null, slot?: ServerHookSlot): F;
 export function useCallback<F>(
 	fn: F,
 	depsOrSlot?: readonly unknown[] | null | ServerHookSlot,
@@ -7762,7 +8159,7 @@ export function useCallback<F>(
 }
 
 export function useRef<T = undefined>(): { current: T | undefined };
-export function useRef<T>(initial: T, slot?: symbol): { current: T };
+export function useRef<T>(initial: T, slot?: ServerHookSlot): { current: T };
 export function useRef<T>(initial?: T, slot?: ServerHookSlot): { current: T | undefined } {
 	// Legacy lone-slot calls remain valid outside custom paths. Compiled spread
 	// calls use the path for identity and preserve the original argument count.
@@ -7785,7 +8182,20 @@ export function useRef<T>(initial?: T, slot?: ServerHookSlot): { current: T | un
 	return rec.ref as { current: T | undefined };
 }
 
+export function useLazyRef<T>(factory: () => T, slot?: symbol): { current: T };
+export function useLazyRef<T>(factory: () => T, slot?: ServerHookSlot): { current: T } {
+	const position = hookPosition(slot);
+	if (position === null) return { current: factory() };
+	let rec = position.list[position.index] as RefHookRec | undefined;
+	if (rec === undefined) {
+		rec = { ref: { current: factory() } };
+		position.list[position.index] = rec;
+	}
+	return rec.ref as { current: T };
+}
+
 /** React's `useDebugValue` — devtools-only on the client, no-op everywhere. */
+export function useDebugValue(_value?: unknown, _format?: unknown, _slot?: ServerHookSlot): void;
 export function useDebugValue(_value?: unknown, _format?: unknown): void {}
 
 /**
@@ -7795,6 +8205,7 @@ export function useDebugValue(_value?: unknown, _format?: unknown): void {}
  */
 export function requestFormReset(_form?: unknown): void {}
 
+export function useId(slot?: ServerHookSlot): string;
 export function useId(): string {
 	// Same root-local namespace/counter shape as the client hydration pass.
 	return formatUseId(ID_PREFIX, ID_COUNTER++);
@@ -7804,6 +8215,7 @@ function throwOnServerEffectEventCall(): never {
 	throw new Error(formatServerError(11));
 }
 
+export function useEffectEvent<F extends (...args: any[]) => any>(fn: F, slot?: ServerHookSlot): F;
 export function useEffectEvent<F>(_fn: F): F {
 	// A server pass may declare an Effect Event so the same component can hydrate,
 	// but invoking it during render is forbidden. React deliberately returns one
@@ -7812,6 +8224,9 @@ export function useEffectEvent<F>(_fn: F): F {
 	return throwOnServerEffectEventCall as unknown as F;
 }
 
+export function useTransition(
+	slot?: ServerHookSlot,
+): [boolean, (fn: () => void | Promise<unknown>) => void];
 export function useTransition(): [boolean, (fn: () => void | Promise<unknown>) => void] {
 	return [false, NOOP];
 }
@@ -7837,11 +8252,20 @@ export function useSyncExternalStore<T>(
 	serverSnapshotOrSlot: unknown = undefined,
 	_slot?: unknown,
 ): T {
+	// The client subscribes in a passive effect.
+	if (SHELL_WITNESS !== null && process.env.NODE_ENV !== 'production')
+		witnessShellHook('useSyncExternalStore', useSyncExternalStore);
 	// `getServerSnapshot` (if provided) precedes the trailing slot symbol.
 	const getServerSnapshot = arguments.length >= 4 ? (serverSnapshotOrSlot as () => T) : undefined;
 	return getServerSnapshot ? getServerSnapshot() : getSnapshot();
 }
 
+export function useActionState<S>(
+	action: (prevState: S, payload: any) => S | Promise<S>,
+	initialState: S,
+	permalinkOrSlot?: string | symbol,
+	slot?: ServerHookSlot,
+): [S, (payload?: any) => void, boolean];
 export function useActionState<S>(
 	_action: unknown,
 	initialState: S,
@@ -7855,6 +8279,7 @@ export interface FormStatus {
 	method: string | null;
 	action: ((formData: FormData) => unknown) | string | null;
 }
+export function useFormStatus(slot?: ServerHookSlot): FormStatus;
 export function useFormStatus(): FormStatus {
 	return { pending: false, data: null, method: null, action: null };
 }
@@ -7865,6 +8290,11 @@ export function useOptimistic<S>(
 export function useOptimistic<S, V = S>(
 	passthrough: S,
 	updateFn: (state: S, value: V) => S,
+): [S, (value: V) => void];
+export function useOptimistic<S, V = S>(
+	passthrough: S,
+	updateFnOrSlot: ((state: S, value: V) => S) | symbol | undefined,
+	slot?: ServerHookSlot,
 ): [S, (value: V) => void];
 export function useOptimistic<S>(passthrough: S): [S, (value: never) => void] {
 	return [passthrough, NOOP];
@@ -7984,7 +8414,7 @@ export function callWithReceiver<T>(
 	return NATIVE_REFLECT_APPLY(fn, receiver, args);
 }
 
-export function withSlot<T>(sym: symbol, fn: (...a: any[]) => T, ...args: any[]): T;
+export function withSlot<T>(sym: ServerHookSlot, fn: (...a: any[]) => T, ...args: any[]): T;
 export function withSlot<T>(sym: ServerHookSlot, fn: (...a: any[]) => T, ...args: any[]): T {
 	const driver = MANUAL_HOOK_DRIVER;
 	const pending = driver?.pending;
@@ -8022,6 +8452,11 @@ export function flushSync<T>(fn: () => T): T {
 	return fn();
 }
 
+/** @internal The server has no DOM event scheduler. */
+export function __createDiscreteEventListener(listener: EventListener): EventListener {
+	return listener;
+}
+
 // Children-block tagging — same contract as the client runtime (runtime.ts):
 // the compiler tags element/text children lowered to a render function so
 // `isChildrenBlock` can tell them from a user render-prop child. Both runtimes
@@ -8036,6 +8471,11 @@ export function flushSync<T>(fn: () => T): T {
 export function markChildrenBlock<T>(fn: T): T {
 	if (typeof fn === 'function') {
 		(fn as any)[CHILDREN_BLOCK] = true;
+		if (SERVER_SIGNAL_OWNER_ACTIVE) {
+			const owner = currentSignalOwner();
+			if (owner !== null && isRendererSignalOwner(owner))
+				(fn as any)[CHILDREN_SIGNAL_OWNER] = owner;
+		}
 	}
 	return fn;
 }
@@ -8052,6 +8492,35 @@ export function descriptorChildren<T>(component: T): T {
  */
 export function isChildrenBlock(value: unknown): boolean {
 	return typeof value === 'function' && (value as any)[CHILDREN_BLOCK] === true;
+}
+
+// Mirrors the client's childSlot: a render function rendered as a child is part
+// of the template rendering it, except compiled children, which belong to the
+// template that authored them.
+function templateInvocationSite(body: unknown): string | undefined {
+	return isChildrenBlock(body) ? undefined : TEMPLATE_INVOCATION_SITE;
+}
+
+// The owner of the template that authored compiled children, recorded by
+// markChildrenBlock (runtime.ts records the same owner).
+function childrenSignalOwner(body: unknown): SignalRendererOwnerIdentity | undefined {
+	return isChildrenBlock(body) ? (body as any)[CHILDREN_SIGNAL_OWNER] : undefined;
+}
+
+// A context provider or boundary built-in renders compiled children inline in
+// its own frame, so its owner links to their author's. The client renders a
+// boundary's children in a slot or try body of their own instead, which links
+// the same way (see scopeSignalOwner and createHydrateBoundaryBody).
+function authorChildrenSignalOwner(
+	comp: unknown,
+	props: { children?: unknown } | null | undefined,
+): SignalRendererOwnerIdentity | undefined {
+	const owner = childrenSignalOwner(props?.children);
+	return owner !== undefined &&
+		((comp as any).$$kind === CONTEXT_TAG ||
+			hasComponentFlags(comp, COMPONENT_FLAG_AUTHOR_CHILDREN))
+		? owner
+		: undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -8210,11 +8679,11 @@ export function ssrHeadEl(
 	// HeadBuffer). Ownership markers travel with the element, so hydration
 	// adoption is position-independent.
 	if (tag === 'meta' && attrs !== null) {
-		if (attrs.charSet !== undefined || attrs.charset !== undefined) {
+		if (attrs['charSet'] !== undefined || attrs['charset'] !== undefined) {
 			HEAD.charset += s;
 			return '';
 		}
-		if (attrs.name === 'viewport') {
+		if (attrs['name'] === 'viewport') {
 			HEAD.viewport += s;
 			return '';
 		}
@@ -8327,6 +8796,14 @@ export interface RenderOptions {
 	};
 	/** Caller-controlled namespace for `useId`; use distinct prefixes for sibling roots. */
 	identifierPrefix?: string;
+	/**
+	 * Development renders only: called once per construct and site that needs
+	 * client code but renders outside every independent `<Hydrate>` island (see
+	 * `ShellWitness`). An islands-only route's shell never loads its modules in
+	 * the browser, so none of these would run. Production renders ignore it,
+	 * since production compiler output erases static handler and ref props.
+	 */
+	shellWitness?: (witness: ShellWitness) => void;
 	/** Called with any error thrown during the render (before it propagates). */
 	onError?: (error: unknown) => void;
 	/**
@@ -8339,7 +8816,7 @@ export interface RenderOptions {
 	 * CSP nonce stamped on every inline tag the renderer emits: the deduped
 	 * `<style data-octane>` tags and the suspense seed `<script>`.
 	 */
-	nonce?: string;
+	nonce?: string | undefined;
 	/**
 	 * Per-render override of the global suspense settle deadline
 	 * (setSsrSuspenseTimeout). 0 disables the deadline for this render. Async
@@ -8361,7 +8838,7 @@ export interface RenderOptions {
 	 * into the body, where a `<title>` loses to the template's and a canonical or
 	 * description is ignored outright.
 	 */
-	headChannel?: 'fold' | 'separate';
+	headChannel?: 'fold' | 'separate' | undefined;
 }
 
 // Fold into a rendered document or a fragment that leads with an authored
@@ -8385,6 +8862,25 @@ function spliceHead(body: string, head: string, documentRoot = isDocumentRoot(bo
 
 function renderEntryValue(props: { value: ServerRenderNode }, scope: SSRScope): string {
 	return ssrHtml(ssrChild(props.value, scope));
+}
+
+/**
+ * The root component a render entry renders, with its props and options. An
+ * element entry whose type is a component renders as that component's root,
+ * as hydrateRoot renders it: `renderToString(<App {...props} />)` renders as
+ * `renderToString(App, props)`, so both frame the root alike. Any other value
+ * renders as what a root returns (renderEntryValue), and its second argument
+ * is the options.
+ */
+function renderEntry<O>(
+	entry: ServerRenderNode,
+	props: any,
+	options: O | undefined,
+): [ServerComponent, any, O | undefined] {
+	if (typeof entry === 'function') return [entry as ServerComponent, props, options];
+	return isElementDescriptor(entry) && typeof entry.type === 'function'
+		? [entry.type as ServerComponent, descriptorProps(entry), options ?? props]
+		: [renderEntryValue, { value: entry }, options ?? props];
 }
 
 /** Guard against a `use(thenable)` that never resolves wedging the render loop. */
@@ -8530,18 +9026,18 @@ type SuspenseOutcome = SuspenseResult & {
 //              identity stable across passes);
 type ResolvedMap = Map<string, SuspenseOutcome> & {
 	/** Pending streaming subscriptions shared across this request's settle waves. */
-	streamSettlements?: StreamSettlements;
+	streamSettlements?: StreamSettlements | undefined;
 	/** Recoverable buffered-boundary errors are reported once across async retries. */
 	bufferedErrors?: Map<string, { error: unknown; reported: boolean }>;
 	/** Resource-thrown thenables a buffered settle has seen settle (see isStalledWave). */
 	settledThrows?: Set<PromiseLike<unknown>>;
 	/** Undefined for externally hosted passes whose request lifetime is not owned here. */
-	resourceOptions?: RenderOptions | null;
+	resourceOptions?: RenderOptions | null | undefined;
 	/** Optional renderer resources; allocated only by a participating adapter. */
-	resources?: ServerRenderResources;
+	resources?: ServerRenderResources | undefined;
 	/** One request/account owner shared by every pass and streamed region. */
 	signalOwner?: SignalOwner;
-	initialDocumentSignals?: ScopeSeed;
+	initialDocumentSignals?: ScopeSeed | undefined;
 	ownedSignalOwner?: boolean;
 	signalInstances?: Map<string, SignalRendererOwnerIdentity>;
 	signalIdentityKeys?: Map<string, ServerOpaqueSignalKeys>;
@@ -8553,6 +9049,8 @@ type ResolvedMap = Map<string, SuspenseOutcome> & {
 	nextAsyncIdentity: number;
 	/** Lazily allocated DEV SSR invalid-nesting warnings reported by this render. */
 	nestingWarnings?: Set<string>;
+	/** Islands-only shell witness state, allocated once a DEV render asks for it. */
+	shellWitness?: ShellWitnessSink;
 	pu: {
 		created: Map<string, ServerPuCreation>;
 		resolvedT: Map<PromiseLike<unknown>, SuspenseResult>;
@@ -8573,7 +9071,7 @@ type ResolvedMap = Map<string, SuspenseOutcome> & {
 		 *  (it CONSUMES the previous wave's outcomes) from ancestor recreation
 		 *  (the settled instances are never referenced again). Undefined —
 		 *  the common case — costs one undefined-check per identity hit. */
-		touched?: Set<PromiseLike<unknown>>;
+		touched?: Set<PromiseLike<unknown>> | undefined;
 	};
 };
 
@@ -8772,6 +9270,7 @@ interface Ambient {
 	asyncScope: string;
 	ssrElement: SsrElementContext | null;
 	nestingWarnings: Set<string> | null | undefined;
+	shellWitness: ShellWitnessSink | null;
 	vtTrySeq: number;
 	vtHasCandidates: boolean;
 	vtHasRawHtml: boolean;
@@ -8811,6 +9310,7 @@ function saveAmbient(): Ambient {
 		asyncScope: ASYNC_SCOPE,
 		ssrElement: CURRENT_SSR_ELEMENT,
 		nestingWarnings: SSR_NESTING_WARNINGS,
+		shellWitness: SHELL_WITNESS,
 		vtTrySeq: VT_SSR_TRY_SEQ,
 		vtHasCandidates: VT_SSR_HAS_CANDIDATES,
 		vtHasRawHtml: VT_SSR_HAS_RAW_HTML,
@@ -8870,6 +9370,7 @@ function restoreAmbient(a: Ambient): void {
 	ASYNC_SCOPE = a.asyncScope;
 	CURRENT_SSR_ELEMENT = a.ssrElement;
 	SSR_NESTING_WARNINGS = a.nestingWarnings;
+	SHELL_WITNESS = a.shellWitness;
 	VT_SSR_TRY_SEQ = a.vtTrySeq;
 	VT_SSR_HAS_CANDIDATES = a.vtHasCandidates;
 	VT_SSR_HAS_RAW_HTML = a.vtHasRawHtml;
@@ -8940,6 +9441,12 @@ function runFullFramedPass(
 	RESOLVED = resolved;
 	CURRENT_SSR_ELEMENT = null;
 	SSR_NESTING_WARNINGS = resolved.nestingWarnings;
+	// A render that did not ask pays one property read; production never asks.
+	const shellWitness = resolved.resourceOptions?.shellWitness;
+	SHELL_WITNESS =
+		shellWitness === undefined || process.env.NODE_ENV === 'production'
+			? null
+			: (resolved.shellWitness ??= { report: shellWitness, seen: new Set(), islands: 0 });
 	const root = ssrScope(null);
 	CURRENT_SCOPE = root;
 	// A root frame so use() keys resolve; the root component is the fallback
@@ -9095,6 +9602,7 @@ function runDiscoveryRound(
 	RESOLVED = resolved;
 	CURRENT_SSR_ELEMENT = null;
 	SSR_NESTING_WARNINGS = null;
+	SHELL_WITNESS = null;
 	FRAME = null;
 	CURRENT_COMP = null;
 	CURRENT_PROPS = null;
@@ -9807,12 +10315,8 @@ export async function prerender(
 	props?: any,
 	options?: RenderOptions,
 ): Promise<RenderResult> {
-	const component =
-		typeof entryComponent === 'function' ? (entryComponent as ServerComponent) : renderEntryValue;
-	if (typeof entryComponent !== 'function') {
-		options ??= props;
-		props = { value: entryComponent };
-	}
+	let component: ServerComponent;
+	[component, props, options] = renderEntry(entryComponent, props, options);
 	const preparedOptions = needsAutomaticSignalInjection(options)
 		? await prepareAutomaticSignalInjection(options as StreamOptions)
 		: options;
@@ -10062,12 +10566,8 @@ export function renderToString(
 	props?: any,
 	options?: RenderOptions,
 ): RenderResult {
-	const component =
-		typeof entryComponent === 'function' ? (entryComponent as ServerComponent) : renderEntryValue;
-	if (typeof entryComponent !== 'function') {
-		options ??= props;
-		props = { value: entryComponent };
-	}
+	let component: ServerComponent;
+	[component, props, options] = renderEntry(entryComponent, props, options);
 	options?.signal?.throwIfAborted();
 	const nonceAttr = nonceAttrOf(options);
 	const resolved: ResolvedMap = newResolvedMap(options ?? null);
@@ -10102,12 +10602,8 @@ export function renderToStaticMarkup(
 	props?: any,
 	options?: RenderOptions,
 ): RenderResult {
-	const component =
-		typeof entryComponent === 'function' ? (entryComponent as ServerComponent) : renderEntryValue;
-	if (typeof entryComponent !== 'function') {
-		options ??= props;
-		props = { value: entryComponent };
-	}
+	let component: ServerComponent;
+	[component, props, options] = renderEntry(entryComponent, props, options);
 	options?.signal?.throwIfAborted();
 	const nonceAttr = nonceAttrOf(options);
 	const resolved: ResolvedMap = newResolvedMap(options ?? null);
@@ -10177,8 +10673,9 @@ export function renderToStaticMarkup(
 // and leaves a `<!--oct-seed:id-->` comment where the template was; the client
 // `mountTry` sees the comment, scopes that boundary's seeds, and adopts the
 // swapped-in DOM byte-for-byte. A boundary still pending when the stream ends
-// (abort/error) keeps its template — hydration's structural-mismatch recovery
-// client-renders it (the standard degraded path).
+// (abort/error) keeps its template: hydration client-renders that boundary, as
+// React does for a boundary the server could not finish (the standard degraded
+// path).
 //
 // Intentional scope notes (documented divergences from React Fizz):
 //   - No selective hydration (octane has no synthetic event replay system).
@@ -10205,9 +10702,9 @@ interface StreamBoundary {
 	/** Recoverable render error retained for the public streaming onError callback. */
 	error?: unknown;
 	/** Whether this boundary's recoverable error has reached onError. */
-	errorReported?: boolean;
+	errorReported?: boolean | undefined;
 	/** Whether its client-render recovery instruction was accepted by the transport. */
-	errorFlushed?: boolean;
+	errorFlushed?: boolean | undefined;
 	/** The client graph is erased, so failure retains the authored server fallback. */
 	serverOwnedStatic: boolean;
 	/** Inner branch-range html (`<!--[-->…<!--]-->`) from the resolving pass. */
@@ -10217,7 +10714,7 @@ interface StreamBoundary {
 	/** This boundary's `use()` seed slice from the resolving pass. */
 	seeds: unknown[];
 	/** Ready native values captured with this exact accepted segment. */
-	signals?: NativeSignalManifest;
+	signals?: NativeSignalManifest | undefined;
 	/** Number of boundary-local useIds consumed before the shell suspended. */
 	pendingIdOffset: number;
 	/** Namespace inherited by this boundary's content arm. */
@@ -10383,6 +10880,16 @@ function pruneStreamBoundariesAbsentFromShell(
 	}
 }
 
+// A presentation-binding view labels a @try boundary's own range with the arm
+// it rendered (0 content, 1 pending, 2 catch). The label replaces the plain open
+// marker, so renderer hydration still sees one balanced range. Module scope keeps
+// ssrTry, which runs once per boundary per pass, free of a per-call closure.
+function ssrTryArm(content: string, arm: 0 | 1 | 2, bindingMarker: string | undefined): string {
+	return bindingMarker === undefined || !MARKERS
+		? ssrBlock(content)
+		: '<!--' + bindingMarker + arm + '-->' + content + BLOCK_CLOSE;
+}
+
 /**
  * Compiled `@try` / JSX `<Suspense>` boundary. `siteKey` is the compiler's
  * source-position hash; combined with the frame path + per-frame occurrence it
@@ -10410,13 +10917,6 @@ export function ssrTry(
 	bindingMarker?: string,
 ): string {
 	VT_SSR_TRY_SEQ++;
-	// A presentation-binding view labels this boundary's own range with the arm
-	// it rendered (0 content, 1 pending, 2 catch). The label replaces the plain
-	// open marker, so renderer hydration still sees one balanced range.
-	const slot = (content: string, arm: 0 | 1 | 2): string =>
-		bindingMarker === undefined || !MARKERS
-			? ssrBlock(content)
-			: '<!--' + bindingMarker + arm + '-->' + content + BLOCK_CLOSE;
 	// Consume the nearest un-consumed outer ViewTransition candidate: its
 	// name/share/update propagate onto this boundary's streamed content chunk
 	// so the old/new captures pair across the swap (Fizz vt-* parity).
@@ -10530,6 +11030,8 @@ export function ssrTry(
 	};
 	if (entry !== undefined) enterBoundaryIds(0);
 	let nativeFresh = false;
+	// A fresh arm the server could not finish, which the client reports once.
+	let clientArm = false;
 	const nativeFailureStart = NATIVE_SERVER_FAILURES;
 	const nativeFreshArm = (inner: string): string => {
 		if (!MARKERS || !nativeFresh) return inner;
@@ -10538,7 +11040,13 @@ export function ssrTry(
 		// use() cursor. Its original useId range remains reserved by the marker.
 		rewindSerial(serialStart, isolationStart);
 		const idCount = Math.max(0, ID_COUNTER - (boundaryIds ? 0 : outerIdCounter));
-		return '<!--' + NATIVE_SIGNAL_FRESH_COMMENT + idCount + '-->' + inner;
+		return (
+			'<!--' +
+			(clientArm ? CLIENT_RENDER_ARM_COMMENT : NATIVE_SIGNAL_FRESH_COMMENT) +
+			idCount +
+			'-->' +
+			inner
+		);
 	};
 	const pendingForm = (): string => {
 		// A ViewTransition at the top of the FALLBACK arm exits when the boundary
@@ -10654,12 +11162,13 @@ export function ssrTry(
 			fallback = renderFallback();
 		}
 		if (entry !== undefined) {
-			return slot(
+			return ssrTryArm(
 				'<template ' + STREAM_BOUNDARY_ATTR + '="' + entry.id + '"></template>' + fallback,
 				1,
+				bindingMarker,
 			);
 		}
-		return slot(nativeFreshArm(pendFn !== null ? fallback : ''), 1);
+		return ssrTryArm(nativeFreshArm(pendFn !== null ? fallback : ''), 1, bindingMarker);
 	};
 	try {
 		try {
@@ -10718,7 +11227,7 @@ export function ssrTry(
 					nativeReads,
 					RESOLVED?.initialDocumentSignals,
 				);
-				return slot(
+				return ssrTryArm(
 					`<!--${SUSPENSE_RESOLVED_COMMENT}${idCount}-->` +
 						(seeds.length === 0
 							? ''
@@ -10728,9 +11237,10 @@ export function ssrTry(
 							: serializeNativeSignalSeeds(native, NONCE_ATTR, SUSPENSE_RESOLVED_NATIVE_ATTR)) +
 						inner,
 					0,
+					bindingMarker,
 				);
 			}
-			return slot(inner, 0);
+			return ssrTryArm(inner, 0, bindingMarker);
 		} catch (e) {
 			nativeFresh = NATIVE_SERVER_FAILURES !== nativeFailureStart;
 			e = normalizeThrownServerThenable(e);
@@ -10764,6 +11274,13 @@ export function ssrTry(
 					} else {
 						ID_COUNTER = entry.pendingIdOffset;
 					}
+				} else if (PERMANENT_STATIC_HYDRATE_DEPTH === 0 && bindingMarker === undefined) {
+					// A buffered render cannot finish this boundary in this pass. If the
+					// pass ships (renderToString cannot wait; prerender retries instead),
+					// its @pending arm goes out marked for a client render, as React
+					// marks a boundary it could not finish (`<!--$!-->`). A
+					// presentation-binding view adopts its pending arm instead.
+					nativeFresh = clientArm = true;
 				}
 				return pendingForm();
 			}
@@ -10824,7 +11341,7 @@ export function ssrTry(
 					return pendingForm();
 				}
 				if (!nativeFresh) appendNativeSeedReads(catchReads);
-				return slot(inner, 2);
+				return ssrTryArm(inner, 2, bindingMarker);
 			}
 			if (stream !== null) {
 				// Fizz keeps a Suspense shell valid when its primary content throws:
@@ -10892,7 +11409,7 @@ export function ssrTry(
 // `<!--oct-seed:id-->` scoping comment. `id` is the full render-scoped opaque
 // key, so both document queries and the seed stash remain disjoint when output
 // from multiple streams is composed into one page. $OCTRX(id) marks the
-// boundary errored (hydration client-renders it via mismatch recovery). Error
+// boundary errored (hydration client-renders that boundary, as React does). Error
 // instructions that arrive before a queued parent reveal are retained until
 // insertion exposes their sentinel; transport order alone does not imply DOM
 // availability when an optional animation driver delays the parent swap. A
@@ -11235,7 +11752,7 @@ export interface StreamInjectionSource {
 	/** @internal Pending query authority must precede shell-time module execution. */
 	takeInitialSelections?(): string;
 	/** This source emits validated renderer frames and needs the pre-module mailbox. */
-	readonly streamedRenderer?: true;
+	readonly streamedRenderer?: true | undefined;
 	/** @internal Automatic query-attempt sink installed by streamedSignals. */
 	readonly observeSignalAttempt?: (
 		attempt: ServerSignalQueryAttempt,
@@ -12265,12 +12782,8 @@ export function renderToPipeableStream(
 	pipe: <T extends { write(chunk: string): unknown; end(): unknown }>(destination: T) => T;
 	abort: (reason?: unknown) => void;
 } {
-	const component =
-		typeof entryComponent === 'function' ? (entryComponent as ServerComponent) : renderEntryValue;
-	if (typeof entryComponent !== 'function') {
-		options ??= props;
-		props = { value: entryComponent };
-	}
+	let component: ServerComponent;
+	[component, props, options] = renderEntry(entryComponent, props, options);
 	interface Destination {
 		write(chunk: string): unknown;
 		end(): unknown;
@@ -12581,12 +13094,8 @@ export function renderToReadableStream(
 	props?: any,
 	options?: StreamOptions,
 ): Promise<ReadableStream<Uint8Array> & { allReady: Promise<void> }> {
-	const component =
-		typeof entryComponent === 'function' ? (entryComponent as ServerComponent) : renderEntryValue;
-	if (typeof entryComponent !== 'function') {
-		options ??= props;
-		props = { value: entryComponent };
-	}
+	let component: ServerComponent;
+	[component, props, options] = renderEntry(entryComponent, props, options);
 	if (needsAutomaticSignalInjection(options)) {
 		return prepareAutomaticSignalInjection(options!).then((prepared) =>
 			renderToReadableStream(component, props, prepared),
@@ -12932,10 +13441,10 @@ export function preload(href: string, options: { as: string } & Record<string, u
 			}
 		}
 	}
-	const imageSrcSet = as === 'image' ? options.imageSrcSet : undefined;
+	const imageSrcSet = as === 'image' ? options['imageSrcSet'] : undefined;
 	const key =
 		typeof imageSrcSet === 'string' && imageSrcSet !== ''
-			? 'preload:image:' + imageSrcSet + '::' + String(options.imageSizes ?? '')
+			? 'preload:image:' + imageSrcSet + '::' + String(options['imageSizes'] ?? '')
 			: 'preload:' + as + ':' + value;
 	const safeHref = sanitizeURL(value);
 	const omitHref = typeof imageSrcSet === 'string' && imageSrcSet !== '';
@@ -13085,13 +13594,13 @@ export function ssrStylesheetResource(
 		return '';
 	}
 	if (HEAD === null || attrs == null) return '';
-	const href = attrs.href;
+	const href = attrs['href'];
 	if (typeof href !== 'string' || href === '') return '';
 	const key = 'sheet:' + href;
 	if (HEAD.hints.has(key)) return '';
 	HEAD.replay = null;
 	HEAD.hints.add(key);
-	const precedence = attrs.precedence == null ? '' : String(attrs.precedence);
+	const precedence = attrs['precedence'] == null ? '' : String(attrs['precedence']);
 	const tag =
 		'<link rel="stylesheet" href="' +
 		escapeAttr(sanitizeURL(href)) +
@@ -13121,7 +13630,7 @@ export function ssrStyleResource(
 	development?: boolean,
 ): string {
 	if (HEAD === null || attrs == null) return '';
-	const href = attrs.href;
+	const href = attrs['href'];
 	if (typeof href !== 'string' || href === '') return '';
 	if (process.env.NODE_ENV !== 'production' && development === true && /\s/.test(href)) {
 		console.error(
@@ -13155,7 +13664,7 @@ export function ssrStyleResource(
 	}
 	HEAD.replay = null;
 	HEAD.hints.add(key);
-	const precedence = attrs.precedence == null ? '' : String(attrs.precedence);
+	const precedence = attrs['precedence'] == null ? '' : String(attrs['precedence']);
 	const tag =
 		'<style data-precedence="' +
 		escapeAttr(precedence) +
@@ -13177,7 +13686,7 @@ export function ssrStyleResource(
 /** Compiler target for `<script async src>` resources (React Float). */
 export function ssrScriptResource(attrs: Record<string, unknown> | null): string {
 	if (HEAD === null || attrs == null) return '';
-	const src = attrs.src;
+	const src = attrs['src'];
 	if (typeof src !== 'string' || src === '') return '';
 	const key = 'script:' + src;
 	// One executable per src per pass, across the classic and module forms.
@@ -13202,7 +13711,7 @@ export function preloadModule(href: string, options?: Record<string, unknown>): 
 	const value = coerceHintHref(href);
 	if (value === null) return;
 	if (options === null || typeof options !== 'object') options = undefined;
-	else if ('as' in options && typeof options.as !== 'string') {
+	else if ('as' in options && typeof options['as'] !== 'string') {
 		options = { ...options, as: undefined };
 	}
 	// A module that preinitModule OR a classic Float script already executes in

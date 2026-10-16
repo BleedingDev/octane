@@ -1,15 +1,17 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, relative, resolve, sep } from 'node:path';
-import ts from 'typescript';
+import { relative, resolve, sep } from 'node:path';
+import { is, parseSourceFile, ScriptKind, SyntaxKind } from '../octane-tsc/native-syntax.mjs';
+import {
+	factory,
+	flattenDiagnosticText,
+	parseProjectConfigContent,
+	printFileWithoutComments,
+	printNodeWithoutComments,
+	readProjectConfig,
+} from './native-typescript-lib.mjs';
 
 export const TYPE_PARITY_CONFIG = 'packages/tanstack-devtools/audit/type-parity.json';
-
-const TSRX_EXTENSION = {
-	extension: '.tsrx',
-	isMixedContent: false,
-	scriptKind: ts.ScriptKind.TSX,
-};
 
 function sha256(value) {
 	return createHash('sha256').update(value).digest('hex');
@@ -20,8 +22,8 @@ function posix(value) {
 }
 
 function scriptKindFor(fileName) {
-	if (fileName.endsWith('.tsrx') || fileName.endsWith('.tsx')) return ts.ScriptKind.TSX;
-	return ts.ScriptKind.TS;
+	if (fileName.endsWith('.tsrx') || fileName.endsWith('.tsx')) return ScriptKind.TSX;
+	return ScriptKind.TS;
 }
 
 function listProbeFiles(root) {
@@ -52,19 +54,12 @@ function normalizeComment(comment) {
 }
 
 function containsExpect(node) {
-	if (ts.isIdentifier(node) && node.text === 'Expect') return true;
+	if (is.isIdentifier(node) && node.text === 'Expect') return true;
 	return node.getChildren().some(containsExpect);
 }
 
 function assertionGroups(source, fileName) {
-	const sourceFile = ts.createSourceFile(
-		fileName,
-		source,
-		ts.ScriptTarget.Latest,
-		true,
-		ts.ScriptKind.TS,
-	);
-	const printer = ts.createPrinter({ removeComments: true });
+	const sourceFile = parseSourceFile(fileName, source, ScriptKind.TS);
 	const groups = [];
 	for (const match of source.matchAll(/\/\*\*[\s\S]*?\*\//g)) {
 		groups.push(`doc:${normalizeComment(match[0])}`);
@@ -79,19 +74,18 @@ function assertionGroups(source, fileName) {
 		);
 	}
 	function visit(node) {
-		if (ts.isTypeAliasDeclaration(node) && node.type && containsExpect(node.type)) {
+		if (is.isTypeAliasDeclaration(node) && node.type && containsExpect(node.type)) {
 			groups.push(
-				`expect:${node.name.text}:${printer.printNode(ts.EmitHint.Unspecified, node.type, sourceFile).replace(/\s+/g, ' ').trim()}`,
+				`expect:${node.name.text}:${printNodeWithoutComments(node.type).replace(/\s+/g, ' ').trim()}`,
 			);
 		}
 		if (
-			ts.isCallExpression(node) &&
-			ts.isIdentifier(node.expression) &&
+			is.isCallExpression(node) &&
+			is.isIdentifier(node.expression) &&
 			node.expression.text === 'expectType'
 		) {
 			groups.push(
-				`expectType:${printer
-					.printNode(ts.EmitHint.Unspecified, node, sourceFile)
+				`expectType:${printNodeWithoutComments(node)
 					.replace(/\bReactNode\b/g, 'RenderableNode')
 					.replace(/\bReactElement\b/g, 'RenderableNode')
 					.replace(/\bOctaneNode\b/g, 'RenderableNode')
@@ -101,7 +95,7 @@ function assertionGroups(source, fileName) {
 					.trim()}`,
 			);
 		}
-		ts.forEachChild(node, visit);
+		node.forEachChild(visit);
 	}
 	visit(sourceFile);
 	return groups;
@@ -156,12 +150,33 @@ function stripAdditiveExports(source) {
 }
 
 function canonicalizeAdapterSource(source, fileName) {
-	let text = stripOctaneMarkers(source);
+	let text = stripOctaneMarkers(source).replace(/^['"]use strong['"];\s*$/gm, '');
 	if (fileName === 'index.ts' || fileName.endsWith('/index.ts')) {
 		text = stripAdditiveExports(text);
 	}
 	text = normalizeFrameworkNames(text);
 	text = text
+		.replace(
+			/=>\s*@\{([\s\S]*)\n\t<>([\s\S]*)\n\t<\/>\n\};\s*$/,
+			'=> {$1\nreturn (<>$2\n\t</>);\n};',
+		)
+		.replace(
+			/@if \((hasPlugins|hasTitles)\) \{\s*@for \(const \[key, (\w+)\] of Object\.entries\((\w+)\); key key\) \{\s*<DevtoolsPortal target=\{\2\} content=\{(\w+)\[key\]\} \/>\s*\}\s*\}/g,
+			'{$1 ? Object.entries($3).map(([key, $2]) => createPortal(<>{$4[key]}</>, $2)) : null}',
+		)
+		.replace(
+			/@if \(triggerContainer && TriggerComponent\) \{\s*<DevtoolsPortal target=\{triggerContainer\} content=\{TriggerComponent\} \/>\s*\}/g,
+			'{triggerContainer && TriggerComponent ? createPortal(<>{TriggerComponent}</>, triggerContainer) : null}',
+		)
+		.replace(/(\}\) \?\? \[\]),\s*\[plugins\](?=\s*,?\s*\))/g, '$1')
+		.replace(
+			/(useEffect\(\(\) => \{\s*devtools\.setConfig\(\{\s*plugins: pluginsMap,?\s*\}\);?\s*\}),\s*\[devtools,\s*pluginsMap\](?=\s*,?\s*\))/g,
+			'$1',
+		)
+		.replace(
+			/(useEffect\(\(\) => \{\s*if \(devToolRef\.current\) \{\s*devtools\.mount\(devToolRef\.current\);?\s*\}\s*return \(\) => devtools\.unmount\(\);?\s*\}),\s*\[devtools\](?=\s*,?\s*\))/g,
+			'$1',
+		)
 		.replace(
 			/import React,\s*\{\s*useEffect,\s*useMemo,\s*useRef,\s*useState\s*\}\s*from ['"]#renderable-runtime['"];?\s*/g,
 			"import { createPortal, useEffect, useMemo, useRef, useState } from '#renderable-runtime';\n",
@@ -213,21 +228,20 @@ function canonicalizeAdapterSource(source, fileName) {
 		)
 		.replace(/: RenderableNode =>/g, ': RenderableNode | null =>')
 		.replace(/useRef<HTMLDivElement>\(null\)/g, 'useRef<HTMLDivElement | null>(null)');
+	if (/@(?:\{|if\b|for\b)/.test(text)) {
+		throw new Error(
+			`${fileName}: template contains a change outside the permitted transformations`,
+		);
+	}
 	return text;
 }
 
 function structuralProbeSource(source, fileName) {
 	let transformed = normalizeFrameworkNames(source);
-	const sourceFile = ts.createSourceFile(
-		fileName,
-		transformed,
-		ts.ScriptTarget.Latest,
-		true,
-		ts.ScriptKind.TS,
-	);
+	const sourceFile = parseSourceFile(fileName, transformed, ScriptKind.TS);
 	const replacements = [];
 	for (const statement of sourceFile.statements) {
-		if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier))
+		if (!is.isImportDeclaration(statement) || !is.isStringLiteral(statement.moduleSpecifier))
 			continue;
 		const specifier = statement.moduleSpecifier.text;
 		const normalized = normalizeSpecifier(specifier);
@@ -243,34 +257,18 @@ function structuralProbeSource(source, fileName) {
 	})) {
 		transformed = `${transformed.slice(0, replacement.start)}${replacement.value}${transformed.slice(replacement.end)}`;
 	}
-	const normalizedFile = ts.createSourceFile(
-		fileName,
-		transformed,
-		ts.ScriptTarget.Latest,
-		true,
-		ts.ScriptKind.TS,
-	);
-	return ts
-		.createPrinter({ removeComments: true })
-		.printFile(normalizedFile)
-		.replace(/\s+/g, ' ')
-		.trim();
+	const normalizedFile = parseSourceFile(fileName, transformed, ScriptKind.TS);
+	return printFileWithoutComments(normalizedFile).replace(/\s+/g, ' ').trim();
 }
 
 function rewriteImportSpecifiers(source, fileName) {
-	const sourceFile = ts.createSourceFile(
-		fileName,
-		source,
-		ts.ScriptTarget.Latest,
-		true,
-		scriptKindFor(fileName),
-	);
+	const sourceFile = parseSourceFile(fileName, source, scriptKindFor(fileName));
 	const replacements = [];
 	for (const statement of sourceFile.statements) {
 		if (!(
-			(ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) &&
+			(is.isImportDeclaration(statement) || is.isExportDeclaration(statement)) &&
 			statement.moduleSpecifier &&
-			ts.isStringLiteral(statement.moduleSpecifier)
+			is.isStringLiteral(statement.moduleSpecifier)
 		)) {
 			continue;
 		}
@@ -294,31 +292,24 @@ function rewriteImportSpecifiers(source, fileName) {
 
 function structuralAdapterSource(source, fileName) {
 	const rewritten = canonicalizeAdapterSource(rewriteImportSpecifiers(source, fileName), fileName);
-	const sourceFile = ts.createSourceFile(
-		fileName,
-		rewritten,
-		ts.ScriptTarget.Latest,
-		true,
-		scriptKindFor(fileName),
-	);
-	const printer = ts.createPrinter({ removeComments: true });
+	const sourceFile = parseSourceFile(fileName, rewritten, scriptKindFor(fileName));
 	const parts = [];
 	for (const statement of sourceFile.statements) {
-		if (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) {
-			parts.push(printer.printNode(ts.EmitHint.Unspecified, statement, sourceFile));
+		if (is.isImportDeclaration(statement) || is.isExportDeclaration(statement)) {
+			parts.push(printNodeWithoutComments(statement));
 			continue;
 		}
-		if (ts.isTypeAliasDeclaration(statement) || ts.isInterfaceDeclaration(statement)) {
-			parts.push(printer.printNode(ts.EmitHint.Unspecified, statement, sourceFile));
+		if (is.isTypeAliasDeclaration(statement) || is.isInterfaceDeclaration(statement)) {
+			parts.push(printNodeWithoutComments(statement));
 			continue;
 		}
 		if (
-			ts.isFunctionDeclaration(statement) &&
+			is.isFunctionDeclaration(statement) &&
 			statement.modifiers?.some(function isExport(modifier) {
-				return modifier.kind === ts.SyntaxKind.ExportKeyword;
+				return modifier.kind === SyntaxKind.ExportKeyword;
 			})
 		) {
-			const signatureOnly = ts.factory.updateFunctionDeclaration(
+			const signatureOnly = factory.updateFunctionDeclaration(
 				statement,
 				statement.modifiers,
 				statement.asteriskToken,
@@ -328,32 +319,27 @@ function structuralAdapterSource(source, fileName) {
 				statement.type,
 				undefined,
 			);
-			parts.push(printer.printNode(ts.EmitHint.Unspecified, signatureOnly, sourceFile));
+			parts.push(printNodeWithoutComments(signatureOnly));
 			if (statement.body) {
-				parts.push(
-					`body:${printer
-						.printNode(ts.EmitHint.Unspecified, statement.body, sourceFile)
-						.replace(/\s+/g, ' ')
-						.trim()}`,
-				);
+				parts.push(`body:${printNodeWithoutComments(statement.body).replace(/\s+/g, ' ').trim()}`);
 			}
 			continue;
 		}
 		if (
-			ts.isVariableStatement(statement) &&
+			is.isVariableStatement(statement) &&
 			statement.modifiers?.some(function isExport(modifier) {
-				return modifier.kind === ts.SyntaxKind.ExportKeyword;
+				return modifier.kind === SyntaxKind.ExportKeyword;
 			})
 		) {
-			parts.push(printer.printNode(ts.EmitHint.Unspecified, statement, sourceFile));
+			parts.push(printNodeWithoutComments(statement));
 			continue;
 		}
 		if (
-			ts.isFunctionDeclaration(statement) ||
-			ts.isVariableStatement(statement) ||
-			ts.isExpressionStatement(statement)
+			is.isFunctionDeclaration(statement) ||
+			is.isVariableStatement(statement) ||
+			is.isExpressionStatement(statement)
 		) {
-			parts.push(printer.printNode(ts.EmitHint.Unspecified, statement, sourceFile));
+			parts.push(printNodeWithoutComments(statement));
 		}
 	}
 	return parts
@@ -365,40 +351,38 @@ function structuralAdapterSource(source, fileName) {
 }
 
 function exportSurface(source, fileName) {
-	const sourceFile = ts.createSourceFile(
+	const sourceFile = parseSourceFile(
 		fileName,
 		normalizeFrameworkNames(source),
-		ts.ScriptTarget.Latest,
-		true,
 		scriptKindFor(fileName),
 	);
 	const exports = new Set();
 	for (const statement of sourceFile.statements) {
 		if (
-			(ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)) &&
-			ts.isExportDeclaration(statement)
+			(is.isExportDeclaration(statement) || is.isExportAssignment(statement)) &&
+			is.isExportDeclaration(statement)
 		) {
-			if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+			if (statement.exportClause && is.isNamedExports(statement.exportClause)) {
 				for (const element of statement.exportClause.elements) {
 					exports.add(element.name.text);
 				}
 			}
 		}
 		if (
-			(ts.isFunctionDeclaration(statement) ||
-				ts.isClassDeclaration(statement) ||
-				ts.isTypeAliasDeclaration(statement) ||
-				ts.isInterfaceDeclaration(statement) ||
-				ts.isVariableStatement(statement)) &&
+			(is.isFunctionDeclaration(statement) ||
+				is.isClassDeclaration(statement) ||
+				is.isTypeAliasDeclaration(statement) ||
+				is.isInterfaceDeclaration(statement) ||
+				is.isVariableStatement(statement)) &&
 			statement.modifiers?.some(function isExport(modifier) {
-				return modifier.kind === ts.SyntaxKind.ExportKeyword;
+				return modifier.kind === SyntaxKind.ExportKeyword;
 			})
 		) {
-			if (ts.isVariableStatement(statement)) {
+			if (is.isVariableStatement(statement)) {
 				for (const declaration of statement.declarationList.declarations) {
-					if (ts.isIdentifier(declaration.name)) exports.add(declaration.name.text);
+					if (is.isIdentifier(declaration.name)) exports.add(declaration.name.text);
 				}
-			} else if ('name' in statement && statement.name && ts.isIdentifier(statement.name)) {
+			} else if ('name' in statement && statement.name && is.isIdentifier(statement.name)) {
 				exports.add(statement.name.text);
 			}
 		}
@@ -415,11 +399,9 @@ function listCompilerProgramFiles(root, projectPath, sourceRoot) {
 	if (!existsSync(configPath)) {
 		throw new Error(`missing compiler project for program membership: ${projectPath}`);
 	}
-	const readResult = ts.readConfigFile(configPath, ts.sys.readFile);
+	const readResult = readProjectConfig(configPath);
 	if (readResult.error) {
-		throw new Error(
-			`failed to read ${projectPath}: ${ts.flattenDiagnosticMessageText(readResult.error.messageText, '\n')}`,
-		);
+		throw new Error(`failed to read ${projectPath}: ${flattenDiagnosticText(readResult.error)}`);
 	}
 	const config = { ...readResult.config };
 	if (Array.isArray(config.include) && !config.files) {
@@ -431,15 +413,9 @@ function listCompilerProgramFiles(root, projectPath, sourceRoot) {
 			delete config.include;
 		}
 	}
-	const parsed = ts.parseJsonConfigFileContent(
-		config,
-		ts.sys,
-		dirname(configPath),
-		undefined,
-		configPath,
-		undefined,
-		[TSRX_EXTENSION],
-	);
+	// Explicit `files` keep `.tsrx` entries, as the classic parser did with `.tsrx`
+	// registered as an extra extension.
+	const parsed = parseProjectConfigContent(config, { configFileName: configPath });
 	const sourceAbs = resolve(root, sourceRoot);
 	return parsed.fileNames
 		.filter(function underSourceRoot(filePath) {

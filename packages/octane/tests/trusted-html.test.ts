@@ -6,7 +6,7 @@ import { renderToString } from 'octane/server';
 import { loadCompiledFixtureSource } from './_server-fixture';
 
 const source = readFileSync(
-	join(process.cwd(), 'packages/octane/tests/_fixtures/trusted-html.tsx'),
+	join(process.cwd(), 'packages/octane/tests/_fixtures/trusted-html.tsrx'),
 	'utf8',
 );
 const suppressedSource = readFileSync(
@@ -23,12 +23,12 @@ describe('explicitly trusted HTML', () => {
 	it.each([false, true])('renders, hydrates, updates, and clears HTML (dev: %s)', (dev) => {
 		const compileOptions = { dev, hmr: false };
 		const client = loadCompiledFixtureSource(source, {
-			id: 'trusted-html.tsx',
+			id: 'trusted-html.tsrx',
 			mode: 'client',
 			compileOptions,
 		});
 		const server = loadCompiledFixtureSource(source, {
-			id: 'trusted-html.tsx',
+			id: 'trusted-html.tsrx',
 			mode: 'server',
 			compileOptions,
 		});
@@ -42,8 +42,15 @@ describe('explicitly trusted HTML', () => {
 		try {
 			expect(container.querySelector('section')).toBe(section);
 			expect(container.querySelector('b')).toBe(content);
+			// As in React 19, hydration keeps the server's HTML and records nothing, so
+			// the next render that passes an `__html` object rewrites it, even with the
+			// same string.
 			flushSync(() => root.render(client.TrustedMarkup, { ...props }));
-			expect(container.querySelector('b')).toBe(content);
+			const rewritten = container.querySelector('b');
+			expect(rewritten).not.toBe(content);
+			expect(section?.innerHTML).toBe(props.html);
+			flushSync(() => root.render(client.TrustedMarkup, { ...props }));
+			expect(container.querySelector('b')).toBe(rewritten);
 			flushSync(() => root.render(client.TrustedMarkup, { html: '<i>updated</i>' }));
 			expect(container.querySelector('section')).toBe(section);
 			expect(section?.innerHTML).toBe('<i>updated</i>');
@@ -71,26 +78,41 @@ describe('explicitly trusted HTML', () => {
 		}
 	});
 
-	it.each([false, true])('preserves parser-normalized HTML after hydration (dev: %s)', (dev) => {
-		const options = { id: 'trusted-html.tsx', compileOptions: { dev, hmr: false } };
-		const client = loadCompiledFixtureSource(source, { ...options, mode: 'client' });
-		const server = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
-		const props = { html: '<b data-note="&amp;"/>' };
-		const container = document.createElement('div');
-		container.innerHTML = renderToString(server.TrustedMarkup, props).html;
-		const content = container.querySelector('b');
-		const root = hydrateRoot(container, client.TrustedMarkup, props);
-		try {
-			flushSync(() => root.render(client.TrustedMarkup, { ...props }));
-			expect(container.querySelector('b')).toBe(content);
-			expect(content?.getAttribute('data-note')).toBe('&');
-		} finally {
-			root.unmount();
-		}
-	});
+	it.each([false, true])(
+		'adopts parser-normalized HTML without a warning and rewrites it on the next render (dev: %s)',
+		(dev) => {
+			const options = { id: 'trusted-html.tsrx', compileOptions: { dev, hmr: false } };
+			const client = loadCompiledFixtureSource(source, { ...options, mode: 'client' });
+			const server = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
+			const props = { html: '<b data-note="&amp;"/>' };
+			const container = document.createElement('div');
+			container.innerHTML = renderToString(server.TrustedMarkup, props).html;
+			const content = container.querySelector('b');
+			const warning = vi.spyOn(console, 'error').mockImplementation(() => {});
+			try {
+				const root = hydrateRoot(container, client.TrustedMarkup, props);
+				try {
+					// The server's spelling parses to the client's HTML, so development's
+					// comparison finds no difference to warn about, as React's does.
+					expect(container.querySelector('b')).toBe(content);
+					expect(warning).not.toHaveBeenCalled();
+					// React 19 rewrites adopted HTML on the next render that passes an
+					// `__html` object, even with the same string.
+					flushSync(() => root.render(client.TrustedMarkup, { ...props }));
+					const rewritten = container.querySelector('b');
+					expect(rewritten).not.toBe(content);
+					expect(rewritten?.getAttribute('data-note')).toBe('&');
+				} finally {
+					root.unmount();
+				}
+			} finally {
+				warning.mockRestore();
+			}
+		},
+	);
 
 	it.each([false, true])('updates retained hydration mismatches on render (dev: %s)', (dev) => {
-		const options = { id: 'trusted-html.tsx', compileOptions: { dev, hmr: false } };
+		const options = { id: 'trusted-html.tsrx', compileOptions: { dev, hmr: false } };
 		const client = loadCompiledFixtureSource(source, { ...options, mode: 'client' });
 		const server = loadCompiledFixtureSource(source, { ...options, mode: 'server' });
 		const suppressedOptions = { ...options, id: 'reconnecting-wave4c.tsrx' };
@@ -157,7 +179,7 @@ describe('explicitly trusted HTML', () => {
 
 	it.each([false, true])('preserves HTML when a suspended render is abandoned (dev: %s)', (dev) => {
 		const client = loadCompiledFixtureSource(source, {
-			id: 'trusted-html.tsx',
+			id: 'trusted-html.tsrx',
 			mode: 'client',
 			compileOptions: { dev, hmr: false },
 		});

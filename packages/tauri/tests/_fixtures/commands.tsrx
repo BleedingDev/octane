@@ -1,4 +1,9 @@
-import { useInvoke, useInvokeState, useTauriEvent } from '@octanejs/tauri';
+import {
+	useInvoke,
+	useInvokeState,
+	useTauriEvent,
+	type UseTauriEventOptions,
+} from '@octanejs/tauri';
 
 function Greeting(props: { name: string }) @{
 	const greeting = useInvoke<string>('greet', { name: props.name });
@@ -72,7 +77,9 @@ export function CommandState(props: { name: string }) @{
 		<span id="status">{result.status as string}</span>
 		<span id="data">{(result.data ?? '') as string}</span>
 		<span id="error">{((result.error as Error | undefined)?.name ?? '') as string}</span>
-		<button id="refetch" onClick={() => result.refetch()}>refetch</button>
+		<button id="refetch" onClick={() => result.refetch()}>
+			refetch
+		</button>
 	</div>
 }
 
@@ -98,10 +105,12 @@ export function EventReader(props: {
 	event: string;
 	nonce?: number;
 	enabled?: boolean;
+	target?: UseTauriEventOptions['target'];
 	onTick: (value: string) => void;
 }) @{
 	useTauriEvent<string>(props.event, (received) => props.onTick(received.payload), {
 		enabled: props.enabled ?? true,
+		target: props.target,
 	});
 	<span id="reader">{String(props.nonce ?? 0)}</span>
 }
@@ -110,6 +119,7 @@ export function EventBoundary(props: {
 	event: string;
 	nonce?: number;
 	enabled?: boolean;
+	target?: UseTauriEventOptions['target'];
 	onTick: (value: string) => void;
 }) @{
 	@try {
@@ -117,6 +127,7 @@ export function EventBoundary(props: {
 			event={props.event}
 			nonce={props.nonce}
 			enabled={props.enabled}
+			target={props.target}
 			onTick={props.onTick}
 		/>
 	} @catch (error) {

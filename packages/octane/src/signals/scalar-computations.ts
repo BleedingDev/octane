@@ -20,7 +20,7 @@ import {
 	type ScopedNode,
 } from './graph.js';
 import { RedeclarableBinding } from './redeclaration.js';
-import type { DerivedCompute, DerivedSignal, Scope } from './types.js';
+import type { DerivedCompute, DerivedSignal, OwnerScope } from './types.js';
 
 /**
  * The compiler selects this only for a zero-context callback whose result is
@@ -36,11 +36,13 @@ class ScalarBinding<T>
 	private frozen = false;
 	private compute: DerivedCompute<T> | undefined;
 	/** A later render's computation, evaluated privately until that render is accepted. */
-	declare private view?: { readonly node: ScopedNode<T>; readonly binding: ScalarBinding<T> };
+	declare private view?:
+		{ readonly node: ScopedNode<T>; readonly binding: ScalarBinding<T> } | undefined;
 	/** A render's computation that produced the committed value, and what it read. */
-	declare private probed?: { readonly compute: DerivedCompute<T>; readonly reads: ScopedNode[] };
+	declare private probed?:
+		{ readonly compute: DerivedCompute<T>; readonly reads: ScopedNode[] } | undefined;
 	/** A view's first value, already computed by the render's probe. */
-	declare private seeded?: { readonly value: T };
+	declare private seeded?: { readonly value: T } | undefined;
 
 	constructor(
 		readonly owner: ScopeImpl,
@@ -166,10 +168,21 @@ class ScalarBinding<T>
 }
 
 export function createDeclaredScalarCell<T>(
-	owner: Scope,
+	owner: OwnerScope,
 	key: string,
 	compute: DerivedCompute<T>,
 	sequence?: number,
+	captures?: readonly unknown[],
+	declaring?: number,
 ): DerivedSignal<T> {
-	return createDerivedCellWith(owner, key, compute, undefined, ScalarBinding, sequence);
+	return createDerivedCellWith(
+		owner,
+		key,
+		compute,
+		undefined,
+		ScalarBinding,
+		sequence,
+		captures,
+		declaring,
+	);
 }

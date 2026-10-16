@@ -48,7 +48,27 @@ function createDescriptorFixture(runtime: DescriptorRuntime) {
 		return runtime.createElement(runtime.Hydrate, boundaryProps(props));
 	}
 
-	return { App, boundaryProps };
+	// The editor is the first item of a host's descriptor list, so the list's
+	// first fill is what suspends.
+	function ListApp(props: AppProps) {
+		return runtime.createElement(runtime.Hydrate, {
+			when: props.when,
+			split: false,
+			onHydrated: props.onHydrated,
+			children: runtime.createElement(
+				'section',
+				null,
+				runtime.createElement(Editor, {
+					pending: props.pending,
+					onInput: props.onInput,
+					onRef: props.onRef,
+				}),
+				runtime.createElement('em', null, 'tail'),
+			),
+		});
+	}
+
+	return { App, ListApp, boundaryProps };
 }
 
 const client = createDescriptorFixture(Client);
@@ -186,7 +206,10 @@ describe('deferred hydration of descriptor components', () => {
 			expect(onInput).not.toHaveBeenCalled();
 		});
 
-		it(`${ownership}: removes unmatched server content without discarding the resumed input`, async () => {
+		// The island is a fallback boundary: as React does for a Suspense
+		// boundary, it discards server DOM that does not match, the resumed input
+		// included, and renders on the client once.
+		it(`${ownership}: client-renders the island over unmatched server content once its activation resumes`, async () => {
 			const pending = deferred<void>();
 			const when = load();
 			const onHydrated = vi.fn();
@@ -199,17 +222,21 @@ describe('deferred hydration of descriptor components', () => {
 			hydrate(ownership, { when, pending: pending.promise, onHydrated }, { onRecoverableError });
 			await Client.act(() => {});
 			expect(stale.isConnected).toBe(true);
+			expect(container.querySelector('#descriptor-editor')).toBe(input);
 
 			await Client.act(() => pending.resolve());
 
-			expect(container.querySelector('#descriptor-editor')).toBe(input);
+			const rendered = container.querySelector('#descriptor-editor') as HTMLInputElement;
+			expect(rendered).not.toBe(input);
+			expect(input.isConnected).toBe(false);
+			expect(rendered.value).toBe('Server draft');
 			expect(stale.isConnected).toBe(false);
 			expect(onHydrated).toHaveBeenCalledOnce();
 			expect(onRecoverableError).toHaveBeenCalledOnce();
 		});
 
 		for (const suspended of [false, true]) {
-			it(`${ownership}: cleans up the current server-range tail on ${suspended ? 'resumed' : 'immediate'} adoption`, async () => {
+			it(`${ownership}: client-renders the island over a server-range tail on ${suspended ? 'resumed' : 'immediate'} activation`, async () => {
 				const pending = deferred<void>();
 				const when = load();
 				const onInput = vi.fn();
@@ -238,15 +265,18 @@ describe('deferred hydration of descriptor components', () => {
 					await Client.act(() => pending.resolve());
 				}
 
-				expect(container.querySelector('#descriptor-editor')).toBe(input);
-				expect(input.value).toBe('Draft before activation');
+				// The draft typed into the discarded server input is gone, as in React.
+				const rendered = container.querySelector('#descriptor-editor') as HTMLInputElement;
+				expect(rendered).not.toBe(input);
+				expect(input.isConnected).toBe(false);
+				expect(rendered.value).toBe('Server draft');
 				expect(stale.isConnected).toBe(false);
 				expect(onRecoverableError).toHaveBeenCalledOnce();
 				expect(onUncaughtError).not.toHaveBeenCalled();
 				expect(onHydrated).toHaveBeenCalledOnce();
-				input.value = 'Live draft after cleanup';
-				await Client.act(() => input.dispatchEvent(new Event('input', { bubbles: true })));
-				expect(onInput).toHaveBeenCalledExactlyOnceWith('Live draft after cleanup');
+				rendered.value = 'Live draft after fallback';
+				await Client.act(() => rendered.dispatchEvent(new Event('input', { bubbles: true })));
+				expect(onInput).toHaveBeenCalledExactlyOnceWith('Live draft after fallback');
 			});
 		}
 
@@ -291,4 +321,38 @@ describe('deferred hydration of descriptor components', () => {
 			expect(onHydrated).not.toHaveBeenCalled();
 		});
 	}
+
+	it('resumes a suspended list item in the server nodes of its list', async () => {
+		const pending = deferred<void>();
+		const when = load();
+		const onInput = vi.fn();
+		const onRef = vi.fn();
+		const onHydrated = vi.fn();
+		const onRecoverableError = vi.fn();
+		container.innerHTML = Server.renderToString(server.ListApp, { when }).html;
+		const section = container.querySelector('section')!;
+		const nodes = Array.from(section.children);
+		const input = container.querySelector('#descriptor-editor') as HTMLInputElement;
+		root = Client.hydrateRoot(
+			container,
+			client.ListApp,
+			{ when, pending: pending.promise, onInput, onRef, onHydrated },
+			{ onRecoverableError },
+		);
+		await Client.act(() => {});
+		expect(onHydrated).not.toHaveBeenCalled();
+
+		await Client.act(() => pending.resolve());
+
+		expect(container.querySelector('section')).toBe(section);
+		expect(section.children).toHaveLength(nodes.length);
+		nodes.forEach((node, i) => expect(section.children[i]).toBe(node));
+		expect(section.textContent).toBe('tail');
+		expect(onHydrated).toHaveBeenCalledOnce();
+		expect(onRef).toHaveBeenCalledExactlyOnceWith(input);
+		expect(onRecoverableError).not.toHaveBeenCalled();
+		input.value = 'Live draft';
+		await Client.act(() => input.dispatchEvent(new Event('input', { bubbles: true })));
+		expect(onInput).toHaveBeenCalledExactlyOnceWith('Live draft');
+	});
 });

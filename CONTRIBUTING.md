@@ -60,7 +60,7 @@ example apps double as Playwright regression fixtures:
 
 ```bash
 pnpm --filter octane-playground dev
-pnpm examples:check   # manifests, tooling contracts, types, production builds
+pnpm examples:check   # manifests, tooling contracts, production builds
 pnpm examples:e2e     # browser journeys
 ```
 
@@ -285,6 +285,20 @@ is the bootstrap that creates the required checks. It may happen only after the
 non-CI gates above and relevant local validation pass. Keep the PR ready while
 CI runs, but do not call it fully ready or merge-ready until every required
 check is terminal and successful.
+
+### Bundle size
+
+There are no committed byte budgets. The `PR bench` workflow measures every
+production bundle on the base and the merge commit and lists each byte change
+in the pull request's benchmark comment; nothing about bytes fails a check.
+Read the rows your change moved, and say in the description why any growth is
+worth it.
+
+The dedicated `Bundle size` workflow still gates what each bundle may contain:
+every public-import scenario must execute, retain only what it imports, and
+keep its compiler-specialized app root, and client-only bundles must retain no
+hydration code. CI calls it as `bundle size / bundle size checks` and includes
+it in the coverage required before publishing.
 
 ## AI-assisted contributions
 

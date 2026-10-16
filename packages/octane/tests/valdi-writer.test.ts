@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import type { CompileOptions, ValdiWriterEffectiveType } from 'octane/compiler';
+import type { CompileOptions, CompileRenderer, ValdiWriterEffectiveType } from 'octane/compiler';
 import { loadCompiledFixtureSource } from './_server-fixture.js';
 import { createWriterRecorder } from './_valdi-writer.js';
 
@@ -22,17 +22,252 @@ const writerSource = readFileSync(
 // These synthetic source fixtures use an explicitly supplied writer adapter,
 // rather than the DOM compiler selected by the normal Vitest fixture plugin.
 function writerFixture(source: string, dev: boolean, options?: CompileOptions) {
-	const recorder = createWriterRecorder();
+	const selectedRenderer: CompileRenderer = options?.renderer ?? renderer;
+	const recorder = createWriterRecorder(
+		Array.isArray(selectedRenderer.capabilities) &&
+			selectedRenderer.capabilities.includes('host-text-site')
+			? 3
+			: selectedRenderer.text === 'host' ||
+				  (Array.isArray(selectedRenderer.capabilities) &&
+						selectedRenderer.capabilities.includes('host-ref'))
+				? 2
+				: 1,
+	);
 	const module = loadCompiledFixtureSource(source, {
 		id: '/src/WriterFixture.tsrx',
 		mode: 'client',
-		compileOptions: { ...options, renderer, hmr: false, dev },
-		runtimeModules: { [renderer.module]: recorder.adapter },
+		compileOptions: { ...options, renderer: selectedRenderer, hmr: false, dev },
+		runtimeModules: { [selectedRenderer.module]: recorder.adapter },
 	});
 	return { ...recorder, module };
 }
 
 describe.each([false, true])('compiled Valdi writer behavior in dev=%s', (dev) => {
+	it('keeps writer text sites and nested row paths stable through omission and reorder', () => {
+		const { render, module } = writerFixture(
+			`export function Scene(props) @{
+				<frame>
+					start
+					@for (const group of props.groups; key group.id) {
+						@for (const item of group.items; key item.id) {
+							<>{item.left as string}@if (item.show) { <>{item.right as string}</> }</>
+						}
+					}
+					end
+				</frame>
+			}`,
+			dev,
+			{ renderer: { ...renderer, text: 'host', capabilities: ['host-text-site'] } },
+		);
+		const one = { id: 'one', items: [{ id: 'same', left: 'A', right: 'a', show: true }] };
+		const two = { id: 'two', items: [{ id: 'same', left: 'B', right: 'b', show: true }] };
+		const nodes = (groups: (typeof one)[]) => render(module.Scene, { groups })[0].children;
+		const original = nodes([one, two]);
+		const keys = new Map(original.map((node) => [String(node.props.value).trim(), node.key]));
+		expect(new Set(keys.values()).size).toBe(6);
+		const changed = nodes([{ ...two, items: [{ ...two.items[0], show: false }] }, one]);
+		expect(changed.map((node) => String(node.props.value).trim())).toEqual([
+			'start',
+			'B',
+			'A',
+			'a',
+			'end',
+		]);
+		expect(changed.map((node) => node.key)).toEqual(
+			['start', 'B', 'A', 'a', 'end'].map((v) => keys.get(v)),
+		);
+	});
+
+	it('delivers falsy scalars and array values unchanged at host text sites', () => {
+		const { render, module } = writerFixture(
+			`export function Scene(props) @{ <frame>{props.zero && props.unreachable()}{props.items}</frame> }`,
+			dev,
+			{ renderer: { ...renderer, text: 'host', capabilities: ['host-text-site'] } },
+		);
+		const unreachable = vi.fn(() => 'wrong');
+		const items = ['alpha', 4];
+		const children = render(module.Scene, { zero: 0, unreachable, items })[0].children;
+		expect(children.map((node) => node.props.value)).toEqual([0, items]);
+		expect(children[1].props.value).toBe(items);
+		expect(unreachable).not.toHaveBeenCalled();
+	});
+
+	it('writes JSX interspersed with text in literal arrays in authored order', () => {
+		const { render, module } = writerFixture(
+			`export function Scene(props) @{ <frame>{['first', <badge value={props.value}/>, ...props.tail, 'last']}</frame> }`,
+			dev,
+			{ renderer: { ...renderer, text: 'host', capabilities: ['host-text-site'] } },
+		);
+		const tail = ['second', 'third'];
+		expect(render(module.Scene, { value: 'badge', tail })[0].children).toMatchObject([
+			{ tag: '#text', props: { value: 'first' } },
+			{ tag: 'badge', props: { value: 'badge' } },
+			{ tag: '#text', props: { value: tail } },
+			{ tag: '#text', props: { value: 'last' } },
+		]);
+	});
+
+	it('materializes iterable spreads in mixed JSX arrays and rejects non-iterables', () => {
+		const { render, module } = writerFixture(
+			`export function Scene(props) @{ <frame>{['first', <badge/>, ...props.tail]}</frame> }`,
+			dev,
+			{ renderer: { ...renderer, text: 'host', capabilities: ['host-text-site'] } },
+		);
+		expect(render(module.Scene, { tail: new Set(['east', 'west']) })[0].children).toMatchObject([
+			{ tag: '#text', props: { value: 'first' } },
+			{ tag: 'badge' },
+			{ tag: '#text', props: { value: ['east', 'west'] } },
+		]);
+		expect(() => render(module.Scene, { tail: 12 })).toThrow(/not iterable/);
+	});
+
+	it('evaluates a logical JSX left operand once and renders its zero fallback', () => {
+		const { render, module } = writerFixture(
+			`export function Scene(props) @{ <frame>{props.read() && <badge value="present"/>}</frame> }`,
+			dev,
+			{ renderer: { ...renderer, text: 'host', capabilities: ['host-text-site'] } },
+		);
+		const read = vi.fn(() => 0);
+		expect(render(module.Scene, { read })[0].children).toMatchObject([
+			{ tag: '#text', props: { value: 0 } },
+		]);
+		expect(read).toHaveBeenCalledOnce();
+	});
+
+	it('retains one authored identity when a scalar conditional changes branches', () => {
+		const { render, module } = writerFixture(
+			`export function Scene(props) @{ <frame>{props.active ? 'north' : 'south'}</frame> }`,
+			dev,
+			{ renderer: { ...renderer, text: 'host', capabilities: ['host-text-site'] } },
+		);
+		const a = render(module.Scene, { active: true })[0].children[0];
+		const b = render(module.Scene, { active: false })[0].children[0];
+		expect(a.props.value).toBe('north');
+		expect(b.props.value).toBe('south');
+		expect(a.key).toBeDefined();
+		expect(a.key).toBe(b.key);
+	});
+
+	it('supports primitive and array component output at the writer root', () => {
+		const { render, module } = writerFixture(
+			`export function Scene(props) { return props.values; }`,
+			dev,
+			{ renderer: { ...renderer, text: 'host', capabilities: ['host-text-site'] } },
+		);
+		const values = ['north', 'east'];
+		const written = render(module.Scene, { values });
+		expect(written).toMatchObject([{ tag: '#text', props: { value: values } }]);
+		expect(written[0].props.value).toBe(values);
+	});
+
+	it('enforces allowed authored hosts independently of refs, components and text placement', () => {
+		const config = { ...renderer, validation: { allowedTags: ['frame', 'badge'] } };
+		expect(() =>
+			writerFixture(`export function Scene() @{ <unknown-host/> }`, dev, { renderer: config }),
+		).toThrow(/does not allow <unknown-host>/);
+		const { render, module } = writerFixture(
+			`function Leaf() @{ <badge value="ok"/> } export function Scene() @{ <frame><Leaf/></frame> }`,
+			dev,
+			{ renderer: config },
+		);
+		expect(render(module.Scene, {})[0].children).toMatchObject([
+			{ tag: 'badge', props: { value: 'ok' } },
+		]);
+	});
+
+	it('rejects an ABI 2 adapter before creating prototypes for opted-in text sites', () => {
+		const recorder = createWriterRecorder(2);
+		expect(() =>
+			loadCompiledFixtureSource(`export function Scene() @{ <frame>hello</frame> }`, {
+				id: '/src/WriterFixture.tsrx',
+				mode: 'client',
+				compileOptions: {
+					renderer: { ...renderer, text: 'host', capabilities: ['host-text-site'] },
+					hmr: false,
+					dev,
+				},
+				runtimeModules: { [renderer.module]: recorder.adapter },
+			}),
+		).toThrow(/Unsupported writer ABI 3/);
+	});
+
+	it('requires host text when an adapter selects authored text sites', () => {
+		expect(() =>
+			writerFixture(`export function Scene() @{ <frame/> }`, dev, {
+				renderer: { ...renderer, text: 'reject', capabilities: ['host-text-site'] },
+			}),
+		).toThrow(/host-text-site capability requires text: "host"/);
+	});
+
+	it('writes opted-in host text in order, preserving spaces, semicolons and encoded whitespace', () => {
+		const { render, module } = writerFixture(
+			`export function Scene(props) @{ <text-box><em>left</em> <em>right</em>;&nbsp;{props.value as string}</text-box> }`,
+			dev,
+			{ renderer: { ...renderer, text: 'host', validation: { textParents: ['text-box', 'em'] } } },
+		);
+		const read = (value: string) => render(module.Scene, { value })[0].children;
+		expect(read('one')).toMatchObject([
+			{ tag: 'em', children: [{ props: { value: 'left' } }] },
+			{ tag: '#text', props: { value: ' ' } },
+			{ tag: 'em', children: [{ props: { value: 'right' } }] },
+			{ tag: '#text', props: { value: ';\u00a0' } },
+			{ tag: '#text', props: { value: 'one' } },
+		]);
+		expect(read('two').at(-1)).toMatchObject({ tag: '#text', props: { value: 'two' } });
+	});
+
+	it('sends refs to the opted-in host, including last-write-wins spreads without replaying getters', () => {
+		const ref = { current: null };
+		const discarded = { current: null };
+		const getter = vi.fn(() => discarded);
+		const { render, module } = writerFixture(
+			`export function Scene(props) @{ <frame {...props.first} key={props.key} ref={props.ref} size={12} /> }`,
+			dev,
+			{ renderer: { ...renderer, capabilities: ['host-ref'] } },
+		);
+		const written = render(module.Scene, {
+			first: {
+				get ref() {
+					return getter();
+				},
+			},
+			key: 'k',
+			ref,
+		});
+		expect(written[0]).toMatchObject({ tag: 'frame', props: { ref, size: 12 } });
+		expect(getter).toHaveBeenCalledOnce();
+		expect(written[0].props).not.toHaveProperty('key');
+	});
+
+	it('still rejects refs passed to components even when the host accepts refs', () => {
+		expect(() =>
+			writerFixture(
+				`function Leaf() @{ <frame/> } export function Scene(props) @{ <Leaf ref={props.ref} /> }`,
+				dev,
+				{ renderer: { ...renderer, capabilities: ['host-ref'] } },
+			),
+		).toThrow(/authored ref props/);
+	});
+
+	it('guards opted-in writer calls before prototype creation on an older adapter', () => {
+		const recorder = createWriterRecorder();
+		expect(() =>
+			loadCompiledFixtureSource(`export function Scene() @{ <text-box>hello</text-box> }`, {
+				id: '/src/WriterFixture.tsrx',
+				mode: 'client',
+				compileOptions: { renderer: { ...renderer, text: 'host' }, hmr: false, dev },
+				runtimeModules: { [renderer.module]: recorder.adapter },
+			}),
+		).toThrow(/Unsupported writer ABI 2/);
+	});
+
+	it('keeps configured host text placement restrictions in opted-in mode', () => {
+		expect(() =>
+			writerFixture(`export function Scene() @{ <frame>unsupported here</frame> }`, dev, {
+				renderer: { ...renderer, text: 'host', validation: { textParents: ['text-box'] } },
+			}),
+		).toThrow(/does not allow authored JSX text under <frame>/);
+	});
 	it.each([
 		[
 			'Comments.tsrx',
@@ -360,6 +595,28 @@ describe.each([false, true])('compiled Valdi writer behavior in dev=%s', (dev) =
 		fixture.effects[0].create();
 		expect(events).toEqual(['effect:6', 'cleanup:6', 'effect:10']);
 	});
+
+	it.each([false, true])(
+		'forwards method dependencies despite a shadowing local (strong=%s)',
+		(strong) => {
+			const fixture = writerFixture(
+				`import { useLayoutEffect } from 'octane';
+			 export function Scene(props) @{
+				const _$__methodDep = () => 42;
+				useLayoutEffect(() => props.notify());
+				<view value={_$__methodDep()} />
+			 }`,
+				dev,
+				{ strong },
+			);
+			const first = () => {};
+			const next = () => {};
+			expect(fixture.render(fixture.module.Scene, { notify: first })[0].props.value).toBe(42);
+			expect(fixture.effects[0].deps).toEqual([first]);
+			fixture.render(fixture.module.Scene, { notify: next });
+			expect(fixture.effects[0].deps).toEqual([next]);
+		},
+	);
 
 	it('resolves recursive calls through the registered component export', () => {
 		const fixture = writerFixture(

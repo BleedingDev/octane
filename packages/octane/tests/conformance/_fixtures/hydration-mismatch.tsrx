@@ -17,8 +17,12 @@ export function TextMismatch(props) @{
 // Per ReactDOMHydrationDiff-test.js:155 — entities are decoded before the
 // browser compares server markup to the client text value.
 export function EscapedEntityTextMismatch(props) @{
-	<div id="escaped-entity-mismatch">{'This markup contains an nbsp entity:   ' +
-		(props.isClient ? 'client text' : 'server text') as string}</div>
+	<div id="escaped-entity-mismatch">
+		{
+			('This markup contains an nbsp entity:   ' +
+				(props.isClient ? 'client text' : 'server text')) as string
+		}
+	</div>
 }
 
 // Two different attributes differ (Per ReactDOMHydrationDiff-test.js:245).
@@ -80,7 +84,9 @@ export function NullishAttr(props) @{
 
 // Opt out: keep the server value, no warning (Per Reconnecting:132 "can explicitly ignore").
 export function Suppressed(props) @{
-	<div id="sup" suppressHydrationWarning>{(props.isClient ? 'client' : 'server') as string}</div>
+	<div id="sup" suppressHydrationWarning>
+		{(props.isClient ? 'client' : 'server') as string}
+	</div>
 }
 
 // ── STRUCTURAL mismatches ───────────────────────────────────────────────────
@@ -138,7 +144,7 @@ export function ClientExtraEnd(props) @{
 
 // Server renders an extra element the client omits (Per :834). Natural octane idiom: a
 // single-branch `@if` whose condition is false on the client (so the client branch is a null
-// body — the server's content must be discarded).
+// body where the server rendered content).
 export function ServerExtraElement(props) @{
 	<div id="see">
 		@if (!props.isClient) {
@@ -210,21 +216,27 @@ export function SuppressedAttr(props) @{
 // (Per Reconnecting:64-100 "reconnect Pure/Class/Bare to …"). octane has only function
 // components + bare elements, so this collapses to func-component ≡ bare element.
 function Leaf(props) @{
-	<span id="leaf" class="leaf">{'ok' as string}</span>
+	<span id="leaf" class="leaf">
+		{'ok' as string}
+	</span>
 }
 export function CompForm(props) @{
 	<Leaf />
 }
 export function BareForm(props) @{
-	<span id="leaf" class="leaf">{'ok' as string}</span>
+	<span id="leaf" class="leaf">
+		{'ok' as string}
+	</span>
 }
 
-// A text mismatch FOLLOWED by a stable, INTERACTIVE sibling — proves hydration continues
-// past a mismatch (no throw) and the following sibling still adopts + its handler fires.
+// A text mismatch FOLLOWED by a stable, INTERACTIVE sibling — the client-rendered root's
+// handlers work.
 export function MismatchThenButton(props) @{
 	const [n, setN] = useState(0);
 	<div id="mtb">
 		<p class="msg">{(props.isClient ? 'client' : 'server') as string}</p>
-		<button id="mtb-btn" onClick={() => setN(n + 1)}>{'count:' + n as string}</button>
+		<button id="mtb-btn" onClick={() => setN(n + 1)}>
+			{('count:' + n) as string}
+		</button>
 	</div>
 }

@@ -2,9 +2,10 @@
 /** @import { Program } from 'estree' */
 
 import { parseModule as parseNativeModule } from '@tsrx/oxc/tsrx-core-compat';
-import { parseModule as parseJavaScriptModule } from './parser.browser.js';
+import { parseModule as parseJavaScriptModule, parseTypeScriptModule } from './parser.browser.js';
 
 import { isolateOutputOptions, publishOutput } from './parser-output.js';
+import { adoptTemplateShape } from './parser-template-shape.js';
 
 /**
  * `<style>` with an expression child — `<style>{css}</style>`, an ordinary
@@ -20,7 +21,9 @@ const STYLE_EXPRESSION_CHILD = /<style\b[^>]*>\s*\{/;
  * `<style>` expression child. Operational failures keep their own name or
  * code and stay visible, and so does any other bare `Error`: without the
  * `<style …>{` shape in the source there is nothing the CSS reader could have
- * rejected.
+ * rejected, and a diagnostic `@tsrx/core` reports itself (two outputs in one
+ * code block, a redeclared binding) arrives as the bare `Error` the JavaScript
+ * parser throws for the same source.
  * @param {unknown} error
  * @param {string} source
  * @returns {boolean}
@@ -48,6 +51,11 @@ function isNativeSyntaxRejection(error, source) {
  */
 export function parseModule(source, filename = 'module.tsrx', options) {
 	const resolvedFilename = filename || 'module.tsrx';
+	// The native facade returns an untyped AST for `.ts`, which turns `import type`
+	// into a value import and drops parameter properties. TypeScript's grammar
+	// keeps them; the native parser still reports what that grammar rejects.
+	const typeScript = parseTypeScriptModule(source, resolvedFilename, options);
+	if (typeScript !== null) return adoptTemplateShape(typeScript);
 	const nativeOptions = isolateOutputOptions(options);
 	let program;
 	try {
@@ -76,5 +84,5 @@ export function parseModule(source, filename = 'module.tsrx', options) {
 	}
 	// Caller buffer errors are not parser errors and must never trigger a retry.
 	publishOutput(options, nativeOptions);
-	return program;
+	return adoptTemplateShape(program);
 }

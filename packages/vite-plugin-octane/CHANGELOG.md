@@ -1,5 +1,428 @@
 # @octanejs/vite-plugin
 
+## 0.4.1
+
+### Patch Changes
+
+- 4798fab: Make Vite production builds reproducible. The client build identity that the hydration entry carries is now a hash of the rendered client modules rather than a random UUID, so building unchanged sources again, or from another checkout path, emits byte-identical client and server files. A source change still produces a new identity and a new hydration entry file name. Development and HMR identities are unchanged.
+- Updated dependencies [177f44e]
+  - @octanejs/app-core@0.1.7
+
+## 0.4.0
+
+### Minor Changes
+
+- bdc21d8: Add opt-in TypeScript build handoff for web and Valdi. Preserve typed compiler output and maps for automatic custom-hook modules, and let Vite's native TypeScript transform compose maps through client and SSR builds. Document and verify real Valdi Workspace emission with separately composed authored source maps.
+
+### Patch Changes
+
+- Updated dependencies [64c33de]
+- Updated dependencies [7dcbc75]
+- Updated dependencies [4fe0867]
+- Updated dependencies [a0c7f0e]
+- Updated dependencies [6518d90]
+- Updated dependencies [a03d79d]
+- Updated dependencies [dd8805f]
+- Updated dependencies [4cc2a1e]
+- Updated dependencies [4ff7d0d]
+- Updated dependencies [974a3a6]
+- Updated dependencies [05699de]
+- Updated dependencies [773144a]
+- Updated dependencies [c30f912]
+- Updated dependencies [d7c1de0]
+- Updated dependencies [152e4f7]
+- Updated dependencies [0258e74]
+- Updated dependencies [36c6bf3]
+- Updated dependencies [b27d8db]
+- Updated dependencies [5d6d02c]
+- Updated dependencies [6101f66]
+- Updated dependencies [2fe1f9f]
+- Updated dependencies [54ee25f]
+- Updated dependencies [2075c0e]
+- Updated dependencies [8c09d81]
+- Updated dependencies [bdc21d8]
+- Updated dependencies [c9d4793]
+- Updated dependencies [440fb6f]
+  - octane@0.13.0
+  - @octanejs/app-core@0.1.6
+
+## 0.3.3
+
+### Patch Changes
+
+- Updated dependencies [28552d9]
+- Updated dependencies [f934732]
+- Updated dependencies [7d5a0df]
+- Updated dependencies [ae05de0]
+- Updated dependencies [dbab7f5]
+- Updated dependencies [ec86041]
+  - octane@0.12.0
+  - @octanejs/app-core@0.1.5
+
+## 0.3.2
+
+### Patch Changes
+
+- Updated dependencies [7540c35]
+- Updated dependencies [f6b6615]
+- Updated dependencies [293d143]
+- Updated dependencies [9d4c14f]
+- Updated dependencies [b6c040c]
+- Updated dependencies [247dffe]
+- Updated dependencies [3a94771]
+- Updated dependencies [79ca088]
+- Updated dependencies [d1e308b]
+- Updated dependencies [6e6aa98]
+- Updated dependencies [5e922d9]
+- Updated dependencies [8fa3398]
+- Updated dependencies [3557100]
+- Updated dependencies [1fb0ecd]
+- Updated dependencies [37a1c14]
+- Updated dependencies [0d95b26]
+- Updated dependencies [a3dcbd9]
+- Updated dependencies [c0192ec]
+- Updated dependencies [6df3359]
+- Updated dependencies [d30025a]
+- Updated dependencies [0ce371a]
+- Updated dependencies [8444db8]
+- Updated dependencies [78750a0]
+- Updated dependencies [f183be7]
+- Updated dependencies [0f3abca]
+- Updated dependencies [cbc1e8e]
+- Updated dependencies [1048eab]
+- Updated dependencies [188d60b]
+- Updated dependencies [3557100]
+- Updated dependencies [b4a61e7]
+- Updated dependencies [90a57d8]
+- Updated dependencies [47e030e]
+- Updated dependencies [d788d32]
+- Updated dependencies [e2044cb]
+- Updated dependencies [a7ae419]
+- Updated dependencies [21f911d]
+- Updated dependencies [3557100]
+- Updated dependencies [3557100]
+- Updated dependencies [3557100]
+- Updated dependencies [1e74902]
+- Updated dependencies [7e6bda5]
+- Updated dependencies [43b60d9]
+  - octane@0.11.0
+  - @octanejs/app-core@0.1.4
+
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [8e16346]
+- Updated dependencies [ceba949]
+- Updated dependencies [0bb170c]
+- Updated dependencies [50e18cc]
+- Updated dependencies [e595a13]
+- Updated dependencies [5722871]
+- Updated dependencies [8a9969c]
+- Updated dependencies [995aa9a]
+- Updated dependencies [8996380]
+- Updated dependencies [b8e55da]
+- Updated dependencies [7e1793f]
+- Updated dependencies [8855e2f]
+- Updated dependencies [7023961]
+  - octane@0.10.1
+  - @octanejs/app-core@0.1.3
+
+## 0.3.0
+
+### Minor Changes
+
+- e233e4a: Stop shipping the signal binding runtime in apps that never pass signal
+  handles through ordinary props.
+
+  Since async signals landed, the compiler bound every opaque text, attribute,
+  control, and textarea hole, such as `{row.label as string}`, as a potential
+  signal handle in every module. Every app therefore carried the binding runtime
+  and stamped signal identities on every component. Now such a hole binds a
+  handle only in a module with an import from `octane/signals`; a type-only
+  `import type { SignalHandle } from 'octane/signals'` is enough and does not
+  enable native reads. Modules using DOM bindings keep binding handles, and
+  `$`-named expressions such as `{props.label$}` still bind everywhere.
+
+  This removes 1.7 to 3.3 kB gzip of runtime from the benchmark applications
+  (rows 38,991 → 37,307 bytes, TodoMVC 44,217 → 41,076, chat 43,638 → 40,347).
+
+  An untyped component that renders handles from a lazily loaded signals engine
+  can either type its props or set the new `opaqueSignalHandles` compiler option
+  (also accepted by `octane()` and `@octanejs/vite-plugin`) to keep the previous
+  behavior. In development, a handle that reaches a plain text hole logs an
+  error naming these fixes instead of silently rendering `[object Object]`.
+
+  Hydration through the ordinary writers now matches the signal-aware path it
+  replaces for these holes: a sibling or whole-output `{expr}` hole whose first
+  client value is `undefined` discards the server content it cannot adopt, and an
+  attribute whose first client value is `undefined` removes the server attribute.
+
+### Patch Changes
+
+- 1d5832e: Honour `server.trustProxy` in the request URL. Behind a proxy that terminates
+  TLS or rewrites `Host`, the Node bridge built every URL from `http://` and the
+  `Host` header, so `Context.url` named a different origin than the browser's and
+  same-origin checks rejected legitimate requests. With `server.trustProxy: true`,
+  `nodeHandler`, the built-in server, `octane-preview`, and the Vite and Rsbuild
+  dev servers take the scheme from the first `X-Forwarded-Proto` entry (`http` or
+  `https` only) and the host from the first `X-Forwarded-Host` entry (a plain
+  `host[:port]` only). A malformed value is ignored, and the path and query always
+  come from the request. `nodeRequestToWebRequest` and `createNodeServer` accept
+  the same `trustProxy` option. The default is unchanged.
+
+  `server.trustProxy` must now be a boolean, so a string such as `'false'` read
+  from an environment variable can no longer enable it.
+- 95090b1: Keep a request path that starts with `//` on the request's own host. The Node
+  bridge resolved the raw request target against the request origin, so a target
+  such as `//evil.example/x` (or `/\evil.example/x`) became host `evil.example`
+  and path `/x` in `Context.url`, and the Vite and Rsbuild dev servers routed it
+  as `/x`. An origin-form target now keeps its whole path and query on the
+  request origin (the `Host` header, or the trusted proxy's with
+  `server.trustProxy`) in `nodeRequestToWebRequest`, the built-in static file
+  layer, and both dev servers. An `http://` or `https://` absolute-form target
+  still keeps its own origin. An absolute-form target with any other scheme, such
+  as `ftp://`, becomes a path under the root instead of a foreign-scheme URL.
+  `@octanejs/app-core/node` exports `nodeRequestUrl`, the URL the bridge gives a
+  Node request.
+- Updated dependencies [ed57b1e]
+- Updated dependencies [8aeb6c0]
+- Updated dependencies [6182678]
+- Updated dependencies [3fb1bec]
+- Updated dependencies [c15aa5a]
+- Updated dependencies [5cad0fa]
+- Updated dependencies [5041f00]
+- Updated dependencies [f7980e0]
+- Updated dependencies [97f1b8e]
+- Updated dependencies [fb404c2]
+- Updated dependencies [9bacb23]
+- Updated dependencies [2f88235]
+- Updated dependencies [8aeb6c0]
+- Updated dependencies [b353f54]
+- Updated dependencies [72cd60b]
+- Updated dependencies [91079dd]
+- Updated dependencies [393b75a]
+- Updated dependencies [f50c128]
+- Updated dependencies [ba46692]
+- Updated dependencies [f69215f]
+- Updated dependencies [9c84293]
+- Updated dependencies [1d5832e]
+- Updated dependencies [95090b1]
+- Updated dependencies [e233e4a]
+- Updated dependencies [087cd77]
+- Updated dependencies [c3c0a3b]
+- Updated dependencies [262926c]
+- Updated dependencies [9dafaef]
+- Updated dependencies [35c0d1b]
+- Updated dependencies [21e0575]
+- Updated dependencies [8b97478]
+- Updated dependencies [ab9a043]
+- Updated dependencies [32e4f3f]
+- Updated dependencies [1de873c]
+- Updated dependencies [7a92ad2]
+- Updated dependencies [a2a0c41]
+- Updated dependencies [e03350a]
+- Updated dependencies [0d6ef67]
+- Updated dependencies [c213e87]
+- Updated dependencies [da6524e]
+- Updated dependencies [ace4737]
+- Updated dependencies [b77ab18]
+- Updated dependencies [1744e83]
+- Updated dependencies [023aa7d]
+- Updated dependencies [82a5f31]
+  - octane@0.10.0
+  - @octanejs/app-core@0.1.2
+
+## 0.2.1
+
+### Patch Changes
+
+- 1066cf6: Keep the signal Action frame and transition coordinator, about 4 KB gzip, out of islands-only pages. Only the renderer uses them, to hold back signal writes made inside a `startTransition` Action until it settles, so a page that loads signals without the renderer never runs them. Until now every bundle that loaded the signal graph also carried them.
+
+  Octane's package imports now choose where they live. By default they stay with the signal graph. A bundler that resolves with the `octane-islands` condition bundles them with the renderer instead. Both placements stage Action writes the same way, including for signals imported after an Action awaited. The condition only decides which pages download the code.
+
+  `@octanejs/vite-plugin` adds the condition to the production client build when every `RenderRoute` uses `hydrate: 'islands'`. Apps that also have fully hydrated routes keep the default.
+- Updated dependencies [1aa7696]
+- Updated dependencies [8e68622]
+- Updated dependencies [c1a8faf]
+- Updated dependencies [12c32ec]
+- Updated dependencies [1066cf6]
+- Updated dependencies [00f8304]
+- Updated dependencies [00f8304]
+- Updated dependencies [dfff293]
+- Updated dependencies [00cb8a5]
+- Updated dependencies [39006d3]
+- Updated dependencies [16d6090]
+- Updated dependencies [949894d]
+- Updated dependencies [39cf382]
+- Updated dependencies [6651f44]
+- Updated dependencies [6651f44]
+- Updated dependencies [425a32a]
+- Updated dependencies [02e6726]
+- Updated dependencies [414e192]
+  - octane@0.9.0
+  - @octanejs/app-core@0.1.1
+
+## 0.2.0
+
+### Minor Changes
+
+- 53db436: `new RenderRoute({ …, hydrate: 'islands' })` serves a route's server-rendered shell with a renderer-free bootstrap: the shell's module, layout and the renderer never load, and only the page's independent `<Hydrate>` islands activate. The shell's CSS still ships. The Vite build fails if the shell needs client work (hooks, handlers, refs, controlled values, ordinary `<Hydrate>`, `@try`, signal reads, spreads, unchecked components or root boundaries) or if the bootstrap or `preHydrate` hook reaches the renderer. The Rsbuild integration rejects the option for now.
+- 950ef0b: Development server renders now report the client work an islands-only shell actually renders. The Vite dev server renders a `hydrate: 'islands'` route with the new `shellWitness` render option and warns once per site when the shell, outside its independent `<Hydrate>` islands, renders an event handler or function form action, a ref, an effect or store-subscription hook, a controlled `value` or `checked` the user can edit, or a live signal-handle binding. None of these would run, because the shell's modules never load in the browser.
+
+  The report follows the render rather than the source, so it also catches what the build's source check cannot follow: components passed by reference, local aliases, handlers and refs passed through spreads, and elements a plain helper creates with `createElement`. It covers only the branches, rows, and streamed boundaries a request reaches. The route keeps serving either way, and the production build check is unchanged.
+
+  `renderToString`, `renderToReadableStream`, and the other server renderers accept `shellWitness` in development. Production renders ignore it at no cost, and the production compiler output is unchanged.
+
+### Patch Changes
+
+- bc6761f: The `hydrate: 'islands'` shell check now rejects more interactive shells and also runs in dev:
+
+  - A hook is recognized through an import alias (`useEffect as onMount`) and through a namespace or member call (`O.useState()`), and so is an aliased signal declaration.
+  - Every local function the shell references is checked, not only JSX tags: a component passed as a prop (`render={Item}`) and a helper called to render output. A relative import passed into JSX is checked when it can render (a function, or a component-named value), including a namespace member such as `UI.Button` and a module-level alias of a local function. Strings, asset URLs and other plain values, including any export of a non-Octane module, are not shell output. A package component or a module-level wrapper such as `memo(...)` passed as a value cannot be checked.
+  - A signal handle bound through a member (`{state.count$}`), an import alias (`count$ as live`) or a module-level alias (`const live = count$`) is reported.
+  - In dev, an islands-only route whose shell needs client work now logs a warning naming the module, line and problem, once per problem, while the page keeps serving. The production build still fails on it.
+- Updated dependencies [fbf6e40]
+- Updated dependencies [a50b846]
+- Updated dependencies [9ef7385]
+- Updated dependencies [6ea582e]
+- Updated dependencies [52c9d33]
+- Updated dependencies [8f8349b]
+- Updated dependencies [f355acd]
+- Updated dependencies [53db436]
+- Updated dependencies [3ffd8cc]
+- Updated dependencies [9350268]
+- Updated dependencies [4212874]
+- Updated dependencies [f03d812]
+- Updated dependencies [3315f74]
+- Updated dependencies [f5896c6]
+- Updated dependencies [3770c1e]
+- Updated dependencies [3994e1e]
+- Updated dependencies [6f019c5]
+- Updated dependencies [6c50c70]
+- Updated dependencies [de31710]
+- Updated dependencies [fbaf501]
+- Updated dependencies [70ee6a3]
+- Updated dependencies [ab2798e]
+- Updated dependencies [95421bb]
+- Updated dependencies [9168bf6]
+- Updated dependencies [11a9da9]
+- Updated dependencies [92495b9]
+- Updated dependencies [bfed959]
+- Updated dependencies [c016c2d]
+- Updated dependencies [21c3bfe]
+- Updated dependencies [320f9e3]
+- Updated dependencies [da9b1e4]
+- Updated dependencies [4ab33b6]
+- Updated dependencies [8e90048]
+- Updated dependencies [6bb20ac]
+- Updated dependencies [6959fa0]
+- Updated dependencies [105e0f0]
+- Updated dependencies [0d91b93]
+- Updated dependencies [7698907]
+- Updated dependencies [3baa492]
+- Updated dependencies [1fa3853]
+- Updated dependencies [62e76bf]
+- Updated dependencies [3e3749d]
+- Updated dependencies [a1f136c]
+- Updated dependencies [39f3e97]
+- Updated dependencies [11aebc7]
+- Updated dependencies [416882f]
+- Updated dependencies [3ec43da]
+- Updated dependencies [0b833bb]
+- Updated dependencies [11aebc7]
+- Updated dependencies [bc30a18]
+- Updated dependencies [b319c16]
+- Updated dependencies [53db436]
+- Updated dependencies [bc6761f]
+- Updated dependencies [950ef0b]
+- Updated dependencies [f5644f7]
+- Updated dependencies [5ef4f9a]
+- Updated dependencies [18c1b77]
+- Updated dependencies [2b69387]
+- Updated dependencies [07cc1d2]
+- Updated dependencies [3d0e5e2]
+- Updated dependencies [f647cef]
+- Updated dependencies [8e90048]
+- Updated dependencies [d496796]
+- Updated dependencies [fdf54fe]
+- Updated dependencies [ce97a96]
+- Updated dependencies [dc3e180]
+- Updated dependencies [e219d88]
+- Updated dependencies [ed188d7]
+- Updated dependencies [afbad9f]
+- Updated dependencies [09cf476]
+- Updated dependencies [0887a68]
+- Updated dependencies [b319c16]
+- Updated dependencies [3514dc7]
+- Updated dependencies [3f1a7b2]
+- Updated dependencies [985a81e]
+- Updated dependencies [cb71034]
+- Updated dependencies [69b02f1]
+- Updated dependencies [3041f5d]
+- Updated dependencies [b58c783]
+- Updated dependencies [02e4eb0]
+- Updated dependencies [5f354d2]
+- Updated dependencies [02e4eb0]
+- Updated dependencies [ad203e9]
+- Updated dependencies [5e586e2]
+- Updated dependencies [cdc9b07]
+- Updated dependencies [90c209e]
+- Updated dependencies [f34be34]
+- Updated dependencies [d5030cf]
+- Updated dependencies [a9594d0]
+- Updated dependencies [15c7b97]
+- Updated dependencies [3971840]
+- Updated dependencies [d930afb]
+- Updated dependencies [d930afb]
+- Updated dependencies [6615a19]
+- Updated dependencies [791f12e]
+- Updated dependencies [0a14c20]
+- Updated dependencies [9aa6736]
+- Updated dependencies [541ecdc]
+- Updated dependencies [5ef4f9a]
+- Updated dependencies [e93bb26]
+- Updated dependencies [97618d7]
+- Updated dependencies [b5277d1]
+- Updated dependencies [5ef4f9a]
+- Updated dependencies [648a8d2]
+- Updated dependencies [63f07f5]
+- Updated dependencies [1d33932]
+- Updated dependencies [2b4b3fc]
+- Updated dependencies [b98179f]
+- Updated dependencies [2b69559]
+- Updated dependencies [5ef4f9a]
+- Updated dependencies [1c44df5]
+- Updated dependencies [f151614]
+- Updated dependencies [f151614]
+- Updated dependencies [1c44df5]
+- Updated dependencies [dc4800b]
+- Updated dependencies [cda985b]
+- Updated dependencies [b6a414a]
+- Updated dependencies [09565b4]
+- Updated dependencies [752028d]
+- Updated dependencies [b6a414a]
+- Updated dependencies [0339abc]
+- Updated dependencies [e936a90]
+- Updated dependencies [dc4800b]
+- Updated dependencies [dc4800b]
+- Updated dependencies [752028d]
+- Updated dependencies [752028d]
+- Updated dependencies [dc4800b]
+- Updated dependencies [54ff59e]
+- Updated dependencies [25017f3]
+- Updated dependencies [c2fea71]
+- Updated dependencies [5ef4f9a]
+- Updated dependencies [27c2a12]
+- Updated dependencies [b682c2b]
+- Updated dependencies [56de31a]
+- Updated dependencies [ad12525]
+- Updated dependencies [85cb387]
+- Updated dependencies [7422815]
+- Updated dependencies [517b61d]
+  - octane@0.8.0
+  - @octanejs/app-core@0.1.0
+
 ## 0.1.62
 
 ### Patch Changes

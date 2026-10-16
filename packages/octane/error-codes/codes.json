@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "nextCode": 338,
+  "nextCode": 347,
   "codes": {
     "1": {
       "message": "Maximum update depth exceeded. Octane limits the number of nested updates to prevent infinite loops.",
@@ -306,37 +306,37 @@
       "message": "Hydration mismatch: the server-rendered node did not match the client render; the mismatched subtree was rebuilt on the client.",
       "argumentCount": 0,
       "runtime": ["client"],
-      "status": "active"
+      "status": "retired"
     },
     "52": {
       "message": "Hydration mismatch: root adoption was abandoned after a server/client shape divergence; the root was rebuilt on the client.",
       "argumentCount": 0,
       "runtime": ["client"],
-      "status": "active"
+      "status": "retired"
     },
     "53": {
       "message": "Hydration mismatch: the server rendered more root content than the client; the stale remainder was discarded.",
       "argumentCount": 0,
       "runtime": ["client"],
-      "status": "active"
+      "status": "retired"
     },
     "54": {
       "message": "Hydration mismatch: the client rendered text where the server rendered none; the client text was built fresh.",
       "argumentCount": 0,
       "runtime": ["client"],
-      "status": "active"
+      "status": "retired"
     },
     "55": {
       "message": "Hydration mismatch: the server rendered a different child shape where the client renders a component; the stale range was discarded and the component was built on the client.",
       "argumentCount": 0,
       "runtime": ["client"],
-      "status": "active"
+      "status": "retired"
     },
     "56": {
       "message": "Hydration mismatch: the server rendered more list items than the client; the extra server items were discarded.",
       "argumentCount": 0,
       "runtime": ["client"],
-      "status": "active"
+      "status": "retired"
     },
     "57": {
       "message": "prerenderToNodeStream requires a Node.js runtime with process.getBuiltinModule; use prerender() in non-Node environments.",
@@ -360,13 +360,13 @@
       "message": "Hydration mismatch: the server-rendered text differed from the client; the text was updated to the client value.",
       "argumentCount": 0,
       "runtime": ["client"],
-      "status": "active"
+      "status": "retired"
     },
     "62": {
       "message": "Hydration mismatch: the server rendered extra children in a text element; the stale children were discarded.",
       "argumentCount": 0,
       "runtime": ["client"],
-      "status": "active"
+      "status": "retired"
     },
     "59": {
       "message": "%s requires an active server component.",
@@ -1716,7 +1716,8 @@
       "message": "DOM presentation cannot adopt mismatched compiler-owned ranges or nodes.",
       "argumentCount": 0,
       "runtime": ["client"],
-      "status": "active"
+      "status": "active",
+      "note": "One cause is browser page translation rewriting framework-owned DOM. External text wrappers and added nodes are unsupported. Add translate=\"no\" to the owned root in the initial server-rendered HTML; for Google page translation, add <meta name=\"google\" content=\"notranslate\"> to the document head. These opt-outs depend on the tool honoring them."
     },
     "287": {
       "message": "This opaque view cannot be constructed without its external owner.",
@@ -1908,7 +1909,8 @@
       "message": "DOM bindings cannot adopt a mismatched static element topology.",
       "argumentCount": 0,
       "runtime": ["client"],
-      "status": "active"
+      "status": "active",
+      "note": "One cause is browser page translation rewriting framework-owned DOM. External text wrappers and added nodes are unsupported. Add translate=\"no\" to the owned root in the initial server-rendered HTML; for Google page translation, add <meta name=\"google\" content=\"notranslate\"> to the document head. These opt-outs depend on the tool honoring them."
     },
     "319": {
       "message": "DOM bindings cannot adopt an incomplete static element topology.",
@@ -1926,7 +1928,8 @@
       "message": "DOM bindings cannot adopt a mismatched addressed element topology.",
       "argumentCount": 0,
       "runtime": ["client"],
-      "status": "active"
+      "status": "active",
+      "note": "One cause is browser page translation rewriting framework-owned DOM. External text wrappers and added nodes are unsupported. Add translate=\"no\" to the owned root in the initial server-rendered HTML; for Google page translation, add <meta name=\"google\" content=\"notranslate\"> to the document head. These opt-outs depend on the tool honoring them."
     },
     "322": {
       "message": "DOM bindings cannot adopt an incomplete addressed element topology.",
@@ -2022,6 +2025,60 @@
       "message": "Structural hydration leases do not support @try regions.",
       "argumentCount": 0,
       "runtime": ["client"],
+      "status": "active"
+    },
+    "338": {
+      "message": "Hydration mismatch: a server-rendered range had no closing marker, so the client rendered the boundary or root that contains it instead. Something changed the server HTML after rendering, for example an HTML minifier or proxy that strips comments.",
+      "argumentCount": 0,
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "339": {
+      "message": "Hydration failed because the server rendered HTML didn't match the client. As a result this tree will be regenerated on the client.",
+      "argumentCount": 0,
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "340": {
+      "message": "There was an error while hydrating, so the nearest Suspense boundary, Hydrate island, or the root rendered on the client instead.",
+      "argumentCount": 0,
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "341": {
+      "message": "The server could not finish this Suspense boundary, because it suspended during a synchronous render such as renderToString, which cannot wait for data. Switched to client rendering.",
+      "argumentCount": 0,
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "342": {
+      "message": "A descriptor carried a function form action, but no element factory installed form actions. This is a bug in the Octane compiler.",
+      "argumentCount": 0,
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "343": {
+      "message": "A keyed list rollback record restored a different shape than it recorded. This is a bug in Octane.",
+      "argumentCount": 0,
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "344": {
+      "message": "Provide a compiled context with <CompiledContext context={context}>.",
+      "argumentCount": 0,
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "345": {
+      "message": "CompiledContext requires compiled template children.",
+      "argumentCount": 0,
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "346": {
+      "message": "CompiledOutlet requires a compiled component function with no returned renderable.",
+      "argumentCount": 0,
+      "runtime": ["client", "server"],
       "status": "active"
     }
   }

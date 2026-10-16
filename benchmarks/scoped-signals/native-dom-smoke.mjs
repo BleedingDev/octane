@@ -36,7 +36,6 @@ function packageVersion(specifier) {
 	}
 	return JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8')).version;
 }
-assert.equal(packageVersion('alien-signals/system'), '3.2.0');
 
 async function main() {
 	const bundle = await esbuild.build({
@@ -436,14 +435,16 @@ async function main() {
 		second.dispose();
 	});
 
-	test('completed pending snapshot output is rejected instead of transporting activity', () => {
+	test('completed pending snapshot output renders without inventing a ready seed', () => {
 		const scope = G.createScope({ scopeKey: 'dom-pending-snapshot' });
 		const load = G.query('dom-pending-snapshot-loader', () => new Promise(() => {}));
 		const resource = G.createResource(scope, 'resource', () => load(null));
 		const Server = serverNative((p, s) =>
 			S.ssrChild(S.createElement('output', null, resource.snapshot().status), s),
 		);
-		assert.throws(() => S.renderToString(Server), /no serializable ready value/);
+		const { html } = S.renderToString(Server);
+		assert.match(html, /output(?:>|&gt;)pending/);
+		assert.doesNotMatch(html, /data-octane-native-signals/);
 		scope.dispose();
 	});
 
@@ -1149,7 +1150,6 @@ async function main() {
 		versions: {
 			esbuild: esbuild.version,
 			jsdom: packageVersion('jsdom'),
-			alienSignals: packageVersion('alien-signals/system'),
 		},
 		runnerSha256: hash(fs.readFileSync(fileURLToPath(import.meta.url))),
 		request: process.argv,

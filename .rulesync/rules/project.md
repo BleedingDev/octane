@@ -22,23 +22,23 @@ Trust the source over any summary, this file included:
 - `docs/differences-from-react.md`: the divergence contract.
 - `docs/packages.md`: the generated package inventory, checked by CI.
 
-Fix defects in the package that owns the behavior and add the regression there.
-Do not hide framework defects behind app workarounds, weak tests, generated
-output, or test-only behavior; retain the integration scenario as end-to-end
-evidence.
-
 ## The workflows live in skills, so load the skill first
 
-Branch, PR, issue, bug, and audit procedures live in skills. Load one when its
-trigger first arises, even if it is a later step you chose:
+Load the matching skill when its trigger first arises, including later steps:
 
 - `create-a-pr`: before any branch, commit, changeset, or PR.
 - `handle-issue`: a GitHub issue number or link.
 - `bug-hunter`: a failing test, a regression, or behavior that differs from
   expectation.
+- `resolve-octane-defect`: a defect in Octane or an Octane library. Open a fix PR
+  in the owning package with regression coverage, or file an issue. Retain any
+  integration scenario as end-to-end evidence. Never mask the defect with a
+  workaround, weak tests, generated output, or test-only behavior.
 - `octane-core-extend`: before editing `packages/octane/src`.
 - `performance-audit`: a change that can move render, SSR, hydration, compiler
   output, or bundle cost.
+- `perf-review`: a PR touching runtime, compiler output, or binding hot paths.
+- `concise-code`: planning a change beyond a few lines, and the diff before a PR.
 - `update-bindings`: audit, maintain, or reduce existing bindings.
 - `octane-react-library-port`: new ports or copied React code.
 - `react-library-port`: legacy router.
@@ -131,18 +131,18 @@ consuming application compiles the source with its own toolchain.
 ```bash
 pnpm test          # full Vitest run
 pnpm typecheck
-pnpm typecheck:files [path...]     # defaults to staged and unstaged files
+pnpm typecheck:files [path...]
 pnpm sync
-pnpm format:files [path...]        # defaults to staged and unstaged files
-pnpm format:files:check [path...]  # defaults to staged and unstaged files
+pnpm format:files [path...]
+pnpm format:files:check [path...]
 pnpm format:check                  # optional repo-wide gate
 ```
 
 Before any push, run `pnpm sync` and commit its generated changes.
 
-Scoped typecheck and Prettier commands default to staged and unstaged Git diffs;
-explicit files or directories override that default. `format:files` writes and
-`format:files:check` is read-only. Use repo-wide checks only when needed.
+The `:files` commands default to staged and unstaged files; explicit paths
+override that. `format:files` writes; `format:files:check` is read-only. Use
+repo-wide checks only when needed.
 
 `pnpm test` runs package prechecks, then one root Vitest invocation for every
 project in `vitest.config.js`; it does not fan out through package `test`

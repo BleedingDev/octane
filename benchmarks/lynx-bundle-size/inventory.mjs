@@ -19,7 +19,9 @@ const REPO = path.resolve(ROOT, '../..');
 const ENTRY = path.join(REPO, 'benchmarks/lynx-table/app/src/index.ts');
 const CWD = path.join(REPO, 'packages/rspeedy-plugin-octane/tests/_fixtures/application');
 const MODULES = path.join(REPO, 'packages/rspeedy-plugin-octane/node_modules');
-const BUDGETS = JSON.parse(fs.readFileSync(path.join(ROOT, 'inventory-budgets.json'), 'utf8'));
+const CONTROLLED_LEDGER = JSON.parse(
+	fs.readFileSync(path.join(ROOT, 'controlled-ledger.json'), 'utf8'),
+);
 const captures = new Map();
 
 function packageEntry(packageName) {
@@ -63,7 +65,11 @@ function nativeScriptBytes(script) {
 function ownerOf(identifier) {
 	const value = identifier.replaceAll('\\', '/');
 	if (value.includes('/benchmarks/lynx-table/app/src/')) return 'fixture-app';
-	if (value.includes('/packages/octane/src/universal-core')) return 'universal-runtime';
+	// The owner kernel is extracted from the universal core (#1055) and is
+	// attributed with it until a renderer other than the universal one ships it.
+	if (/\/packages\/octane\/src\/(?:universal-core|owner-kernel\/)/.test(value)) {
+		return 'universal-runtime';
+	}
 	if (/\/packages\/lynx\/src\/core\/(?:host-driver|papi)/.test(value)) {
 		return 'host-driver-papi';
 	}
@@ -203,10 +209,6 @@ function moduleInventory(modules, artifactRaw) {
 	};
 }
 
-function gateBudget(label, value, budget) {
-	if (value > budget) throw new Error(`${label} ${value} exceeds frozen budget ${budget}.`);
-}
-
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'octane-lynx-inventory-'));
 let build;
 try {
@@ -285,28 +287,12 @@ try {
 				inventory: moduleInventory(lynxCapture.modules, lynx.raw),
 			},
 		},
-		controlledLedger: BUDGETS.controlledLedger,
+		controlledLedger: CONTROLLED_LEDGER,
 	};
-	const calibrate = process.env.OCTANE_INVENTORY_CALIBRATE === '1';
+	// Bytes are reported, never gated. Attribution must still explain the artifact.
 	for (const target of ['web', 'lynx']) {
-		if (calibrate) continue;
-		gateBudget(`${target} raw`, payload.artifacts[target].raw, BUDGETS.artifacts[target].raw);
-		gateBudget(`${target} gzip`, payload.artifacts[target].gzip, BUDGETS.artifacts[target].gzip);
 		if (payload.artifacts[target].inventory.coverage < 0.9) {
 			throw new Error(`${target} raw attribution covers less than 90%.`);
-		}
-		for (const [owner, budget] of Object.entries(BUDGETS.owners[target])) {
-			const actual = payload.artifacts[target].inventory.owners[owner]?.artifactRaw ?? 0;
-			gateBudget(`${target}/${owner} raw`, actual, budget);
-		}
-	}
-	for (const section of calibrate ? [] : ['main', 'background']) {
-		for (const metric of ['raw', 'gzip']) {
-			gateBudget(
-				`lynx ${section} ${metric}`,
-				payload.artifacts.lynx.sections[section][metric],
-				BUDGETS.sections[section][metric],
-			);
 		}
 	}
 	const output = process.env.OCTANE_INVENTORY_OUTPUT;

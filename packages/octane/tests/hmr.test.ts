@@ -48,19 +48,47 @@ interface TestHotContext {
 	invalidate(): void;
 }
 
+type HmrTestOptions = { hmr?: 'vite' | 'webpack'; hot?: TestHotContext };
+
 async function compileHmrComponent(
 	source: string,
 	exportName = 'App',
+	filename?: string,
+	modules?: Record<string, Record<string, unknown>>,
+	options?: HmrTestOptions,
+): Promise<ComponentBody<any>> {
+	return (await compileHmrModule(source, [exportName], filename, modules, options))[exportName];
+}
+
+/** Evaluates compiled output and returns the namespace of `exportNames`. */
+async function compileHmrModule(
+	source: string,
+	exportNames: readonly string[],
 	filename = '/src/App.tsrx',
 	modules: Record<string, Record<string, unknown>> = {},
-	options: { hmr?: 'vite' | 'webpack'; hot?: TestHotContext } = {},
-): Promise<ComponentBody<any>> {
+	options: HmrTestOptions = {},
+): Promise<Record<string, any>> {
 	const [{ compile }, runtime, internalRuntime] = await Promise.all([
 		import('octane/compiler'),
 		import('../src/index.js'),
 		import('octane/internal/client'),
 	]);
 	const code = compile(source, filename, { hmr: options.hmr ?? 'webpack' }).code;
+	// Export clauses name the module binding behind a renamed export, including
+	// an anonymous default export, which has no authored binding.
+	const locals = new Map<string, string>();
+	for (const [, clause] of code.matchAll(/^export\s*\{([^}]*)\};?\s*$/gm)) {
+		for (const specifier of clause.split(',')) {
+			const [local, exported = local] = specifier.trim().split(/\s+as\s+/);
+			if (local) locals.set(exported, local);
+		}
+	}
+	const namespace = exportNames.map((name) => {
+		if (name === 'default' && !locals.has(name)) {
+			throw new Error('The compiled module has no default export binding');
+		}
+		return `${JSON.stringify(name)}: ${locals.get(name) ?? name}`;
+	});
 	const transformed =
 		code
 			.replace(
@@ -74,7 +102,7 @@ async function compileHmrComponent(
 				},
 			)
 			.replace(
-				/^import\s*\{([\s\S]*?)\}\s*from\s*(['"])(\.\.?\/[^'"]+)\2;/gm,
+				/^import\s*\{([\s\S]*?)\}\s*from\s*(['"])(\.\.?\/[^'"]+|octane\/signals)\2;/gm,
 				(_match: string, imports: string, _quote: string, request: string) => {
 					const properties = imports
 						.split(',')
@@ -88,7 +116,7 @@ async function compileHmrComponent(
 			// instead of `export let X = …`; drop the list form the same way.
 			.replace(/^export\s*\{[^}]*\};?\s*$/gm, '')
 			.replaceAll('import.meta.webpackHot', 'hot')
-			.replaceAll('import.meta.hot', 'hot') + `\nreturn ${exportName};`;
+			.replaceAll('import.meta.hot', 'hot') + `\nreturn { ${namespace.join(', ')} };`;
 	const hot = options.hot ?? {
 		data: undefined,
 		dispose() {},
@@ -101,22 +129,25 @@ async function compileHmrComponent(
 		'hot',
 		'modules',
 		transformed,
-	)(runtime, internalRuntime, hot, modules) as ComponentBody<any>;
+	)(runtime, internalRuntime, hot, modules);
 }
 
 /**
  * One webpack module across successive saves: each `load` runs the previous
  * evaluation's dispose handler, then evaluates the edit, which hands every
  * export to its canonical wrapper and invalidates when one declines.
+ * `accepted` reports whether the latest evaluation is its own update boundary.
  */
 function webpackHotModule(filename: string) {
 	const data: Record<string, unknown> = {};
 	let dispose: ((data: Record<string, unknown>) => void) | undefined;
 	const module = {
+		accepted: false,
 		invalidated: false,
 		load(source: string): Promise<ComponentBody<any>> {
 			dispose?.(data);
 			dispose = undefined;
+			module.accepted = false;
 			return compileHmrComponent(
 				source,
 				'App',
@@ -129,7 +160,9 @@ function webpackHotModule(filename: string) {
 						dispose(callback) {
 							dispose = callback;
 						},
-						accept() {},
+						accept() {
+							module.accepted = true;
+						},
 						invalidate() {
 							module.invalidated = true;
 						},
@@ -143,13 +176,18 @@ function webpackHotModule(filename: string) {
 
 describe('hmr — runtime wrapper', () => {
 	it.each([
-		{ dialect: 'vite', name: 'App' },
-		{ dialect: 'webpack', name: 'App' },
-		{ dialect: 'vite', name: 'module' },
-		{ dialect: 'vite', name: '_$hmrModule' },
+		{ dialect: 'vite', name: 'App', declaration: 'function App(props)' },
+		{ dialect: 'webpack', name: 'App', declaration: 'function App(props)' },
+		{ dialect: 'vite', name: 'module', declaration: 'function module(props)' },
+		{ dialect: 'vite', name: '_$hmrModule', declaration: 'function _$hmrModule(props)' },
+		// Anonymous default components, function or arrow, register under their export.
+		{ dialect: 'vite', name: 'default', declaration: 'default function (props)' },
+		{ dialect: 'webpack', name: 'default', declaration: 'default function (props)' },
+		{ dialect: 'vite', name: 'default', declaration: 'default (props) =>' },
+		{ dialect: 'webpack', name: 'default', declaration: 'default (props) =>' },
 	] as const)(
-		'preserves state and live events for $name across consecutive $dialect replacements',
-		async ({ dialect, name }) => {
+		'preserves state and live events for export $declaration across consecutive $dialect replacements',
+		async ({ dialect, name, declaration }) => {
 			const data: Record<string, unknown> = {};
 			let dispose: Parameters<TestHotContext['dispose']>[0] | undefined;
 			let accept: Parameters<TestHotContext['accept']>[0];
@@ -163,7 +201,7 @@ describe('hmr — runtime wrapper', () => {
 				accept = undefined;
 				const App = await compileHmrComponent(
 					`import { useState } from 'octane';
-					 export function ${name}(props) @{
+					 export ${declaration} @{
 					   const [count, setCount] = useState(0);
 					   ${incompatible ? "if (props.empty) return 'empty';" : ''}
 					   <main><p>version ${version}</p><button onClick={() => setCount(count + 1)}>{count as string}</button></main>
@@ -272,6 +310,88 @@ describe('hmr — runtime wrapper', () => {
 			}
 		},
 	);
+
+	it.each([
+		['a declaration', 'label', (label: string) => `export const label = '${label}';`],
+		[
+			'a renamed binding',
+			'value',
+			(label: string) => `const value = '${label}';\nexport { value as label };`,
+		],
+		[
+			'a destructuring',
+			'label',
+			(label: string) => `export const { label } = { label: '${label}' };`,
+		],
+	])(
+		'sends a value exported by %s beside a component to its Vite importers',
+		async (_form, local, exportLabel) => {
+			let accept: Parameters<TestHotContext['accept']>[0];
+			let invalidations = 0;
+			const hot: TestHotContext = {
+				data: {},
+				dispose() {},
+				accept(callback) {
+					accept = callback;
+				},
+				invalidate() {
+					invalidations++;
+				},
+			};
+			const load = async (label: string, prefix: string) => {
+				const previousAccept = accept;
+				const module = await compileHmrModule(
+					`${exportLabel(label)}
+					 export function App() @{ <p>{'${prefix} ' + ${local}}</p> }`,
+					['App', 'label'],
+					'/src/App.tsrx',
+					{},
+					{ hmr: 'vite', hot },
+				);
+				flushSync(() => previousAccept?.(module));
+				return module;
+			};
+			const r = mount((await load('v1', 'first')).App);
+			try {
+				// Importers still hold the previous evaluation's bindings. An unchanged
+				// value keeps them current, so the module stays its own boundary.
+				await load('v1', 'second');
+				expect(r.find('p').textContent).toBe('second v1');
+				expect(invalidations).toBe(0);
+				// A changed value must propagate the update to those importers.
+				await load('v2', 'second');
+				expect(r.find('p').textContent).toBe('second v2');
+				expect(invalidations).toBe(1);
+			} finally {
+				r.unmount();
+			}
+		},
+	);
+
+	it('lets webpack re-execute the importers of a module exporting values beside a component', async () => {
+		const hot = webpackHotModule('/src/App.tsrx');
+		const source = (label: string) =>
+			`export const label = '${label}';
+			 export function App() @{ <p>{label as string}</p> }`;
+		const App = await hot.load(source('v1'));
+		const r = mount(App);
+		try {
+			// A replacement cannot see what its importers last read, and comparing
+			// against its previous evaluation would invalidate every re-execution.
+			expect(hot.accepted).toBe(false);
+			expect(await hot.load(source('v2'))).toBe(App);
+			flushSync(() => {});
+			expect(r.find('p').textContent).toBe('v2');
+			expect(hot.accepted).toBe(false);
+			expect(hot.invalidated).toBe(false);
+		} finally {
+			r.unmount();
+		}
+		// Another name for a component exports the same handed-off wrapper.
+		const aliased = webpackHotModule('/src/Aliased.tsrx');
+		await aliased.load(`export function App() @{ <p>app</p> }\nexport { App as Main };`);
+		expect(aliased.accepted).toBe(true);
+	});
 
 	it('renders the initial component body', () => {
 		const Foo = hmr(((_props: any, scope: Scope, _extra: any) => {
@@ -538,10 +658,11 @@ describe('hmr — runtime wrapper', () => {
 		}
 	});
 
-	it('refreshes a root that hydration rebuilt before an adopted server sibling', async () => {
-		// The server rendered the other arm, so hydration rebuilds the Leaf's root
-		// where the server `<b>` stood and adopts the `<em>` after it. The hook
-		// keeps Leaf a component with a Block of its own, which a handoff resets.
+	it('refreshes a component in a root that fell back from hydration', async () => {
+		// The server rendered the other arm, a mismatch with no boundary around
+		// it, so the whole root renders on the client, as in React 19, and none
+		// of the server's nodes stay. The hook keeps Leaf a component with a
+		// Block of its own, which a handoff resets.
 		const source = (label: string) => `
 			import { useState } from 'octane';
 			export function Leaf() @{
@@ -572,27 +693,29 @@ describe('hmr — runtime wrapper', () => {
 		const container = document.createElement('div');
 		container.innerHTML = renderToString(server.App, { server: true }).html;
 		document.body.appendChild(container);
-		const em = container.querySelector('em');
+		const serverNodes = [...container.querySelectorAll('*')];
 		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		const hot = webpackHotModule(filename);
+		const recoverable: unknown[] = [];
 		const root = hydrateRoot(
 			container,
 			await hot.load(source('v1')),
 			{},
 			{
-				onRecoverableError: () => {},
+				onRecoverableError: (error) => recoverable.push(error),
 			},
 		);
 		const children = () => Array.from(container.firstElementChild!.children, (el) => el.outerHTML);
 		try {
 			flushSync(() => {});
 			expect(children()).toEqual(['<i>v1</i>', '<em>e</em>']);
-			expect(container.querySelector('em')).toBe(em);
+			expect(serverNodes.filter((node) => node.isConnected)).toEqual([]);
 
 			await hot.load(source('v2'));
 			flushSync(() => {});
 			expect(hot.invalidated).toBe(false);
 			expect(children()).toEqual(['<i>v2</i>', '<em>e</em>']);
+			expect(recoverable).toHaveLength(1);
 		} finally {
 			root.unmount();
 			container.remove();
@@ -600,10 +723,10 @@ describe('hmr — runtime wrapper', () => {
 		}
 	});
 
-	it('refreshes a root that hydration built after its server range ended', async () => {
-		// The server arm ends after its Em; the client's adds a Leaf, so hydration
-		// builds the Leaf's root at that arm's end. The arm's closing marker is
-		// not that root, so a handoff resets the Leaf alone.
+	it('refreshes a component that a hydration fallback rendered past the server arm', async () => {
+		// The server arm ends after its Em; the client's adds a Leaf, a mismatch
+		// with no boundary around it, so the whole root renders on the client.
+		// A handoff then resets the Leaf alone.
 		const source = (label: string) => `
 			import { useState } from 'octane';
 			export function Leaf() @{
@@ -633,25 +756,29 @@ describe('hmr — runtime wrapper', () => {
 		const container = document.createElement('div');
 		container.innerHTML = renderToString(server.App, { server: true }).html;
 		document.body.appendChild(container);
+		const serverNodes = [...container.querySelectorAll('*')];
 		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		const hot = webpackHotModule(filename);
+		const recoverable: unknown[] = [];
 		const root = hydrateRoot(
 			container,
 			await hot.load(source('v1')),
 			{},
 			{
-				onRecoverableError: () => {},
+				onRecoverableError: (error) => recoverable.push(error),
 			},
 		);
 		const children = () => Array.from(container.firstElementChild!.children, (el) => el.outerHTML);
 		try {
 			flushSync(() => {});
 			expect(children()).toEqual(['<em>e</em>', '<i>v1</i>']);
+			expect(serverNodes.filter((node) => node.isConnected)).toEqual([]);
 
 			await hot.load(source('v2'));
 			flushSync(() => {});
 			expect(hot.invalidated).toBe(false);
 			expect(children()).toEqual(['<em>e</em>', '<i>v2</i>']);
+			expect(recoverable).toHaveLength(1);
 		} finally {
 			root.unmount();
 			container.remove();
@@ -913,6 +1040,29 @@ describe('hmr — runtime wrapper', () => {
 
 		expect(r.find('p').textContent).toBe('memo after');
 		expect(log.splice(0)).toEqual(['cleanup before', 'mount after']);
+		r.unmount();
+	});
+
+	it('publishes an edited signal declaration closure during refresh', async () => {
+		const modules = { 'octane/signals': await import('octane/signals') };
+		const source = (suffix: string) => `
+			import { derived$ } from 'octane/signals';
+			export function App(props) @{
+				const label$ = derived$(() => props.label + '${suffix}');
+				<p>{label$.get() as string}</p>
+			}
+		`;
+		const initial = await compileHmrComponent(source(' before'), 'App', '/src/App.tsrx', modules);
+		const updated = await compileHmrComponent(source(' after'), 'App', '/src/App.tsrx', modules);
+		const r = mount(initial, { label: 'a' });
+		expect(r.find('p').textContent).toBe('a before');
+
+		// The captured props are unchanged, but the edited closure replaces the old one.
+		flushSync(() => {
+			expect((initial as any)[HMR].update(updated)).toBe(true);
+		});
+
+		expect(r.find('p').textContent).toBe('a after');
 		r.unmount();
 	});
 

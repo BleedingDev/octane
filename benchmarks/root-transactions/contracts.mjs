@@ -61,10 +61,13 @@ function instrument(variant) {
 	}
 	const reads = variant === 'binding-cache' ? 'cached' : 'live';
 	if (source.includes('function journalText(node: Text, previous: string | null)')) {
+		// setText journals the staged view's value when a staged DOM is active;
+		// the audit substitutes its own read for that previous value. The pattern
+		// accepts any spelling of the staged-view read.
 		source = replaceOnce(
 			source,
-			'journalText(node, node.nodeValue)',
-			`journalText(node, globalThis.__rootContractAudit.${reads}Text(node))`,
+			/journalText\(target, \(STAGED_DOM.*\)\.nodeValue\);/,
+			`journalText(target, globalThis.__rootContractAudit.${reads}Text(target));`,
 		);
 	} else {
 		source = replaceOnce(
@@ -73,11 +76,17 @@ function instrument(variant) {
 			`TRANSITION_JOURNAL!.push(JOURNAL_TEXT, node, globalThis.__rootContractAudit.${reads}Text(node), null);`,
 		);
 	}
-	source = replaceOnce(
-		source,
-		'TRANSITION_JOURNAL!.push(JOURNAL_ATTR, el, name, el.getAttribute(name));',
-		`TRANSITION_JOURNAL!.push(JOURNAL_ATTR, el, name, globalThis.__rootContractAudit.${reads}Attr(el, name));`,
-	);
+	source = source.includes('function journalAttr(el: Element, name: string, ns?: string | null)')
+		? replaceOnce(
+				source,
+				'(STAGED_DOM ? STAGED_DOM.view(el) : el).getAttribute(name),\n\t);',
+				`globalThis.__rootContractAudit.${reads}Attr(el, name),\n\t);`,
+			)
+		: replaceOnce(
+				source,
+				'TRANSITION_JOURNAL!.push(JOURNAL_ATTR, el, name, el.getAttribute(name));',
+				`TRANSITION_JOURNAL!.push(JOURNAL_ATTR, el, name, globalThis.__rootContractAudit.${reads}Attr(el, name));`,
+			);
 	return source;
 }
 

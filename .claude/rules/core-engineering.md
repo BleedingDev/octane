@@ -34,6 +34,13 @@ not cleanup work for a later change.
 - Keep common paths direct. Avoid new allocations, closures, object-shape
   changes, polymorphic calls, scans, DOM reads/writes, serialization work, or
   scheduling hops per component/render/node unless measurement justifies them.
+- Hot classes (`BlockImpl`, `ScopeImpl`, `LiteBlockImpl`) declare every field
+  type-only and assign it unconditionally in the constructor. Nothing adds a
+  field after allocation, including through a cast. Hot literals keep one key
+  set and order across sites, with no `delete` or conditional spread.
+- A microtask, `await`, or animation frame is not a yield. Do not add a render
+  or commit per microtask hop. Coalesce first, then post a task through an
+  existing poster. The scheduling contract changes only through issue #1864.
 - Push rare behavior to cold branches and pay for optional features only when
   used. Do not penalize every component to simplify an uncommon case.
 - Consider the whole cost transfer: compiler time, generated code, parse and
@@ -47,6 +54,9 @@ not cleanup work for a later change.
 - Never claim a performance improvement without measurements. If representative
   measurement is impractical, say so, avoid the claim, and document the
   remaining performance risk.
+- Run the `perf-review` skill on the final diff. The rules it checks, and the
+  runtime code that follows them, are in the `performance-audit` skill's
+  references.
 
 ## Implement the smallest durable design
 
@@ -74,10 +84,12 @@ not cleanup work for a later change.
   runtime HTML string ABI, then embed that string as an AST literal. HTML, CSS,
   module specifier values, diagnostics, and ordinary string literals remain
   textual data; they are not permission to construct JavaScript through text.
-- `slot-hooks.js` and `runtime-requests.js` are the narrow text-edit exceptions:
-  hook slots preserve authored line numbers without a source map, while runtime
-  targeting edits only lexer-identified module specifier ranges in source that
-  otherwise passes through unchanged.
+- `slot-hooks.js`, `runtime-requests.js`, and `profile-guards.js` are the
+  narrow text-edit exceptions: hook slots preserve authored line numbers
+  without a source map, runtime targeting edits only lexer-identified module
+  specifier ranges in source that otherwise passes through unchanged, and the
+  dev-server profiling fold removes or replaces only parser-located guard,
+  declaration, and import ranges, keeping their line breaks.
   Volar/type-only generation delegates its one Program print to `@tsrx/core`;
   keep `boundaryTokens: true` so structural token boundaries resolve through
   its source map without changing output bytes.
@@ -97,8 +109,9 @@ change. At minimum:
    that moved from a cold path to a hot one.
 3. Re-read every changed call site and adjacent fast path. Check dev/prod and
    client/server symmetry, generated output, public types, and binding impact.
-4. Compare against at least one simpler design. Remove branches, helpers,
-   options, and comments that do not earn their ongoing cost.
+4. Compare against at least one simpler design, using the `concise-code`
+   pass. Remove branches, helpers, options, and comments that do not earn
+   their ongoing cost.
 5. Confirm that tests fail for the intended regression and remain insensitive
    to valid implementation alternatives. Confirm benchmark controls still
    produce the same semantic result.
@@ -115,5 +128,6 @@ questions remain unreported.
 - Baseline and candidate benchmark commands/results for performance-sensitive
   changes, or an explicit explanation of why no trustworthy measurement exists.
 - Self-review findings that materially changed the implementation.
+- The `perf-review` report, with every `must-fix` finding resolved.
 - Residual risks, untested modes, and follow-up work. “All tests pass” is not a
   substitute for this evidence.

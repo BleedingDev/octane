@@ -38,9 +38,9 @@
       "node": ">=22",
       "platform": "any",
       "arch": "any",
-      "packageManager": "pnpm@11.15.1",
+      "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "91136aca7e454123147ee81e429398d60a872288b7ce288a72b4cfbf3c038dc2"
+      "lockfileSha256": "6df573d6aa854c122b0cea3e8c3be46fb67e3debe9ce0f329a773850bbd87706"
     }
   },
   "lanes": [
@@ -85,7 +85,7 @@
         {
           "path": "scripts/react-parity/run-pristine.mjs",
           "role": "support",
-          "sha256": "ce5c2fc3c13e7f405456323a94fe67dcabeabf2fe8f48f5526d915d196cec501"
+          "sha256": "f08d44ab79ccb107a77f3532cfcbc4b442a7e387d3f513dcc45a6879db22d1ce"
         },
         {
           "path": "packages/draggable/tests/upstream-vitest.config.ts",
@@ -356,7 +356,7 @@
         {
           "path": "packages/draggable/typetests/tsconfig.adapted.json",
           "role": "support",
-          "sha256": "f7c06a2be4fc87321bfa37fee75f6dd8295ce9b11021d4486b7c45b885864e03"
+          "sha256": "d90f3a4a736c4bc3e893c9c38592188375a27d6cbe0cf0f0c61a5e38e215da01"
         },
         {
           "path": "packages/draggable/typetests/adapted/typings.consumer.ts",

@@ -387,6 +387,47 @@ useEffect(() => { const controller = new AbortController(); load(controller, set
 	});
 
 	it.each([
+		['the row callback', '', 'stop'],
+		['an alias of the row callback', 'const alias = stop;', 'alias'],
+		['two aliases of the row callback', 'const first = stop; const alias = first;', 'alias'],
+	])('does not treat %s as an outer abort helper', (_label, setup, callback) => {
+		const source = component(
+			`const [value, setValue] = useState(''); const stop = controller => controller.abort();`,
+			'props',
+			`<section>@for (const stop of props.callbacks; key stop) { ${setup} useEffect(() => { const controller = new AbortController(); fetch('/api', { signal: controller.signal }).then(r => r.text()).then(setValue); return () => ${callback}(controller); }); <div>{value as string}</div> }</section>`,
+		);
+		rejects(source, FETCH);
+	});
+
+	it('preserves actual abort helpers used through rows and closer JavaScript bindings', () => {
+		const setup = `const [value, setValue] = useState(''); const stop = controller => controller.abort(); const outer = stop;`;
+		const request = `const controller = new AbortController(); fetch('/api', { signal: controller.signal }).then(r => r.text()).then(setValue);`;
+		accepts(
+			component(
+				setup,
+				'props',
+				`<section>@for (const stop of props.callbacks; key stop) { useEffect(() => { ${request} return () => outer(controller); }); <div>{value as string}</div> }</section>`,
+			),
+		);
+		accepts(
+			component(
+				setup,
+				'props',
+				`<section>@for (const stop of props.callbacks; key stop) { useEffect(() => { const stop = controller => controller.abort(); ${request} return () => stop(controller); }); <div>{value as string}</div> }</section>`,
+			),
+		);
+	});
+
+	it('does not confuse a row timer callback with an outer recursive timer', () => {
+		const source = component(
+			`function repeat() { setTimeout(repeat, 10); }`,
+			'props',
+			`<section>@for (const repeat of props.callbacks; key repeat) { useEffect(() => { const handle = setTimeout(repeat, 10); return () => clearTimeout(handle); }); <div /> }</section>`,
+		);
+		accepts(source);
+	});
+
+	it.each([
 		'api.get(props.controller)',
 		'api.get({ controller: props.id })',
 		'api.get({ signal: props.signal })',
@@ -552,11 +593,11 @@ describe('Strong effect diagnostic integration', () => {
 			),
 		).toThrow(FETCH);
 	});
-	it('enforces TSX components and namespace imports', () => {
+	it('enforces .tsrx components and namespace imports', () => {
 		expect(() =>
 			compile(
 				`"use strong"; import * as O from 'octane'; export function App(props) { const [value] = O.useState(props.value); return <div />; }`,
-				'/src/App.tsx',
+				'/src/App.tsrx',
 			),
 		).toThrow(PROPS);
 	});
@@ -1339,22 +1380,22 @@ export function App(props) @{
 
 	it.each([
 		[
-			'TSX components',
-			'/src/App.tsx',
+			'.tsrx components',
+			'/src/App.tsrx',
 			`"use strong";
 import { useState, useEffect, startTransition } from 'octane';
 export function A({ first, last }) { const [full, setFull] = useState(''); useEffect(() => { startTransition(() => setFull(first + ' ' + last)); }); return <p>{full}</p>; }`,
 		],
 		[
-			'TSX transitions',
-			'/src/App.tsx',
+			'.tsrx transitions',
+			'/src/App.tsrx',
 			`"use strong";
 import { useState, useEffect, useTransition } from 'octane';
 export function A({ v }) { const [x, setX] = useState(0); const [p, start] = useTransition(); useEffect(() => { start(() => setX(v)); }); return <p>{x}</p>; }`,
 		],
 		[
-			'TSX awaits',
-			'/src/App.tsx',
+			'.tsrx awaits',
+			'/src/App.tsrx',
 			`"use strong";
 import { useState, useEffect } from 'octane';
 export function A({ v }) { const [x, setX] = useState(0); useEffect(() => { (async () => { await null; setX(v * 2); })(); }); return <p>{x}</p>; }`,
@@ -1542,13 +1583,12 @@ export function App(props) @{
 			app(hooks, `const [value, setValue] = useThing(); setValue(1);`),
 			'OCTANE_STRONG_RENDER_STATE_UPDATE',
 		);
-		rejects(
-			app(
-				hooks,
-				`const [value, setValue, getValue] = useThing(); useEffect(() => { props.log(getValue()); });`,
-			),
-			HIDDEN,
+		const effectRead = app(
+			hooks,
+			`const [value, setValue, getValue] = useThing(); useEffect(() => { props.log(getValue()); });`,
 		);
+		accepts(effectRead);
+		expect(errors(effectRead)).toEqual([]);
 	});
 
 	it.each([
@@ -1628,7 +1668,7 @@ export function App(props) @{
 		).toContain('OCTANE_STRONG_IMPURE_UPDATER');
 	});
 
-	it('follows same-module hooks in plain TypeScript and TSX', () => {
+	it('follows same-module hooks in plain TypeScript and .tsrx', () => {
 		const ts = `"use strong";
 import { useState, useEffect } from 'octane';
 function useThing() { return useState(0); }
@@ -1638,8 +1678,8 @@ export function useMirror(value) { const [mirror, setMirror] = useThing(); useEf
 import { useState, useEffect } from 'octane';
 function useThing() { return useState(0); }
 export function A({ v }) { const [x, setX] = useThing(); useEffect(() => { setX(v); }); return <p>{x}</p>; }`;
-		expect(() => compile(tsx, '/src/A.tsx')).toThrow(UPDATE);
-		expect(() => compile(tsx.replace('"use strong";', ''), '/src/A.tsx')).not.toThrow();
+		expect(() => compile(tsx, '/src/A.tsrx')).toThrow(UPDATE);
+		expect(() => compile(tsx.replace('"use strong";', ''), '/src/A.tsrx')).not.toThrow();
 	});
 });
 
@@ -1655,6 +1695,10 @@ export function App(props) @{
   ${output}
 }`;
 
+	// A ref is React's escape hatch for a value that effects read and write
+	// without re-running, and a state getter reads the latest state without
+	// subscribing. Neither is a dependency, so effect setup may use them as an
+	// event handler can.
 	it.each([
 		['a state getter', `useEffect(() => { props.log(getCount()); });`],
 		[
@@ -1710,8 +1754,24 @@ export function App(props) @{
 			'a namespace ref',
 			`const last = Octane.useRef(0); useEffect(() => { props.log(last.current); });`,
 		],
-	])('rejects %s in effect setup', (_label, setup) => {
-		rejects(app(setup), HIDDEN);
+		[
+			'a previous-value ref in a layout effect',
+			`const last = useRef(0); useLayoutEffect(() => { props.log(last.current); last.current = count; });`,
+		],
+		[
+			'a ref counter in an insertion effect',
+			`const runs = useRef(0); useInsertionEffect(() => { runs.current++; props.log(runs.current); });`,
+		],
+		[
+			'a ref collection',
+			`const items = useRef(new Map()); useEffect(() => { items.current.get(props.id)?.focus(); });`,
+		],
+	])('accepts %s in effect setup', (_label, setup) => {
+		const source = app(setup);
+		expect(errors(source)).toEqual([]);
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(source, '/src/App.tsrx', { mode, strong: true })).not.toThrow();
+		}
 	});
 
 	it.each([
@@ -1733,21 +1793,6 @@ export function App(props) @{
 		],
 	])('rejects %s in effect setup', (_label, setup, moduleSetup) => {
 		rejects(app(setup, '<div />', moduleSetup), HIDDEN);
-	});
-
-	it.each([
-		['a dependency list', '[last]'],
-		['a parenthesized dependency list', '([last])'],
-		['a cast dependency list', '[last] as const'],
-		['a satisfies dependency list', '[last] satisfies unknown[]'],
-	])('does not treat %s as attaching a ref', (_label, dependencies) => {
-		expect(
-			errors(
-				app(
-					`const last = useRef(0); useEffect(() => { props.log(last.current); }, ${dependencies});`,
-				),
-			),
-		).toContain(HIDDEN);
 	});
 
 	it.each([
@@ -1818,21 +1863,434 @@ export function App(props) @{
 		accepts(app(`useEffect(() => { props.log(LIMIT); });`, '<div />', moduleSetup));
 	});
 
-	it('enforces TSX components and plain TypeScript custom hooks', () => {
+	it('enforces .tsrx components and plain TypeScript custom hooks', () => {
+		const tsx = `"use strong";
+import { useState, useEffect } from 'octane';
+let last = 0;
+export function A({ log }) { const [c, setC] = useState(0); useEffect(() => { log(last); last = c; }); return <button onClick={() => setC(c + 1)}>{c}</button>; }`;
+		expect(() => compile(tsx, '/src/A.tsrx')).toThrow(HIDDEN);
+		const ts = `"use strong";
+import { useEffect } from 'octane';
+let last = 0;
+export function usePreviousLog(value, log) { useEffect(() => { log(last); last = value; }); }`;
+		expect(() => slotHooks(ts, '/src/use-previous-log.ts')).toThrow(HIDDEN);
+	});
+
+	it('accepts refs and state getters in .tsrx component and plain TypeScript custom-hook effects', () => {
 		const tsx = `"use strong";
 import { useState, useEffect, useRef } from 'octane';
-export function A({ log }) { const [c, setC] = useState(0); const last = useRef(0); useEffect(() => { log(last.current); last.current = c; }); return <button onClick={() => setC(c + 1)}>{c}</button>; }`;
-		expect(() => compile(tsx, '/src/A.tsx')).toThrow(HIDDEN);
+export function A({ log }) { const [c, setC, getC] = useState(0); const last = useRef(0); useEffect(() => { log(last.current, getC()); last.current = c; }); return <button onClick={() => setC(c + 1)}>{c}</button>; }`;
+		expect(() => compile(tsx, '/src/A.tsrx')).not.toThrow();
+		expect(errors(tsx, '/src/A.tsrx')).toEqual([]);
 		const ts = `"use strong";
-import { useRef, useEffect } from 'octane';
-export function usePreviousLog(value, log) { const last = useRef(value); useEffect(() => { log(last.current); last.current = value; }); }`;
-		expect(() => slotHooks(ts, '/src/use-previous-log.ts')).toThrow(HIDDEN);
+import { useState, useRef, useEffect } from 'octane';
+export function usePreviousLog(value, log) { const [count, setCount, getCount] = useState(0); const last = useRef(value); useEffect(() => { log(last.current, getCount()); last.current = value; }); return [count, setCount]; }`;
+		expect(() => slotHooks(ts, '/src/use-previous-log.ts')).not.toThrow();
+	});
+
+	// Strong requires cleanup for a listener only on a proven platform target, so
+	// a ref holds a host element only when a callback provably attaches one.
+	const listen = `useLayoutEffect(() => { element.current?.addEventListener('scroll', props.onScroll); });`;
+
+	it.each([
+		['an inline callback', '', '<div ref={(node) => { element.current = node; }} />'],
+		[
+			'a named callback',
+			'function attach(node) { element.current = node; }',
+			'<div ref={attach} />',
+		],
+		[
+			'an aliased callback and ref',
+			'const target = element; const attach = (node) => { target.current = node; }; const callback = attach;',
+			'<div ref={callback} />',
+		],
+		[
+			'a callback in an array',
+			'const attach = (node) => { element.current = node; };',
+			'<div ref={[attach, props.forwarded]} />',
+		],
+		[
+			'a conditional callback',
+			'const attach = (node) => { element.current = node; };',
+			'<div ref={props.enabled ? attach : null} />',
+		],
+		[
+			'a logical callback',
+			'const attach = (node) => { element.current = node; };',
+			'<div ref={props.enabled && attach} />',
+		],
+		[
+			'a callback with a node guard',
+			'const attach = (node) => { if (node) element.current = node; };',
+			'<div ref={attach} />',
+		],
+		[
+			'a callback that clears the ref when the node is absent',
+			'const attach = (node) => { if (node) element.current = node; else element.current = null; };',
+			'<div ref={attach} />',
+		],
+		[
+			'a callback with a stable node alias',
+			'const attach = (node) => { const target = node; element.current = target; };',
+			'<div ref={attach} />',
+		],
+		[
+			'a callback that returns a ref cleanup',
+			'',
+			'<div ref={(node) => { element.current = node; return () => { element.current = null; }; }} />',
+		],
+		[
+			'a callback in a template row',
+			'',
+			'<section>@for (const item of props.items; key item.id) { <div ref={(node) => { element.current = node; }} /> }</section>',
+		],
+		[
+			'a callback attached in a row that shadows its captured ref',
+			'const attach = (node) => { element.current = node; };',
+			'<section>@for (const element of props.items; key element.id) { <div ref={attach} /> }</section>',
+		],
+		[
+			'an outer callback alias used in a row that shadows the callback',
+			'const attach = (node) => { element.current = node; }; const alias = attach;',
+			'<section>@for (const attach of props.callbacks; key attach) { <div ref={alias} /> }</section>',
+		],
+		[
+			'an outer callback alias in an array used in a row that shadows the callback',
+			'const attach = (node) => { element.current = node; }; const first = attach; const alias = first;',
+			'<section>@for (const attach of props.callbacks; key attach) { <div ref={[alias, props.forwarded]} /> }</section>',
+		],
+		[
+			'an attached callback with an unrelated shadowed row alias used as an event',
+			'const attach = (node) => { element.current = node; };',
+			'<section><div ref={attach} /> @for (const attach of props.callbacks; key attach) { const alias = attach; <button onClick={alias} /> }</section>',
+		],
+		[
+			'an attached callback with two unrelated shadowed row aliases used as an event',
+			'const attach = (node) => { element.current = node; };',
+			'<section><div ref={attach} /> @for (const attach of props.callbacks; key attach) { const first = attach; const alias = first; <button onClick={alias} /> }</section>',
+		],
+		[
+			'an attached callback with a bare row alias used as an event',
+			'const attach = (node) => { element.current = node; };',
+			'<section><div ref={attach} /> @for (attach of props.callbacks; key attach) { const alias = attach; <button onClick={alias} /> }</section>',
+		],
+		[
+			'an attached callback with an unrelated row index alias used as an event',
+			'const attach = (node) => { element.current = node; };',
+			'<section><div ref={attach} /> @for (const item of props.items; index attach; key item) { const alias = attach; <button onClick={alias} /> }</section>',
+		],
+		[
+			'an attached callback with a catch reset alias used as an event',
+			'const attach = (node) => { element.current = node; };',
+			'<section><div ref={attach} /> @try { <div /> } @catch (error, attach) { const alias = attach; <button onClick={alias} /> }</section>',
+		],
+		[
+			'an attached callback with an unrelated JavaScript-scoped alias used as an event',
+			'const attach = (node) => { element.current = node; }; const event = (attach) => { const alias = attach; return alias; };',
+			'<section><div ref={attach} /><button onClick={event} /></section>',
+		],
+		[
+			'a callback using an outer ref alias in a row that shadows the ref',
+			'const alias = element;',
+			'<section>@for (const element of props.items; key element.id) { <div ref={(node) => { alias.current = node; }} /> }</section>',
+		],
+		[
+			'a callback in a try body when the catch binding shadows the ref',
+			'',
+			'<section>@try { <div ref={(node) => { element.current = node; }} /> } @catch (element) { <div /> }</section>',
+		],
+	])('treats a ref attached by %s as a host element', (_label, callback, output) => {
+		const source = app(`const element = useRef(null); ${callback} ${listen}`, output);
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(source, '/src/App.tsrx', { mode, strong: true })).toThrow(LEAK);
+		}
+		expect(errors(source)).toContain(LEAK);
+	});
+
+	it('treats a ref attached by a nearer JavaScript callback binding inside a shadowing template row as a host element', () => {
+		const source = app(
+			`const element = useRef(null); const attach = (node) => { element.current = node; }; ${listen}`,
+			'<section>@for (const attach of props.callbacks; key attach) { const render = () => { const attach = (node) => { element.current = node; }; const alias = attach; return <div ref={alias} />; }; {render()} }</section>',
+		);
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(source, '/src/App.tsrx', { mode, strong: true })).toThrow(LEAK);
+		}
+		expect(errors(source)).toContain(LEAK);
+	});
+
+	it('treats a ref attached through a nearer JavaScript alias inside a shadowing template row as a host element', () => {
+		const source = app(
+			`const element = useRef(null); ${listen}`,
+			'<section>@for (const local of props.items; key local) { const render = () => { const local = element; return <div ref={(node) => { local.current = node; }} />; }; {render()} }</section>',
+		);
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(source, '/src/App.tsrx', { mode, strong: true })).toThrow(LEAK);
+		}
+		expect(errors(source)).toContain(LEAK);
+	});
+
+	it('treats a callback-attached ref in a .tsrx component as a host element', () => {
+		const source = `import { useLayoutEffect, useRef } from 'octane';
+export function App(props) {
+  const element = useRef(null);
+  ${listen}
+  return <div ref={(node) => { element.current = node; }} />;
+}`;
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(source, '/src/App.tsrx', { mode, strong: true })).toThrow(LEAK);
+		}
+		expect(errors(source, '/src/App.tsrx')).toContain(LEAK);
+	});
+
+	it.each([
+		[
+			'a callback passed as a component ref',
+			'const attach = (node) => { element.current = node; };',
+			'<props.Input ref={attach} />',
+		],
+		[
+			'an unrelated event callback',
+			'const attach = (node) => { element.current = node; };',
+			'<div onClick={attach} />',
+		],
+		[
+			'a ref callback also used as an event handler',
+			'const attach = (node) => { element.current = node; };',
+			'<div ref={attach} onClick={attach} />',
+		],
+		[
+			'an alias of a ref callback used as an event handler',
+			'const attach = (node) => { element.current = node; }; const click = attach;',
+			'<div ref={attach} onClick={click} />',
+		],
+		[
+			'a ref callback invoked from an event handler',
+			'const attach = (node) => { element.current = node; }; const click = () => attach(props.value);',
+			'<div ref={attach} onClick={click} />',
+		],
+		[
+			'a callback passed to a different component prop',
+			'const attach = (node) => { element.current = node; };',
+			'<props.Input onReady={attach} />',
+		],
+		[
+			'a callback used only as a logical condition',
+			'const attach = (node) => { element.current = node; };',
+			'<div ref={attach && props.forwarded} />',
+		],
+		[
+			'a callback used only as a logical condition with a null result',
+			'const attach = (node) => { element.current = node; };',
+			'<div ref={attach && null} />',
+		],
+		[
+			'a callback in a statically unreachable ref branch',
+			'const attach = (node) => { element.current = node; };',
+			'<div ref={false ? attach : null} />',
+		],
+		[
+			'a callback that writes an unrelated value',
+			'',
+			'<div ref={(node) => { element.current = props.value; }} />',
+		],
+		[
+			'a callback that stores a node property instead of the node',
+			'',
+			'<div ref={(node) => { element.current = node?.value; }} />',
+		],
+		[
+			'a callback that overwrites the node with another value',
+			'',
+			'<div ref={(node) => { element.current = node; element.current = props.value; }} />',
+		],
+		[
+			'a callback that writes an unknown property of the ref',
+			'',
+			'<div ref={(node) => { element.current = node; element[props.key] = props.value; }} />',
+		],
+		[
+			'a callback that deletes the ref value',
+			'',
+			'<div ref={(node) => { element.current = node; delete element.current; }} />',
+		],
+		[
+			'a callback that destructures another value into the ref',
+			'',
+			'<div ref={(node) => { element.current = node; ({ value: element.current } = props); }} />',
+		],
+		[
+			'a callback that writes to the ref in a nested microtask',
+			'',
+			'<div ref={(node) => { element.current = node; queueMicrotask(() => { element.current = props.value; }); }} />',
+		],
+		[
+			'a callback that writes to the ref in a nested immediate function',
+			'',
+			'<div ref={(node) => { element.current = node; (() => { element.current = props.value; })(); }} />',
+		],
+		[
+			'a callback that uses the ref as a loop assignment target',
+			'',
+			'<div ref={(node) => { element.current = node; for (element.current of props.values) {} }} />',
+		],
+		[
+			'a returned ref cleanup that writes an unrelated value',
+			'',
+			'<div ref={(node) => { element.current = node; return () => { element.current = props.value; }; }} />',
+		],
+		[
+			'a callback whose ref assignment follows a return',
+			'const attach = (node) => { return; element.current = node; };',
+			'<div ref={attach} onClick={() => { element.current = props.value; }} />',
+		],
+		[
+			'a callback whose ref assignment is in an unreachable branch',
+			'const attach = (node) => { if (false) element.current = node; };',
+			'<div ref={attach} onClick={() => { element.current = props.value; }} />',
+		],
+		[
+			'a callback that stores a later parameter',
+			'',
+			'<div ref={(node, value) => { element.current = value; }} />',
+		],
+		[
+			'a callback that reassigns its parameter',
+			'const attach = (node) => { node = props.value; element.current = node; };',
+			'<div ref={attach} />',
+		],
+		[
+			'a callback that reassigns a node alias',
+			'const attach = (node) => { let target = node; target = props.value; element.current = target; };',
+			'<div ref={attach} />',
+		],
+		[
+			'a callback that is reassigned',
+			'let attach = (node) => { element.current = node; }; if (props.other) attach = props.other;',
+			'<div ref={attach} />',
+		],
+		[
+			'a deferred nested callback',
+			'const attach = (node) => { queueMicrotask(() => { element.current = node; }); };',
+			'<div ref={attach} />',
+		],
+		[
+			'an async callback after a yield',
+			'const attach = async (node) => { await Promise.resolve(); element.current = node; };',
+			'<div ref={attach} />',
+		],
+		[
+			'an uncalled nested callback',
+			'const attach = (node) => { function save() { element.current = node; } };',
+			'<div ref={attach} />',
+		],
+		[
+			'a shadowed ref',
+			'const attach = (node) => { const element = props.other; element.current = node; };',
+			'<div ref={attach} />',
+		],
+		[
+			'a ref shadowed by a template row alias',
+			'',
+			'<section>@for (const element of props.items; key element.id) { <div ref={(node) => { element.current = node; }} /> }</section>',
+		],
+		[
+			'a ref alias shadowed by a template row alias',
+			'const alias = element;',
+			'<section>@for (const alias of props.items; key alias.id) { <div ref={(node) => { alias.current = node; }} /> }</section>',
+		],
+		[
+			'an alias of a shadowing template row value',
+			'',
+			'<section>@for (const element of props.items; key element.id) { <div ref={(node) => { const actual = element; actual.current = node; }} /> }</section>',
+		],
+		[
+			'a ref shadowed by a template catch binding',
+			'',
+			'<section>@try { <div /> } @catch (element) { <div ref={(node) => { element.current = node; }} /> }</section>',
+		],
+		[
+			'an alias of a shadowed row callback',
+			'const attach = (node) => { element.current = node; };',
+			'<section>@for (const attach of props.callbacks; key attach) { const alias = attach; <div ref={alias} /> }</section>',
+		],
+		[
+			'two aliases of a shadowed row callback',
+			'const attach = (node) => { element.current = node; };',
+			'<section>@for (const attach of props.callbacks; key attach) { const first = attach; const second = first; <div ref={second} /> }</section>',
+		],
+		[
+			'an alias of a shadowed row callback in a conditional ref array',
+			'const attach = (node) => { element.current = node; };',
+			'<section>@for (const attach of props.callbacks; key attach) { const alias = attach; <div ref={props.enabled ? [alias, props.forwarded] : null} /> }</section>',
+		],
+		[
+			'a nearer JavaScript-scoped callback reused as an event in a shadowing row',
+			'const attach = (node) => { element.current = node; };',
+			'<section>@for (const attach of props.callbacks; key attach) { const render = () => { const attach = (node) => { element.current = node; }; const alias = attach; return <div ref={alias} onClick={attach} />; }; {render()} }</section>',
+		],
+		[
+			'a nearer JavaScript-scoped alias reused as an event in a shadowing row',
+			'const attach = (node) => { element.current = node; };',
+			'<section><div ref={attach} /> @for (const alias of props.callbacks; key alias) { const render = () => { const alias = attach; return <button onClick={alias} />; }; {render()} }</section>',
+		],
+		[
+			'an alias of a shadowed catch callback',
+			'const attach = (node) => { element.current = node; };',
+			'<section>@try { <div /> } @catch (attach) { const alias = attach; <div ref={alias} /> }</section>',
+		],
+		[
+			'an alias of a shadowed catch reset callback',
+			'const attach = (node) => { element.current = node; };',
+			'<section>@try { <div /> } @catch (error, attach) { const alias = attach; <div ref={alias} /> }</section>',
+		],
+		[
+			'an alias of a bare row callback',
+			'const attach = (node) => { element.current = node; };',
+			'<section>@for (attach of props.callbacks; key attach) { const alias = attach; <div ref={alias} /> }</section>',
+		],
+		[
+			'an alias of a row index',
+			'const attach = (node) => { element.current = node; };',
+			'<section>@for (const item of props.items; index attach; key item) { const alias = attach; <div ref={alias} /> }</section>',
+		],
+	])('does not treat a ref attached by %s as a host element', (_label, callback, output) => {
+		const source = app(`const element = useRef(null); ${callback} ${listen}`, output);
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(source, '/src/App.tsrx', { mode, strong: true })).not.toThrow();
+		}
+		expect(errors(source)).toEqual([]);
+	});
+
+	it('detects a leaked listener on a callback-attached host ref', () => {
+		const source = app(
+			`const element = useRef(null); useEffect(() => { const node = element.current; if (!node) return; node.addEventListener('scroll', () => props.log('scroll')); });`,
+			'<div ref={(node) => { element.current = node; }} />',
+		);
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(source, '/src/App.tsrx', { mode, strong: true })).toThrow(LEAK);
+		}
+		expect(errors(source)).toContain(LEAK);
+	});
+
+	it('accepts cleanup of a listener on a callback-attached host ref', () => {
+		const source = app(
+			`const element = useRef(null); useEffect(() => { const node = element.current; if (!node) return; const onScroll = () => props.log('scroll'); node.addEventListener('scroll', onScroll); return () => node.removeEventListener('scroll', onScroll); });`,
+			'<div ref={(node) => { element.current = node; }} />',
+		);
+		for (const mode of ['client', 'server'] as const) {
+			const standard = compile(source, '/src/App.tsrx', { mode });
+			const strong = compile(source, '/src/App.tsrx', { mode, strong: true });
+			expect(strong.code).toBe(standard.code);
+		}
+		expect(errors(source)).toEqual([]);
 	});
 
 	it('names the snapshot and Effect Event replacements', () => {
 		const result = compileToVolarMappings(
 			app(
-				`const first = useRef(true); useEffect(() => { if (first.current) { first.current = false; return; } props.track(props.value); });`,
+				`useEffect(() => { if (didInit) return; didInit = true; props.init(); });`,
+				'<div />',
+				'let didInit = false;',
 			),
 			'/src/App.tsrx',
 			{ strong: true },
@@ -1846,7 +2304,7 @@ export function usePreviousLog(value, log) { const last = useRef(value); useEffe
 
 describe('Strong effect resource cleanup', () => {
 	const app = (setup: string) => `
-import { useState, useEffect, useLayoutEffect, useRef } from 'octane';
+import { useState, useEffect, useLayoutEffect, useEffectEvent, useRef } from 'octane';
 export function App(props) @{
   const [width, setWidth] = useState(0);
   const element = useRef(null);
@@ -2062,6 +2520,22 @@ export function App(props) @{
 			'a helper removal for another handler',
 			`function listen(target, type, handler) { target.addEventListener(type, handler); } function unlisten(target, type, handler) { target.removeEventListener(type, handler); } useEffect(() => { const first = () => setWidth(1); const second = () => setWidth(2); listen(window, 'resize', first); return () => unlisten(window, 'resize', second); });`,
 		],
+		[
+			'an Effect Event remover the effect discards',
+			`const start = useEffectEvent(() => { const onResize = () => setWidth(1); window.addEventListener('resize', onResize); return () => window.removeEventListener('resize', onResize); }); useEffect(() => { start(); });`,
+		],
+		[
+			'an Effect Event remover without capture',
+			`const start = useEffectEvent(() => { const onResize = () => setWidth(1); window.addEventListener('resize', onResize, true); return () => window.removeEventListener('resize', onResize, false); }); useLayoutEffect(() => start());`,
+		],
+		[
+			'an Effect Event remover for another handler',
+			`const start = useEffectEvent((handler, other) => { window.addEventListener('resize', handler); return () => window.removeEventListener('resize', other); }); useEffect(() => start(() => setWidth(1), () => setWidth(2)));`,
+		],
+		[
+			'a target passed to an Effect Event',
+			`const listen = useEffectEvent((target) => { target.addEventListener('resize', () => setWidth(1)); }); useEffect(() => { listen(window); });`,
+		],
 	])('rejects %s without release', (_label, setup) => {
 		rejects(app(setup), LEAK);
 	});
@@ -2253,6 +2727,26 @@ export function App(props) @{
 			'a reset global handler property',
 			`useEffect(() => { onresize = () => setWidth(1); return () => { window.onresize = null; }; });`,
 		],
+		[
+			'a remover returned by an Effect Event',
+			`const start = useEffectEvent(() => { const onResize = () => setWidth(1); window.addEventListener('resize', onResize); return () => window.removeEventListener('resize', onResize); }); useLayoutEffect(() => start());`,
+		],
+		[
+			'an Effect Event remover stored before it is returned',
+			`const start = useEffectEvent(() => { const onResize = () => setWidth(1); window.addEventListener('resize', onResize, { capture: true }); return () => window.removeEventListener('resize', onResize, true); }); useEffect(() => { const stop = start(); return stop; });`,
+		],
+		[
+			'a remover returned by an Effect Event for the handler passed to it',
+			`const start = useEffectEvent((handler) => { window.addEventListener('resize', handler); return () => window.removeEventListener('resize', handler); }); useEffect(() => { const onResize = () => setWidth(1); return start(onResize); });`,
+		],
+		[
+			'a listener added by an Effect Event and removed by the effect',
+			`const listen = useEffectEvent((handler) => { window.addEventListener('resize', handler); }); useEffect(() => { const onResize = () => setWidth(1); listen(onResize); return () => window.removeEventListener('resize', onResize); });`,
+		],
+		[
+			'a controller passed to an Effect Event',
+			`const listen = useEffectEvent((controller) => { window.addEventListener('resize', () => setWidth(1), { signal: controller.signal }); }); useEffect(() => { const controller = new AbortController(); listen(controller); return () => controller.abort(); });`,
+		],
 	])('accepts %s', (_label, setup) => {
 		accepts(app(setup));
 	});
@@ -2280,15 +2774,50 @@ export function App(props) @{
 		]);
 	});
 
-	it('enforces TSX components and plain TypeScript custom hooks', () => {
+	it('enforces .tsrx components and plain TypeScript custom hooks', () => {
 		const tsx = `"use strong";
 import { useState, useEffect, useRef } from 'octane';
 export function A() { const r = useRef(null); const [h, setH] = useState(0); useEffect(() => { new ResizeObserver(([e]) => setH(e.contentRect.height)).observe(r.current); }); return <div ref={r}>{h}</div>; }`;
-		expect(() => compile(tsx, '/src/A.tsx')).toThrow(LEAK);
+		expect(() => compile(tsx, '/src/A.tsrx')).toThrow(LEAK);
 		const ts = `"use strong";
 import { useState, useEffect } from 'octane';
 export function useWidth() { const [w, setW] = useState(0); useEffect(() => { window.addEventListener('resize', () => setW(window.innerWidth)); }); return w; }`;
 		expect(() => slotHooks(ts, '/src/use-width.ts')).toThrow(LEAK);
+	});
+
+	it('follows a disposer returned through an Effect Event in every compiler path', () => {
+		const hook = (remove: string) => `import { useEffectEvent, useLayoutEffect } from 'octane';
+export function usePageEvents() {
+  const start = useEffectEvent(() => {
+    const handler = () => {};
+    window.addEventListener('pagehide', handler);
+    return () => ${remove};
+  });
+  useLayoutEffect(() => start());
+}`;
+		const released = hook(`window.removeEventListener('pagehide', handler)`);
+		const leaked = hook(`window.removeEventListener('pagehide', handler, true)`);
+		for (const mode of ['client', 'server'] as const) {
+			const options = { mode, strong: true, dev: false, hmr: false };
+			expect(() => compile(released, '/src/page-events.tsrx', options)).not.toThrow();
+			expect(() => compile(leaked, '/src/page-events.tsrx', options)).toThrow(LEAK);
+		}
+		expect(errors(released, '/src/page-events.tsrx')).toEqual([]);
+		expect(errors(leaked, '/src/page-events.tsrx')).toEqual([LEAK]);
+	});
+
+	it('follows a disposer returned through an Effect Event from a custom hook', () => {
+		accepts(`import { useEffectEvent, useLayoutEffect } from 'octane';
+function usePageHide(onHide) {
+  return useEffectEvent(() => {
+    window.addEventListener('pagehide', onHide);
+    return () => window.removeEventListener('pagehide', onHide);
+  });
+}
+export function usePage(props) {
+  const start = usePageHide(props.onHide);
+  useLayoutEffect(() => start());
+}`);
 	});
 });
 
@@ -2347,17 +2876,19 @@ export function useWidth() {
 	it('publishes each new effect code as a source-located editor error', () => {
 		const result = compileToVolarMappings(
 			`"use strong";
-import { useState, useEffect, useRef } from 'octane';
+import { useState, useEffect } from 'octane';
 import { api } from './api';
 export function App(props) @{
-  const [value, setValue, getValue] = useState(0);
-  const last = useRef(0);
+  const [value, setValue] = useState(0);
+  const label = props.label;
   useEffect(() => { queueMicrotask(() => setValue(1)); });
   useEffect(() => { api.get(props.id).then(setValue); });
-  useEffect(() => { props.log(getValue(), last.current); });
+  useEffect(() => { props.log(hits); });
   useEffect(() => { setInterval(() => setValue(2), 1000); });
-  <div />
-}`,
+  <div title={label}>{value as string}</div>
+}
+let hits = 0;
+export function hit() { hits++; }`,
 			'/src/App.tsrx',
 		);
 		const lines = Object.fromEntries(

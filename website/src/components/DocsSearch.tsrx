@@ -1,7 +1,9 @@
+'use strong';
+
 // Site search keeps the established header entry point and docs snippets, then
 // adds typed ecosystem results from the generated browser index.
 import { createPortal, useEffect, useRef, useState } from 'octane';
-import { useNavigate } from '@octanejs/tanstack-router';
+import { useNavigate } from '@octanejs/tanstack-router/compiled';
 import {
 	loadSiteSearchIndex,
 	searchSite,
@@ -33,18 +35,17 @@ function scrollToAnchor(id: string) {
 
 function SearchDialog(props: DialogProps) @{
 	const [query, setQuery] = useState('');
-	const [active, setActive] = useState(0);
+	const [active, setActive, getActive] = useState(0);
 	const [index, setIndex] = useState<SiteSearchIndex | null>(null);
 	const [indexFailed, setIndexFailed] = useState(false);
-	const [loadAttempt, setLoadAttempt] = useState(0);
+	const [indexRequest, setIndexRequest] = useState(() => loadSiteSearchIndex());
 	const inputEl = useRef<HTMLInputElement | null>(null);
 	const navigate = useNavigate();
-	const results: SiteSearchResult[] =
-		index ? searchSite(index, query) : [];
+	const results: SiteSearchResult[] = index ? searchSite(index, query) : [];
 
 	useEffect(() => {
 		let live = true;
-		loadSiteSearchIndex().then(
+		indexRequest.then(
 			(loaded) => {
 				if (!live) return;
 				setIndex(loaded);
@@ -58,7 +59,7 @@ function SearchDialog(props: DialogProps) @{
 		return () => {
 			live = false;
 		};
-	}, [loadAttempt]);
+	});
 
 	useEffect(() => {
 		const previous = document.body.style.overflow;
@@ -74,12 +75,10 @@ function SearchDialog(props: DialogProps) @{
 		if (result.type === 'docs') {
 			const group = result.group;
 			const headRow = nextRow();
-			const lines = group.lines.map(
-				(line) => ({
-					...line,
-					row: nextRow(),
-				}),
-			);
+			const lines = group.lines.map((line) => ({
+				...line,
+				row: nextRow(),
+			}));
 			return {
 				type: 'docs' as const,
 				key: 'docs:' + group.key,
@@ -102,8 +101,7 @@ function SearchDialog(props: DialogProps) @{
 		const entity = result.match.entity;
 		const primaryRow = nextRow();
 		const packageRow = nextRow();
-		const guideRow =
-			entity.kind === 'framework-integration' ? nextRow() : undefined;
+		const guideRow = entity.kind === 'framework-integration' ? nextRow() : undefined;
 		return {
 			type: 'entity' as const,
 			key: 'entity:' + entity.id,
@@ -159,11 +157,9 @@ function SearchDialog(props: DialogProps) @{
 	const step = (delta: number) => {
 		const count = targetCount;
 		if (!count) return;
-		setActive((current) => {
-			const next = (current + delta + count) % count;
-			reveal(next);
-			return next;
-		});
+		const next = (getActive() + delta + count) % count;
+		setActive(next);
+		reveal(next);
 	};
 
 	const activate = (row: number) => {
@@ -179,7 +175,7 @@ function SearchDialog(props: DialogProps) @{
 	const retryIndex = () => {
 		setIndex(null);
 		setIndexFailed(false);
-		setLoadAttempt((attempt) => attempt + 1);
+		setIndexRequest(loadSiteSearchIndex());
 	};
 
 	const onKeyDown = (event: KeyboardEvent) => {
@@ -513,9 +509,9 @@ function SearchDialog(props: DialogProps) @{
 										onFocus={() => setActive(card.primaryRow)}
 										onClick={() => goToEntity(card.entity)}
 									>
-										<span class="search-type">{ecosystemEntityTypeLabel(
-											card.entity,
-										) as string}</span>
+										<span class="search-type">
+											{ecosystemEntityTypeLabel(card.entity) as string}
+										</span>
 										<span class="search-title">{card.entity.title as string}</span>
 										<code class="search-package">{card.entity.packageName as string}</code>
 										<span class="search-context">
@@ -542,7 +538,8 @@ function SearchDialog(props: DialogProps) @{
 											Package guide ↗
 										</a>
 										@if (
-											card.entity.kind === 'framework-integration' && card.guideRow !== undefined
+											card.entity.kind === 'framework-integration' &&
+											card.guideRow !== undefined
 										) {
 											<a
 												class={[
@@ -572,8 +569,12 @@ function SearchDialog(props: DialogProps) @{
 									rel={card.result.owner === 'Octane' ? undefined : 'noreferrer'}
 									role="option"
 									aria-selected={card.row === active}
-									aria-label={'Open external documentation for ' + card.result.title + ' by ' +
-										card.result.owner}
+									aria-label={
+										'Open external documentation for ' +
+										card.result.title +
+										' by ' +
+										card.result.owner
+									}
 									data-search-row={card.row}
 									onMouseEnter={() => setActive(card.row)}
 									onFocus={() => setActive(card.row)}
@@ -639,7 +640,9 @@ function SearchDialog(props: DialogProps) @{
 						@if (indexFailed) {
 							<>
 								<span>Search could not load.</span>
-								<button type="button" class="search-retry" onClick={retryIndex}>Retry</button>
+								<button type="button" class="search-retry" onClick={retryIndex}>
+									Retry
+								</button>
 							</>
 						} @else if (!index) {
 							<span>Loading the search index…</span>
@@ -682,9 +685,10 @@ export function DocsSearch() @{
 			const target = event.target;
 			const typing =
 				target instanceof HTMLElement &&
-					(target.isContentEditable || target.contentEditable === 'true' ||
-						target.closest('[contenteditable]:not([contenteditable="false"])') !== null ||
-						/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+				(target.isContentEditable ||
+					target.contentEditable === 'true' ||
+					target.closest('[contenteditable]:not([contenteditable="false"])') !== null ||
+					/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
 			if ((event.key === 'k' || event.key === 'K') && (event.metaKey || event.ctrlKey)) {
 				event.preventDefault();
 				if (open) close();

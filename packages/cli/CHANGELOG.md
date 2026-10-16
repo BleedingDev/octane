@@ -1,5 +1,67 @@
 # @octanejs/cli
 
+## 0.2.3
+
+### Patch Changes
+
+- d8e2d9f: Add `octane analyze --strong-dependencies`. It lists, by package, the Octane modules that Strong modules import from other packages, directly or through re-exports, which compile without Strong mode. It also lists the `octane/react` (ReactCompat) boundaries those imports reach. The report never fails the run.
+- a133016: `octane analyze` no longer reads an `import` or `export` written inside a template literal or a comment, such as a code sample, as a real statement. A sample that mentions `octane/react` no longer counts as a ReactCompat boundary, and a module that mentions `octane` only in a sample no longer counts toward Strong coverage. `--strong-dependencies` also follows an import that a module only re-exports under another name, through `export const X = ns.Member`, `export { binding as X }`, or `export default binding`. It now reports the module that defines the component, not the entry that renames it.
+- 74f22dd: `octane analyze --strong-dependencies` now follows the imports of every Strong module it reaches in a dependency, not only those of the project's own Strong modules. A non-Strong module, or an `octane/react` boundary, behind a Strong dependency module is reported. Previously the report stopped at the first Strong layer, so an empty report did not prove that everything the project renders is Strong.
+
+## 0.2.2
+
+### Patch Changes
+
+- 3557100: Point `octane analyze` parse failures at their line and column, and drop the
+  parser's own `(line:column)` from the message.
+
+  A failure whose `loc` is a `{ start, end }` range was reported at 1:1. That
+  covers template diagnostics such as two outputs in one code block, and every
+  parse failure from `@tsrx/oxc` before 0.20. A syntax error that ends its message
+  with its position repeated it, as in `2:11  Unexpected token (2:10)`.
+
+## 0.2.1
+
+### Patch Changes
+
+- 8996380: Move `@tsrx/oxc` from a dependency to an optional peer. Projects that use the
+  Octane compiler in Node, including through Vite, Rspack, or Rsbuild, must
+  install `@tsrx/oxc@0.16.0` in the project using the compiler. Applications that
+  use only the Octane runtime do not need it.
+
+  The Octane CLI installs the compatible compiler peer when creating or setting
+  up an application.
+
+## 0.2.0
+
+### Minor Changes
+
+- 6651f44: `octane analyze` reports every Strong violation in a file instead of the first, and analyzes `.tsx` modules whose JSX goes to Octane by default. `--strong-preview` compiles every module as if Strong mode were on and counts what it would reject by code, without failing on modules that are not Strong yet. `--fix` applies the compiler's suggested edits, such as React's lazy ref initialization to `useLazyRef` and `useMemo`/`useCallback` to plain declarations. `octane explain` also explains Strong diagnostic codes, with their replacements and migration recipes.
+
+### Patch Changes
+
+- 6651f44: Strong mode now rejects a synchronous state update in a host element's callback ref with `OCTANE_STRONG_REF_STATE_UPDATE`. Octane calls a callback ref while the element commits, before paint, so the check follows the effect setup rules. It covers inline and local functions, a state setter passed as the ref, and functions in a `ref={[...]}` list. When the callback copies a DOM measurement into state, the error names `useLayoutSnapshot`. Updates the ref defers to `requestAnimationFrame`, a timer with a positive delay, or an observer or event listener stay legal, and a component's `ref` prop is not checked. `octane explain` and the MCP server's `octane_strong_explain` describe the new code and its migration recipe.
+
+## 0.1.0
+
+### Minor Changes
+
+- 09565b4: Add a Strong coverage baseline to `octane analyze`, and analyze modules under `compiler.strong`.
+
+  - `octane analyze --strong-baseline init` records every module that compiles
+    without Strong mode in `octane-strong-baseline.json`. While the file exists,
+    every run fails on a module that is neither Strong nor listed
+    (`OCTANE_STRONG_COVERAGE_REGRESSION`), such as one whose `"use strong"` was
+    deleted, and on a listed name that is now Strong, gone, or no longer compiled
+    by Octane (`OCTANE_STRONG_COVERAGE_STALE`). `--strong-baseline update` only
+    removes names, so a new exception is always a reviewed edit to the file.
+  - `octane analyze` now reads `compiler.strong` from `octane.config.ts` and
+    analyzes the modules it reaches in Strong mode, as the build does. Before,
+    those modules were analyzed without their Strong diagnostics.
+  - A compiler error that carries its own code, such as a Strong rule, is
+    reported under that code instead of `OCTANE_PARSE_ERROR`, so `--code` can
+    select it.
+
 ## 0.0.12
 
 ### Patch Changes

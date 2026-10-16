@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { build, type Plugin } from 'vite';
+import { build, createLogger, createServer, type Plugin } from 'vite';
 import { createTempProject } from '../../octane/tests/_temp-project.js';
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -44,7 +44,14 @@ export function Counter() @{
   'use dom bindings';
   <button type="button" onClick={increment}>{count$}</button>
 }`,
-	'src/Header.tsrx': `export function Header() @{ <header><h1>Islands</h1></header> }`,
+	// Static output may interpolate plain-module values and assets.
+	'src/copy.ts': `export const tagline = 'Server-rendered shell';`,
+	'src/logo.svg': `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>`,
+	'src/Header.tsrx': `import { tagline } from './copy.ts';
+import logo from './logo.svg';
+export function Header() @{
+  <header><img src={logo} alt="" /><h1>Islands</h1><p>{tagline as string}</p></header>
+}`,
 	'src/App.tsrx': `import { Hydrate } from 'octane';
 import { interaction } from 'octane/hydration';
 import { Counter } from './Counter.tsrx';
@@ -59,10 +66,13 @@ export function App() @{
 };
 
 interface BuiltGraph {
-	chunks: Map<string, { imports: string[]; modules: string[]; facade: string | null }>;
+	chunks: Map<
+		string,
+		{ imports: string[]; modules: string[]; rendered: string[]; facade: string | null }
+	>;
 }
 
-async function buildProject(overrides: Record<string, string> = {}) {
+function writeProject(overrides: Record<string, string> = {}) {
 	const project = createTempProject('octane-vite-islands');
 	projects.push(project);
 	const root = project.root;
@@ -78,6 +88,11 @@ async function buildProject(overrides: Record<string, string> = {}) {
 	link('octane', path.join(repoRoot, 'packages/octane'));
 	link('@octanejs/vite-plugin', packageRoot);
 	link('vite', path.join(packageRoot, 'node_modules/vite'));
+	return root;
+}
+
+async function buildProject(overrides: Record<string, string> = {}) {
+	const root = writeProject(overrides);
 	const graph: BuiltGraph = { chunks: new Map() };
 	// Observe the client graph the browser would load; the server build is separate.
 	const probe: Plugin = {
@@ -89,6 +104,9 @@ async function buildProject(overrides: Record<string, string> = {}) {
 				graph.chunks.set(output.fileName, {
 					imports: output.imports,
 					modules: output.moduleIds,
+					rendered: Object.entries(output.modules)
+						.filter(([, module]) => module.renderedLength > 0)
+						.map(([id]) => id),
 					facade: output.facadeModuleId,
 				});
 			}
@@ -116,6 +134,16 @@ describe('islands-only routes', { timeout: 180_000 }, () => {
 		const renderer = /packages\/octane\/src\/(?:index|runtime|internal\/client)\.ts$/;
 		const staticModules = [...reached].flatMap((file) => graph.chunks.get(file)!.modules);
 		expect(staticModules.filter((id) => renderer.test(id))).toEqual([]);
+		// This page's island uses interaction(), so the idle(), visible() and media()
+		// triggers stay out of its bootstrap; an island that needs one loads them.
+		const strategies =
+			/packages\/octane\/src\/hydration\/(?:idle|visible|media|independent-strategies|strategy-attributes)\.ts$/;
+		expect(staticModules.filter((id) => strategies.test(id))).toEqual([]);
+		// Control: the build still emits them, so the check above cannot pass
+		// because the pattern stopped matching.
+		expect(
+			[...graph.chunks.values()].some((chunk) => chunk.modules.some((id) => strategies.test(id))),
+		).toBe(true);
 		// Control: the full entry of the same build does load the renderer.
 		const fullEntry = [...graph.chunks].find(
 			([, chunk]) => chunk.facade === '\0virtual:octane-hydrate',
@@ -150,7 +178,62 @@ describe('islands-only routes', { timeout: 180_000 }, () => {
 		expect(full).toContain('rel="modulepreload"');
 		// Both responses render the same server shell and island.
 		expect(islands).toContain('<h1>Islands</h1>');
+		expect(islands).toContain('Server-rendered shell');
 		expect(islands).toContain('data-octane-hydrate-independent');
+	});
+
+	// Only the renderer consumes the signal Action frame and transition coordinator.
+	// An islands-only app's pages load signals without it, so its client build moves
+	// them from the signal graph into the renderer. A mixed app keeps them with the
+	// graph, so its renderer pages without signals carry nothing.
+	it('moves signal Actions into the renderer only when every route is islands', async () => {
+		const frame = /packages\/octane\/src\/signals\/transition-(?:action|coordinator)\.ts$/;
+		const placement = (graph: BuiltGraph) => {
+			const loads = (module: RegExp) => {
+				const reached = new Set<string>();
+				const visit = (file: string) => {
+					if (reached.has(file)) return;
+					reached.add(file);
+					for (const imported of graph.chunks.get(file)?.imports ?? []) visit(imported);
+				};
+				for (const [file, chunk] of graph.chunks)
+					if (chunk.rendered.some((id) => module.test(id))) visit(file);
+				return [...reached].some((file) =>
+					graph.chunks.get(file)!.rendered.some((id) => frame.test(id)),
+				);
+			};
+			return {
+				withSignals: loads(/packages\/octane\/src\/signals\/graph\.ts$/),
+				withRenderer: loads(/packages\/octane\/src\/runtime\.ts$/),
+			};
+		};
+		// Give the placement oracle an actual signal Action consumer in both builds.
+		const transitionCounter = {
+			'src/Counter.tsrx': `import { startTransition } from 'octane';
+import { count$, increment } from './state.tsrx';
+export function Counter() @{
+  'use dom bindings';
+  <button type="button" onClick={() => startTransition(increment)}>{count$}</button>
+}`,
+		};
+		const mixed = await buildProject(transitionCounter);
+		expect(placement(mixed.graph)).toEqual({ withSignals: true, withRenderer: false });
+		const islandsOnly = await buildProject({
+			...transitionCounter,
+			'octane.config.ts': `import { defineConfig, RenderRoute } from '@octanejs/vite-plugin';
+export default defineConfig({
+	router: {
+		preHydrate: '/src/pre-hydrate.ts',
+		routes: [new RenderRoute({ path: '/', entry: ['App', '/src/App.tsrx'], hydrate: 'islands' })],
+	},
+});`,
+		});
+		expect(placement(islandsOnly.graph)).toEqual({ withSignals: false, withRenderer: true });
+		const { handler } = await import(
+			pathToFileURL(path.join(islandsOnly.root, 'dist/server/entry.js')).href
+		);
+		const html = await (await handler(new Request('http://localhost/'))).text();
+		expect(html).toContain('data-octane-hydrate-independent');
 	});
 
 	it('rejects a shell that needs client work', async () => {
@@ -159,6 +242,85 @@ describe('islands-only routes', { timeout: 180_000 }, () => {
 				'src/Header.tsrx': `export function Header() @{ <header><button onClick={() => {}}>Menu</button></header> }`,
 			}),
 		).rejects.toThrow(/hydrate: 'islands'.*Header\.tsrx:1:.*"onClick" needs client code/s);
+	});
+
+	// Dev serves the route either way; without a warning its interactive shell
+	// would be silently inert there until the first production build failed.
+	it('warns in dev when a shell needs client work, and keeps serving it', async () => {
+		const root = writeProject({
+			'src/Header.tsrx': `export function Header() @{ <header><button onClick={() => {}}>Menu</button></header> }`,
+		});
+		const warnings: string[] = [];
+		const logger = createLogger('silent');
+		logger.warn = (message) => {
+			warnings.push(message);
+		};
+		const server = await createServer({
+			root,
+			customLogger: logger,
+			server: { host: '127.0.0.1', port: 0, hmr: false, ws: false },
+		});
+		try {
+			await server.listen();
+			const address = server.httpServer?.address();
+			if (!address || typeof address !== 'object') throw new Error('dev server has no address');
+			for (let request = 0; request < 2; request++) {
+				const response = await fetch(`http://127.0.0.1:${address.port}/`);
+				expect(response.status).toBe(200);
+				expect(await response.text()).toContain('Menu');
+			}
+			// The source check names the build failure; the render witness may also report the site.
+			const source = warnings.filter((message) => message.includes('needs client code'));
+			expect(source).toHaveLength(1);
+			expect(source[0]).toMatch(
+				/hydrate: 'islands'.*Header\.tsrx:1:.*"onClick" needs client code/s,
+			);
+		} finally {
+			await server.close();
+		}
+	});
+
+	// The build checks the shell's source, which cannot follow a plain helper's
+	// createElement call. A dev render reaches the element itself and warns,
+	// once, while the route keeps serving; the island's own handler and live
+	// binding, and the same shell on a full route, stay silent.
+	it('warns in dev when a rendered shell needs client work its source hides', async () => {
+		const root = writeProject({
+			'src/menu.ts': `import { createElement } from 'octane';
+export function menuButton(label: string) {
+	return createElement('button', { type: 'button', onClick: () => {} }, label);
+}`,
+			'src/Header.tsrx': `import { menuButton } from './menu.ts';
+export function Header() @{ <header><h1>Islands</h1>{menuButton('Menu')}</header> }`,
+		});
+		const warnings: string[] = [];
+		const logger = createLogger('silent');
+		logger.warn = (message) => {
+			warnings.push(message);
+		};
+		const server = await createServer({
+			root,
+			customLogger: logger,
+			server: { host: '127.0.0.1', port: 0, hmr: false, ws: false },
+		});
+		try {
+			await server.listen();
+			const address = server.httpServer?.address();
+			if (!address || typeof address !== 'object') throw new Error('dev server has no address');
+			for (const route of ['/', '/', '/full']) {
+				const response = await fetch(`http://127.0.0.1:${address.port}${route}`);
+				expect(response.status).toBe(200);
+				expect(await response.text()).toContain('Menu</button>');
+			}
+			const witnesses = warnings.filter((message) => message.includes('outside an independent'));
+			expect(witnesses).toEqual([
+				expect.stringMatching(
+					/RenderRoute "\/" uses hydrate: 'islands', but its shell rendered "onClick" on <button> in Header outside an independent <Hydrate>/,
+				),
+			]);
+		} finally {
+			await server.close();
+		}
 	});
 
 	it('rejects a preHydrate hook that reaches the renderer', async () => {

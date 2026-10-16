@@ -28,6 +28,33 @@ const LINKS = `export function Links(props) @{
   </nav>
 }`;
 
+// List numbering and row spans are presentation, not form state.
+const NUMBERED = `export function Numbered(props) @{
+  'use dom bindings';
+  <section>
+    <ol start={props.start}><li value={props.value}>Alpha</li></ol>
+    <table><tbody><tr><td rowspan={props.rows}>Cell</td></tr></tbody></table>
+  </section>
+}`;
+
+// Fixed text leaves must retain the server topology before adoption.
+const PANEL = `export function Panel(props) @{
+  'use dom bindings';
+  <div hidden={props.hidden}>
+    <span>{props.message as string}</span>
+    <button type="button" hidden={props.hidden}>{props.label as string}</button>
+  </div>
+}`;
+// Unbound children leave the bound targets addressed rather than positional.
+const FEED = `import { unbound } from 'octane/behavior';
+export function Feed(props) @{
+  'use dom bindings';
+  <section>
+    <header><h2>{props.title as string}</h2><hr /></header>
+    {unbound(props.children)}
+  </section>
+}`;
+
 type View = DomBindings.CompiledBindings<Record<string, unknown>> & {
 	adopt: typeof DomBindings.__adoptBindings;
 };
@@ -75,6 +102,21 @@ function source(initial: Record<string, unknown>) {
 			for (const notify of [...subscribers]) notify();
 		},
 	};
+}
+
+// Chrome Translate replaces a text leaf's Text node with nested <font> wrappers.
+function translate(leaf: Element, text: string): Element {
+	const outer = document.createElement('font');
+	const inner = outer.appendChild(document.createElement('font'));
+	outer.style.verticalAlign = inner.style.verticalAlign = 'inherit';
+	inner.textContent = text;
+	leaf.replaceChildren(outer);
+	return outer;
+}
+
+function expectChildIdentity(parent: Element, children: readonly ChildNode[]) {
+	expect(parent.childNodes).toHaveLength(children.length);
+	for (let i = 0; i < children.length; i++) expect(parent.childNodes[i]).toBe(children[i]);
 }
 
 const plain = { title: 'First', classes: 'a', live: 'polite', hidden: false, count: 1 };
@@ -125,6 +167,124 @@ describe.each([
 		};
 	}
 
+	function panel(hidden: boolean) {
+		const { server, artifact } = compile(PANEL, 'Panel', dev);
+		const view: View =
+			lane === 'scalar' ? artifact : { ...artifact, adopt: DomBindings.__adoptBindings };
+		const props = { message: 'Le traitement est interrompu.', label: 'Réessayer', hidden };
+		document.body.innerHTML = renderToString(server.Panel, props).html;
+		const root = document.querySelector('div')!;
+		return {
+			props,
+			root,
+			span: root.querySelector('span')!,
+			button: root.querySelector('button')!,
+			adopt: (state: DomBindings.BindingSource<Record<string, unknown>>) =>
+				view.adopt(root, view, state),
+		};
+	}
+
+	function numbered(initial: Record<string, unknown>) {
+		const { server, client, artifact } = compile(NUMBERED, 'Numbered', dev);
+		const view: View =
+			lane === 'scalar' ? artifact : { ...artifact, adopt: DomBindings.__adoptBindings };
+		const numbering = (root: ParentNode) => [
+			root.querySelector('ol')!.getAttribute('start'),
+			root.querySelector('li')!.getAttribute('value'),
+			root.querySelector('td')!.getAttribute('rowspan'),
+		];
+		document.body.innerHTML = renderToString(server.Numbered, initial).html;
+		const section = document.querySelector('section')!;
+		return {
+			client,
+			list: section.querySelector('ol')!,
+			item: section.querySelector('li')!,
+			cell: section.querySelector('td')!,
+			numbering: () => numbering(section),
+			// What the server renders for the same props is the oracle for every write.
+			serverNumbering(props: Record<string, unknown>) {
+				const template = document.createElement('template');
+				template.innerHTML = renderToString(server.Numbered, props).html;
+				return numbering(template.content);
+			},
+			adopt: (state: DomBindings.BindingSource<Record<string, unknown>>) =>
+				view.adopt(section, view, state),
+		};
+	}
+
+	it('writes list numbering and row spans in place as the server renders them', () => {
+		const initial = { start: 3, value: 7, rows: 2 };
+		const { list, item, cell, numbering, serverNumbering, adopt } = numbered(initial);
+		const model = source({ start: 5, value: 9, rows: 3 });
+		const handle = adopt(model.state);
+		try {
+			expect(numbering()).toEqual(['5', '9', '3']);
+			model.publish({ start: 0, value: -2, rows: 1 });
+			expect([list.start, item.value, cell.rowSpan]).toEqual([0, -2, 1]);
+			model.publish({ start: -4, value: 0 });
+			expect([list.start, item.value]).toEqual([-4, 0]);
+			// React's numeric rule removes a `start` or `rowspan` that is not a
+			// number; a list item's value is an ordinary attribute.
+			model.publish({ start: 'first', value: 'first', rows: Number.NaN });
+			expect(numbering()).toEqual([null, 'first', null]);
+			for (const next of [
+				12,
+				'6',
+				' 8 ',
+				'',
+				2.5,
+				10n,
+				Infinity,
+				Number.NaN,
+				'abc',
+				true,
+				false,
+				null,
+				undefined,
+			]) {
+				const props = { start: next, value: next, rows: next };
+				model.publish(props);
+				expect(numbering(), String(next)).toEqual(serverNumbering(props));
+			}
+			model.publish({ start: 1, value: 4, rows: 2 });
+			expect(numbering()).toEqual(['1', '4', '2']);
+			expect(document.querySelector('ol')).toBe(list);
+			expect(document.querySelector('li')).toBe(item);
+			expect(document.querySelector('td')).toBe(cell);
+		} finally {
+			handle.dispose();
+		}
+		expect(model.subscribers.size).toBe(0);
+		model.publish({ start: 20, value: 21, rows: 22 });
+		expect(numbering()).toEqual(['1', '4', '2']);
+	});
+
+	// Hydration with the older rendered props keeps what the binding published,
+	// including the numeric attributes it removed.
+	it('retains adopted list numbering through hydration', () => {
+		const initial = { start: 3, value: 7, rows: 2 };
+		const { client, list, item, cell, numbering, adopt } = numbered(initial);
+		const model = source(initial);
+		const handle = adopt(model.state);
+		model.publish({ start: Number.NaN, value: 0, rows: 'span' });
+		expect(numbering()).toEqual([null, '0', null]);
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		let root: ReturnType<typeof hydrateRoot> | undefined;
+		try {
+			flushSync(() => {
+				root = hydrateRoot(document.body, client.Numbered, initial);
+			});
+			expect(document.querySelector('ol')).toBe(list);
+			expect(document.querySelector('li')).toBe(item);
+			expect(document.querySelector('td')).toBe(cell);
+			expect(numbering()).toEqual([null, '0', null]);
+			expect(error).not.toHaveBeenCalled();
+		} finally {
+			handle.dispose();
+			root?.unmount();
+		}
+	});
+
 	it('writes every channel in place and reads signal handles without the source', () => {
 		const { paragraph, text, adopt } = badge();
 		const scope = createScope({ scopeKey: `scalar-handles-${dev}-${lane}` });
@@ -164,6 +324,72 @@ describe.each([
 		expect(model.subscribers.size).toBe(0);
 		expect(scope.inspect().nodes.map((node) => node.subscribers)).toEqual([0, 0]);
 		scope.dispose();
+	});
+
+	it.each([false, true])(
+		'rejects externally wrapped text before reading or subscribing (hidden=%s)',
+		(hidden) => {
+			const { props, root, span, adopt } = panel(hidden);
+			translate(span, 'Processing was interrupted.');
+			const retained = root.innerHTML;
+			const model = source(props);
+			expect(() => adopt(model.state)).toThrow(/mismatched static element topology/);
+			expect(root.innerHTML).toBe(retained);
+			expect(model.getSnapshot).not.toHaveBeenCalled();
+			expect(model.subscribers.size).toBe(0);
+		},
+	);
+
+	it.each([false, true])('rejects extra whitespace in closed child lists (hidden=%s)', (hidden) => {
+		for (const value of ['', '\t', '\n', '\f', '\r', '   ']) {
+			for (const position of [0, 1, 2]) {
+				const { props, root, adopt } = panel(hidden);
+				root.insertBefore(document.createTextNode(value), root.children[position] ?? null);
+				const retained = [...root.childNodes];
+				const model = source(props);
+				expect(() => adopt(model.state)).toThrow(/mismatched static element topology/);
+				expectChildIdentity(root, retained);
+				expect(model.getSnapshot).not.toHaveBeenCalled();
+				expect(model.subscribers.size).toBe(0);
+			}
+		}
+	});
+
+	it('refuses a text leaf holding an element', () => {
+		const { props, span, adopt } = panel(false);
+		for (const leaf of [
+			[document.createElement('b')],
+			[document.createTextNode('Le'), document.createElement('font')],
+			[document.createTextNode(' '), document.createElement('font')],
+			[document.createElement('font'), document.createTextNode(' en plus')],
+		]) {
+			span.replaceChildren(...leaf);
+			const model = source(props);
+			expect(() => adopt(model.state)).toThrow(/mismatched static element topology/);
+			expect(model.subscribers.size).toBe(0);
+		}
+	});
+
+	it('refuses element children that differ from the server topology', () => {
+		const changes: Array<(nav: Element) => void> = [
+			(nav) => nav.append(document.createElement('i')),
+			(nav) => nav.querySelector('a')!.after(document.createTextNode(' unexpected text')),
+			(nav) => nav.append(document.createTextNode('\t'), document.createComment('extra')),
+			(nav) => nav.prepend(document.createTextNode('\n'), document.createElement('i')),
+			(nav) => nav.querySelector('a')!.after(document.createTextNode('\u00a0')),
+			(nav) => nav.querySelector('img')!.remove(),
+			(nav) => nav.append(nav.querySelector('a')!),
+			// An element the server rendered without children.
+			(nav) => nav.querySelector('use')!.append(document.createElement('i')),
+		];
+		for (const change of changes) {
+			const { nav, anchor, adopt } = links();
+			change(nav);
+			const model = source({ ...linked, href: '/never' });
+			expect(() => adopt(model.state)).toThrow(/mismatched static element topology/);
+			expect(model.subscribers.size).toBe(0);
+			expect(anchor.getAttribute('href')).toBe('/a');
+		}
 	});
 
 	it('presents signal writes from an async transition Action atomically when it settles', async () => {
@@ -340,7 +566,10 @@ describe.each([
 		}
 	});
 
-	it('repairs a URL changed after its adopted publication during hydration', () => {
+	// A value that is neither the client's nor the binding's publication is an
+	// ordinary attribute difference: as in React, hydration keeps it, and only
+	// development warns that it won't be patched up.
+	it('keeps a URL changed after its adopted publication during hydration', () => {
 		const { client, anchor, adopt } = links();
 		const model = source(linked);
 		const handle = adopt(model.state);
@@ -352,13 +581,125 @@ describe.each([
 			flushSync(() => {
 				root = hydrateRoot(document.body, client.Links, linked);
 			});
-			expect(anchor.getAttribute('href')).toBe('/a');
-			if (dev) expect(error).toHaveBeenCalled();
-			else expect(error).not.toHaveBeenCalled();
+			expect(anchor.getAttribute('href')).toBe('/unrelated');
+			if (dev) {
+				expect(error).toHaveBeenCalledOnce();
+				expect(String(error.mock.calls[0][0])).toContain("won't be patched up");
+				expect(String(error.mock.calls[0][0])).toContain(
+					'attribute `href`: the server rendered "/unrelated", the client "/a"',
+				);
+			} else expect(error).not.toHaveBeenCalled();
 		} finally {
 			handle.dispose();
 			root?.unmount();
 		}
+	});
+});
+
+describe.each([false, true])('addressed text leaf adoption (dev=%s)', (dev) => {
+	function feed() {
+		const { server, artifact } = compile(FEED, 'Feed', dev);
+		const props = { title: 'Nouvelles' };
+		document.body.innerHTML = renderToString(server.Feed, props).html;
+		const section = document.querySelector('section')!;
+		return {
+			props,
+			heading: section.querySelector('h2')!,
+			adopt: (state: DomBindings.BindingSource<Record<string, unknown>>) =>
+				artifact.adopt(section, artifact, state),
+		};
+	}
+
+	it('rejects externally wrapped text before reading or subscribing', () => {
+		const { props, heading, adopt } = feed();
+		translate(heading, 'News');
+		const retained = heading.innerHTML;
+		const model = source(props);
+		expect(() => adopt(model.state)).toThrow(/mismatched addressed element topology/);
+		expect(heading.innerHTML).toBe(retained);
+		expect(model.getSnapshot).not.toHaveBeenCalled();
+		expect(model.subscribers.size).toBe(0);
+	});
+
+	it('rejects extra whitespace between closed addressed children', () => {
+		for (const value of ['', '\t', '\n', '\f', '\r', '   ']) {
+			for (const position of [0, 1, 2]) {
+				const { props, heading, adopt } = feed();
+				const header = heading.parentElement!;
+				header.insertBefore(document.createTextNode(value), header.children[position] ?? null);
+				const retained = [...header.childNodes];
+				const model = source(props);
+				expect(() => adopt(model.state)).toThrow(/mismatched addressed element topology/);
+				expectChildIdentity(header, retained);
+				expect(model.getSnapshot).not.toHaveBeenCalled();
+				expect(model.subscribers.size).toBe(0);
+			}
+		}
+	});
+
+	it('updates owned text while preserving open children through disposal', () => {
+		const { props, heading, adopt } = feed();
+		const text = heading.firstChild;
+		const header = heading.parentElement!;
+		const section = header.parentElement!;
+		const external = document.createElement('aside');
+		section.append(document.createComment('external'), external, '\u00a0 unbound ');
+		const openChildren = [...section.childNodes];
+		const model = source(props);
+		const handle = adopt(model.state);
+		try {
+			expectChildIdentity(section, openChildren);
+			model.publish({ title: 'Archives' });
+			expect(heading.textContent).toBe('Archives');
+			expect(heading.firstChild).toBe(text);
+			expectChildIdentity(section, openChildren);
+		} finally {
+			handle.dispose();
+		}
+		expect(model.cleanup).toHaveBeenCalledOnce();
+		expect(model.subscribers.size).toBe(0);
+		model.publish({ title: 'After disposal' });
+		expect(heading.textContent).toBe('Archives');
+		expectChildIdentity(section, openChildren);
+	});
+
+	it('refuses a leaf holding an element', () => {
+		for (const leaf of [
+			[document.createElement('b')],
+			[document.createElement('font'), document.createElement('font')],
+		]) {
+			const { props, heading, adopt } = feed();
+			heading.replaceChildren(...leaf);
+			const model = source(props);
+			expect(() => adopt(model.state)).toThrow(/mismatched addressed element topology/);
+			expect(model.subscribers.size).toBe(0);
+		}
+	});
+
+	// Unbound children may change; the bound header's children may not.
+	it('refuses closed element children that differ from the server topology', () => {
+		const changes: Array<(header: Element) => void> = [
+			(header) => header.append(document.createElement('i')),
+			(header) => header.firstElementChild!.after(document.createTextNode(' unexpected text')),
+			(header) => header.append(document.createTextNode('\t'), document.createComment('extra')),
+			(header) => header.prepend(document.createTextNode('\n'), document.createElement('i')),
+			(header) => header.firstElementChild!.after(document.createTextNode('\u00a0')),
+			(header) => header.lastElementChild!.remove(),
+			(header) => header.append(header.firstElementChild!),
+			(header) => header.lastElementChild!.append(document.createElement('i')),
+		];
+		for (const change of changes) {
+			const { props, heading, adopt } = feed();
+			change(heading.parentElement!);
+			const model = source({ ...props, title: 'Jamais' });
+			expect(() => adopt(model.state)).toThrow(/mismatched addressed element topology/);
+			expect(model.subscribers.size).toBe(0);
+			expect(heading.textContent).toBe('Nouvelles');
+		}
+		const { props, heading, adopt } = feed();
+		heading.closest('section')!.append(document.createElement('aside'), ' unbound ');
+		adopt(source({ ...props, title: 'Archives' }).state).dispose();
+		expect(heading.textContent).toBe('Archives');
 	});
 });
 

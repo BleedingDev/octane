@@ -69,7 +69,7 @@ export function GuardedGetter({ item, enabled, log }) @{
 }
 
 export function GuardedMemo({ item }) @{
-	const label = useMemo(() => item ? item.name : 'empty');
+	const label = useMemo(() => (item ? item.name : 'empty'));
 	<p>{label as string}</p>
 }
 
@@ -78,4 +78,22 @@ export function GuardedMethod({ item, enabled }) @{
 		if (enabled) item.run();
 	});
 	<p>Ready</p>
+}
+
+export function GuardedOptionalCall({ run, options }) @{
+	const label = useMemo(() => run?.(options.label) ?? 'idle');
+	<p>{label as string}</p>
+}
+
+export function GuardedOptionalKey({ run, options }) @{
+	const label = useMemo(() => run?.[options.label] ?? 'idle');
+	<p>{label as string}</p>
+}
+
+function Label({ value }) @{
+	<p>{value as string}</p>
+}
+
+export function GuardedOptionalProp({ run, options }) @{
+	<Label value={run?.(options.label) ?? 'idle'} />
 }

@@ -15,10 +15,11 @@ const filename = resolve(
 const authored = readFileSync(filename, 'utf8');
 const pkg = JSON.parse(readFileSync(resolve(packageRoot, 'package.json'), 'utf8'));
 const exports = Object.fromEntries(
-	Object.entries(pkg.exports).map(([name, target]: [string, any]) => [
-		name === '.' ? 'octane' : 'octane' + name.slice(1),
-		resolve(packageRoot, typeof target === 'string' ? target : target.default),
-	]),
+	Object.entries(pkg.exports).flatMap(([name, target]: [string, any]) => {
+		const file = typeof target === 'string' ? target : target.default;
+		if (typeof file !== 'string') return [];
+		return [[name === '.' ? 'octane' : 'octane' + name.slice(1), resolve(packageRoot, file)]];
+	}),
 );
 const bundles = new Map<boolean, Promise<{ server: any; code: string }>>();
 
@@ -174,23 +175,33 @@ async function scenario(dev: boolean, split: boolean, name: string) {
 			hidden: false,
 		};
 		await view.api.act(() => root.render(Component, latest));
-		expect(view.host.querySelector('#synthetic-control')).toBe(control);
-		expect(control.getAttribute('data-identity')).toBe(latest.identity);
-		expect(control.hidden).toBe(false);
+		const live = view.host.querySelector('#synthetic-control')! as HTMLButtonElement;
+		// Captures that changed before activation make the island's server HTML
+		// stale, so the island renders on the client, as React client-renders a
+		// dehydrated boundary it cannot hydrate with the props it now has. That is
+		// no mismatch: nothing is reported or logged. A native value that changed
+		// alone still adopts the server's control.
+		if (name === 'external-only') {
+			expect(live).toBe(control);
+		} else {
+			expect(live).not.toBe(control);
+			expect(control.isConnected).toBe(false);
+		}
+		expect(live.getAttribute('data-identity')).toBe(latest.identity);
+		expect(live.hidden).toBe(false);
 		expect(recoverable).toEqual([]);
-		expect(refs.filter(Boolean)).toEqual([control]);
+		expect(refs.filter(Boolean)).toEqual([live]);
 		expect(refs.filter((node) => node && node.ownerDocument !== view.window.document)).toEqual([]);
 		expect(effects).toEqual(['layout-mount', 'passive-mount']);
 		// Dev and prod render the child only live, inside native read collection.
 		expect(renders.length).toBeGreaterThan(0);
 		expect(renders.every((render) => render.guarded && render.observer)).toBe(true);
-		// Changed captures or native values make the server HTML stale: repair it silently.
 		expect(view.diagnostics).toEqual([]);
 		if (model) {
 			await view.api.act(() => model.hidden$.set(true));
-			expect(control.hidden).toBe(true);
+			expect(live.hidden).toBe(true);
 			await view.api.act(() => model.hidden$.set(false));
-			expect(control.hidden).toBe(false);
+			expect(live.hidden).toBe(false);
 		}
 		view.api.flushSync(() => root.unmount());
 		root = null;
@@ -272,7 +283,9 @@ for (const dev of [true, false])
 							} catch {
 								rejectedSubscriptions++;
 							}
-							expect(cell.owner.inspect().adoptionLeases).toBe(0);
+							// A runtime-created local scope has no public inspect(); read the
+							// adoption leases it would report directly.
+							expect(cell.owner.frames?.size ?? 0).toBe(0);
 						},
 					};
 					root = view.api.hydrateRoot(view.host, Component, initial);
@@ -287,35 +300,42 @@ for (const dev of [true, false])
 						localInitial: name !== 'local-corrected',
 					};
 					await view.api.act(() => root.render(Component, latest));
-					expect(view.host.querySelector('#synthetic-control')).toBe(control);
-					expect(view.host.querySelector('#synthetic-local-status')).toBe(status);
-					// Only the live cell exists: no side render initializes a second one.
+					// Captures that changed before activation render the island on the
+					// client. The abandoned hydrating attempt's local state is discarded
+					// with it, so the client render's cell is the live one.
+					const liveControl = view.host.querySelector('#synthetic-control')! as HTMLButtonElement;
+					const liveStatus = view.host.querySelector('#synthetic-local-status')! as HTMLSpanElement;
+					expect(liveControl).not.toBe(control);
+					expect(liveStatus).not.toBe(status);
+					expect(control.isConnected).toBe(false);
 					expect(cells.length).toBeGreaterThan(0);
-					const actual = cells[0];
-					expect(cells.every((cell) => cell === actual)).toBe(true);
+					const actual = cells[cells.length - 1];
 					expect(actual.owner.retired).toBe(false);
+					for (const cell of cells) if (cell !== actual) expect(cell.owner.retired).toBe(true);
 					expect(actual.get()).toBe(latest.localInitial);
-					expect(status.hidden).toBe(!latest.localInitial);
+					expect(liveStatus.hidden).toBe(!latest.localInitial);
 					expect(rejectedWrites).toBe(cells.length);
 					expect(rejectedSubscriptions).toBe(cells.length);
 					expect(publications).toBe(0);
 					expect(view.diagnostics).toEqual([]);
-					expect(refs.filter(Boolean)).toEqual([control]);
+					expect(refs.filter(Boolean)).toEqual([liveControl]);
 					expect(effects).toEqual(['layout-mount', 'passive-mount']);
-					await view.api.act(() => control.click());
+					const rendered = cells.length;
+					await view.api.act(() => liveControl.click());
 					expect(actual.get()).toBe(!latest.localInitial);
-					expect(status.hidden).toBe(latest.localInitial);
+					expect(liveStatus.hidden).toBe(latest.localInitial);
 					await view.api.act(() =>
 						root.render(Component, { ...latest, localInitial: !latest.localInitial }),
 					);
-					expect(cells.every((cell) => cell === actual)).toBe(true);
+					// Later renders keep the live cell.
+					expect(cells.slice(rendered).every((cell) => cell === actual)).toBe(true);
 					expect(actual.get()).toBe(!latest.localInitial);
-					expect(status.hidden).toBe(latest.localInitial);
+					expect(liveStatus.hidden).toBe(latest.localInitial);
 					view.api.flushSync(() => root.unmount());
 					root = null;
 					await view.api.act(() => {});
 					expect(actual.owner.retired).toBe(true);
-					expect(actual.owner.inspect().nodes).toEqual([]);
+					expect(actual.owner.nodes.size).toBe(0);
 					expect(() => actual.get()).toThrow();
 					expect(effects).toEqual([
 						'layout-mount',
@@ -382,21 +402,29 @@ for (const dev of [true, false])
 				expect(cells).toEqual([]);
 				const latest = { ...initial, when: view.api.load(), identity: 'later-client' };
 				await view.api.act(() => root.render(Component, latest));
-				expect(initializations).toBe(1);
+				// The changed identity renders the island on the client, discarding the
+				// hydrating attempt and the local state it initialized. Every
+				// initialization runs inside a live, observed render.
+				const activated = initializations;
+				expect(activated).toBeGreaterThan(0);
 				expect(unobservedRenders).toBe(0);
 				expect(cells.length).toBeGreaterThan(0);
-				const actual = cells[0];
-				expect(cells.every((cell) => cell === actual)).toBe(true);
+				const actual = cells[cells.length - 1];
 				expect(actual.owner.retired).toBe(false);
+				for (const cell of cells) if (cell !== actual) expect(cell.owner.retired).toBe(true);
 				expect(actual.get()).toBe(false);
-				expect(status.hidden).toBe(true);
-				expect(view.host.querySelector('#synthetic-control')).toBe(control);
-				expect(refs.filter(Boolean)).toEqual([control]);
+				const liveControl = view.host.querySelector('#synthetic-control')! as HTMLButtonElement;
+				const liveStatus = view.host.querySelector('#synthetic-local-status')! as HTMLSpanElement;
+				expect(liveControl).not.toBe(control);
+				expect(status.isConnected).toBe(false);
+				expect(liveStatus.hidden).toBe(true);
+				expect(refs.filter(Boolean)).toEqual([liveControl]);
 				expect(effects).toEqual(['layout-mount', 'passive-mount']);
 				expect(view.diagnostics).toEqual([]);
-				await view.api.act(() => control.click());
+				const rendered = cells.length;
+				await view.api.act(() => liveControl.click());
 				expect(actual.get()).toBe(true);
-				expect(status.hidden).toBe(false);
+				expect(liveStatus.hidden).toBe(false);
 				await view.api.act(() =>
 					root.render(Component, {
 						...latest,
@@ -406,15 +434,16 @@ for (const dev of [true, false])
 						},
 					}),
 				);
-				expect(initializations).toBe(1);
+				// A mounted cell never initializes again.
+				expect(initializations).toBe(activated);
 				expect(subsequentInitializations).toBe(0);
-				expect(cells.every((cell) => cell === actual)).toBe(true);
+				expect(cells.slice(rendered).every((cell) => cell === actual)).toBe(true);
 				expect(actual.get()).toBe(true);
 				view.api.flushSync(() => root.unmount());
 				root = null;
 				await view.api.act(() => {});
 				expect(actual.owner.retired).toBe(true);
-				expect(actual.owner.inspect().nodes).toEqual([]);
+				expect(actual.owner.nodes.size).toBe(0);
 				expect(() => actual.get()).toThrow();
 				expect(effects).toEqual([
 					'layout-mount',

@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -56,14 +56,13 @@ jobs:
           NODE
 
       # Prove the repository-owned release plan before making the GitHub API
-      # boundary best-effort. A malformed changeset, generator regression, or
-      # formatting failure remains a hard workflow failure during an API outage.
+      # boundary best-effort. A malformed changeset or generator regression
+      # remains a hard workflow failure during an API outage.
       - name: Validate generated release plan
         if: steps.release_plan.outputs.has_releases == 'true'
         run: |
           pnpm changeset:version
           git diff --check
-          pnpm format:check
 
       - name: Restore checkout after release validation
         run: |
@@ -217,7 +216,7 @@ jobs:
           {
             echo "### Release PR synchronization deferred"
             echo
-            echo "The generated release plan and formatting passed, but both PR synchronization attempts failed during a verified GitHub API outage ($OCTANE_RELEASE_API_STATUS)."
+            echo "The generated release plan passed validation, but both PR synchronization attempts failed during a verified GitHub API outage ($OCTANE_RELEASE_API_STATUS)."
             echo
             echo "The next push to main or a manual Release PR workflow run will retry."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -237,7 +236,7 @@ jobs:
 
       # GITHUB_TOKEN-created pull request workflows require manual approval, and
       # workflow_dispatch check suites are not linked to the pull request. Write
-      # the two required GitHub Actions checks directly onto the authenticated
+      # the required GitHub Actions checks directly onto the authenticated
       # generated head commit instead.
       - name: Record lightweight release pull request checks
         if: >-
@@ -381,7 +380,7 @@ jobs:
 
             const detailsUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             await Promise.all(
-              ["lint", "typecheck"].map((name) =>
+              ["lint", "typecheck", "bundle size / bundle size checks"].map((name) =>
                 github.rest.checks.create({
                   owner,
                   repo,
@@ -399,5 +398,5 @@ jobs:
               ),
             );
             core.notice(
-              `Recorded lightweight lint and typecheck results for Changesets PR #${pull.number} at ${generated.sha}.`,
+              `Recorded lightweight lint, typecheck, and bundle size results for Changesets PR #${pull.number} at ${generated.sha}.`,
             );

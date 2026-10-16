@@ -228,7 +228,9 @@ jobs:
                   head_sha: parentSha,
                   per_page: 10,
                 });
-              const requiredTestJobs = ["test (24)"];
+              // Runtime tests and bundle checks now finish independently.
+              // Only provenance proves the parent completed both.
+              const requiredTestJobs = ["test (24)", "CI provenance"];
               let parentPassedTests = false;
 
               for (const run of parentRuns.workflow_runs) {
@@ -260,7 +262,7 @@ jobs:
 
               if (!parentPassedTests) {
                 core.warning(
-                  `The parent of Changesets merge ${context.sha} has no completed CI run with the full test suite passing. Running the full tests.`,
+                  `The parent of Changesets merge ${context.sha} has no completed CI run with tests and bundle coverage passing. Running full CI.`,
                 );
                 return;
               }
@@ -319,6 +321,7 @@ jobs:
               }
 
               const requiredFullJobs = [
+                "bundle size / bundle size checks",
                 "website integration suite",
                 "React parity checks",
                 "typecheck",
@@ -389,6 +392,14 @@ jobs:
               );
             }
 
+  bundle_size:
+    name: bundle size
+    needs: release_change
+    if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release_pr != 'true' }}
+    uses: ./.github/workflows/bundle-size.yml
+    with:
+      run-benchmarks: ${{ needs.release_change.outputs.is_release != 'true' && needs.release_change.outputs.full_ci != 'false' }}
+
   test_shard:
     name: test shard (Node 24, ${{ matrix.shard }})
     needs: release_change
@@ -411,7 +422,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js 24
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -420,35 +431,23 @@ jobs:
           cache: "pnpm"
 
       - name: Install dependencies
-        run: pnpm install --prod false --frozen-lockfile
-
-      # Real builds, packed consumers, browser suites, and the ordinary suite
-      # all use the repository's Node 24 CI execution target.
-      - name: Verify renderer-free behavior bundle
-        if: matrix.shard == '1/4'
-        run: node benchmarks/bundle-size/run-minimal.mjs behavior-root
-
-      - name: Verify signal-free application bundle budgets
-        if: matrix.shard == '1/4'
-        run: node benchmarks/bundle-size/run-minimal.mjs --budgets root-static-local root-chained-jsx hooks-state prop-attributes context
-
-      # A binding that tests `in` against, or indexes, the `octane` namespace
-      # materializes every public export and undoes root specialization.
-      - name: Verify Apollo binding keeps octane tree-shakeable
-        if: matrix.shard == '1/4'
-        run: node benchmarks/bundle-size/run-minimal.mjs binding-apollo-client
+        run: pnpm install --prod=false --frozen-lockfile
 
       - name: Run tests
         # WEBSITE_DOCS_SPEC is excluded through the environment, not `--exclude`:
         # it lives in the `website-unit` project, and a project that declares its
         # own `exclude` makes Vitest ignore the CLI flag. The flag was here and
         # did nothing. See the `website-unit` project in vitest.config.js.
+        # Keep one worker per GitHub-hosted shard so compiler wall-clock guards
+        # do not compete with other Vitest workers. All tests and their limits
+        # stay unchanged; the matrix still runs four shards in parallel.
         env:
           OCTANE_EXCLUDE_WEBSITE_DOCS: "1"
         run: >-
           pnpm test
           --config vitest.ci-sharded.config.js
           --shard=${{ matrix.shard }}
+          --maxWorkers=1
           --exclude "$WEBSITE_A11Y_SPEC"
           --exclude "$WEBSITE_E2E_SPEC"
           --exclude "$WEBSITE_SSR_SPEC"
@@ -487,7 +486,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -496,7 +495,7 @@ jobs:
           cache: "pnpm"
 
       - name: Install dependencies
-        run: pnpm install --prod false --frozen-lockfile
+        run: pnpm install --prod=false --frozen-lockfile
 
       # Browser parity lanes launch Chromium through Playwright.
       # Keep this package-agnostic so adding a binding never patches the workflow.
@@ -641,7 +640,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -650,7 +649,7 @@ jobs:
           cache: "pnpm"
 
       - name: Install dependencies
-        run: pnpm install --prod false --frozen-lockfile
+        run: pnpm install --prod=false --frozen-lockfile
 
       - name: Install Playwright Chromium
         run: |
@@ -688,7 +687,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -698,7 +697,7 @@ jobs:
 
       - name: Install dependencies
         id: install_heavy_node_dependencies
-        run: pnpm install --prod false --frozen-lockfile
+        run: pnpm install --prod=false --frozen-lockfile
 
       - name: Setup Bun
         id: setup_heavy_node_bun
@@ -737,6 +736,17 @@ jobs:
           pnpm vitest run
           packages/octane-evals/tests/user-app-corpus.test.ts
           --maxWorkers=1
+
+      - name: Prepare pinned public Valdi compiler
+        id: prepare_valdi_companion
+        if: ${{ !cancelled() && steps.install_heavy_node_dependencies.outcome == 'success' }}
+        run: node scripts/prepare-valdi-companion.mjs "$RUNNER_TEMP/octane-valdi-sdk"
+
+      - name: Run real Valdi TypeScript build integration
+        if: ${{ !cancelled() && steps.prepare_valdi_companion.outcome == 'success' }}
+        env:
+          OCTANE_VALDI_COMPANION_DIR: ${{ runner.temp }}/octane-valdi-sdk
+        run: node scripts/test-valdi-typescript-build.mjs
 
       - name: Run runtime-loader integration tests
         if: ${{ !cancelled() && steps.install_heavy_node_dependencies.outcome == 'success' }}
@@ -782,7 +792,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -791,7 +801,7 @@ jobs:
           cache: "pnpm"
 
       - name: Install dependencies
-        run: pnpm install --prod false --frozen-lockfile
+        run: pnpm install --prod=false --frozen-lockfile
 
       - name: Install selected Playwright browser
         if: ${{ matrix.lane == 'browser' }}
@@ -832,6 +842,7 @@ jobs:
           path: |
             benchmarks/results/view-transitions-js-framework.json
             benchmarks/results/view-transitions-effect-cleanup.json
+            benchmarks/results/scheduler-backlogs.json
           if-no-files-found: ignore
           retention-days: 1
 
@@ -850,7 +861,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -887,6 +898,11 @@ jobs:
 
       - name: Validate CI workflow behavior
         run: pnpm ci:workflow:test
+
+      # Skill-only changes can skip the main test shards. Keep MCP's catalog
+      # checks here so a new or removed skill cannot leave its registry stale.
+      - name: Validate MCP skill catalogs
+        run: pnpm exec vitest run --project octane-mcp-server packages/octane-mcp-server/src/index.test.js
 
       # A committed test must execute and pass. Intentional framework
       # divergences are ordinary assertions; missing environment prerequisites
@@ -964,6 +980,12 @@ jobs:
       - name: Check CLI data snapshot is current
         run: pnpm cli:data:check
 
+      # The Strong diagnostic catalog in the compiler renders the website page,
+      # docs/strong-compiler-checks.md, llms.txt, and the MCP server's copy. A
+      # new code or changed replacement must regenerate all of them together.
+      - name: Check Strong diagnostic documentation is current
+        run: pnpm strong:diagnostics:check
+
       # The CLI page's file trees and the create-octane README describe what
       # `octane create` writes. The snapshot they are drawn from comes from
       # running the command, so adding a file to a template without regenerating
@@ -1009,7 +1031,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -1091,7 +1113,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -1100,7 +1122,7 @@ jobs:
           cache: "pnpm"
 
       - name: Install dependencies
-        run: pnpm install --prod false --frozen-lockfile
+        run: pnpm install --prod=false --frozen-lockfile
 
       - name: Install Playwright Chromium
         run: |
@@ -1148,7 +1170,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -1171,6 +1193,10 @@ jobs:
       # matching runtime/type pair; the current lane checks the newest published
       # matching pair and tests the latest runtime even when its types lag.
       # Both select the Octane-owned compatibility suite.
+      # The typetests run on the classic `tsc` (the default catalog's TypeScript
+      # 5.9) on purpose, not octane-tsc's 7.1: they import the package as an
+      # application on 5.9 would, and Canvas.tsrx is typed by its sibling
+      # declaration, so they prove each @types/three pair for those consumers.
       - name: Test Three compatibility (minimum r156)
         working-directory: ${{ runner.temp }}/octane-three-compat-minimum-r156
         env:
@@ -1231,7 +1257,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -1273,7 +1299,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -1294,15 +1320,43 @@ jobs:
       # including exports/bin/types and workspace/catalog protocol replacement,
       # then installs packed core + binding tarballs into an isolated consumer
       # to prove singleton resolution and client/server raw-source compilation.
+      # Applications compile the shipped TSRX with their own TypeScript, so the
+      # strict source consumer runs one lane per supported compiler, each in its
+      # own install: TypeScript 5.9 and 6 through tsrx-tsc, and the native
+      # catalog's 7.1 nightly through tsc --runExternalCode and the content
+      # mapper (lanes and what each proves: scripts/package-pack-canaries.mjs).
       - name: Pack and validate every publishable package
         run: pnpm packages:pack:check
+        env:
+          OCTANE_PACK_ARTIFACT_DIR: ${{ runner.temp }}/octane-compiler-cohort
+
+      - name: Test maintained-fork artifact publication
+        run: node --test scripts/ultramodern-native-release.test.mjs
+
+      - name: Retain accepted runtime, router and compiler archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: octane-compiler-cohort-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/octane-compiler-cohort
+          if-no-files-found: error
 
   # This stable marker lets consecutive lightweight commits inherit the last
   # full suite transitively. A lightweight run reaches it only after the scope
   # classifier verifies that its base already had equivalent provenance.
   provenance:
     name: CI provenance
-    needs: [release_change, test, lint, typecheck, examples, three_compat, lynx_compat, package]
+    needs:
+      [
+        release_change,
+        bundle_size,
+        test,
+        lint,
+        typecheck,
+        examples,
+        three_compat,
+        lynx_compat,
+        package,
+      ]
     if: ${{ always() && !cancelled() && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.release_change.outputs.is_release_pr != 'true' }}
     runs-on: ubuntu-24.04
 
@@ -1311,6 +1365,7 @@ jobs:
         env:
           FULL_CI: ${{ needs.release_change.outputs.full_ci }}
           RELEASE_CHANGE_RESULT: ${{ needs.release_change.result }}
+          BUNDLE_SIZE_RESULT: ${{ needs.bundle_size.result }}
           TEST_RESULT: ${{ needs.test.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           TYPECHECK_RESULT: ${{ needs.typecheck.result }}
@@ -1320,6 +1375,7 @@ jobs:
           PACKAGE_RESULT: ${{ needs.package.result }}
         run: |
           test "$RELEASE_CHANGE_RESULT" = success
+          test "$BUNDLE_SIZE_RESULT" = success
           test "$TEST_RESULT" = success
           test "$LINT_RESULT" = success
           test "$TYPECHECK_RESULT" = success

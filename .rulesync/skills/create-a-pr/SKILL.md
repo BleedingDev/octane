@@ -56,6 +56,29 @@ pnpm test
 
 Targeted alternatives are acceptable for small changes, but PR body must say what was and was not run.
 
+## Performance review gate
+
+Load the `perf-review` skill and run it on the final diff before the first
+`gh pr ready` whenever the diff touches any of:
+
+- `packages/octane/src/`: runtime, signals, hydration, server, or compiler;
+- code that changes compiled output, such as `vite-plugin-octane` or
+  `rspack-plugin-octane` transforms;
+- a binding's hot path: code that runs per render, per event, per store or
+  signal notification, or per layout measurement.
+
+Put its report in the PR body under Validation. Resolve every `must-fix`
+finding. Each `needs-evidence` finding needs its evidence in the PR, or an
+entry under Risk / follow-ups that says why it is missing. For a diff outside
+these paths, write `perf-review: not applicable`.
+
+## Concision gate
+
+Load the `concise-code` skill and run its simplification pass on the final diff
+before the first `gh pr ready`, for every PR with authored code. Put its report
+line in the PR body under Validation, including the smaller alternatives you
+rejected and why.
+
 ## PR body template
 
 ```md
@@ -73,6 +96,8 @@ Targeted alternatives are acceptable for small changes, but PR body must say wha
 - [ ] `pnpm typecheck`
 - [ ] `pnpm test`
 - [ ] targeted tests: ...
+- [ ] `perf-review`: <findings and evidence, or not applicable>
+- [ ] `concise-code`: <size, alternatives, bytes>
 
 ## Risk / follow-ups
 - ...
@@ -138,6 +163,8 @@ That transition starts CI; it is not evidence that CI passed.
 
 - every required and relevant CI check is terminal and successful;
 - every actionable review comment and review thread is resolved on the current head;
+- when the performance review gate applies, its report is in the PR body with no
+  unresolved `must-fix` finding;
 - no reviewer or bot review is still in progress or expected for an older head;
 - the head contains the live base branch, not merely the base SHA cached when the PR opened;
 - GitHub reports the PR mergeable with no conflict or branch-currency blocker; and

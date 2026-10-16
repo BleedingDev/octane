@@ -230,7 +230,7 @@ export function parseNativeSignalManifest(raw: string): NativeSignalManifest {
 	return validateNativeSignalManifest(JSON.parse(raw));
 }
 
-function validateNativeSignalManifest(value: unknown): NativeSignalManifest {
+export function validateNativeSignalManifest(value: unknown): NativeSignalManifest {
 	if (
 		value === null ||
 		typeof value !== 'object' ||
@@ -324,7 +324,10 @@ export function materializeNativeSignalManifest(
 export function createNativeAdoptionState(
 	manifest: NativeSignalManifest,
 	initialDocumentSignals?: ScopeSeed,
+	initialScopeKey?: string,
 ) {
+	if (initialDocumentSignals !== undefined && initialScopeKey !== undefined)
+		initialDocumentSignals = captureInitialDocumentSignals(initialDocumentSignals, initialScopeKey);
 	const materialized = materializeNativeSignalManifest(manifest, initialDocumentSignals);
 	const seeds = new Map(materialized.scopes.map((seed) => [seed.scopeKey, seed]));
 	const frames = new Map<NativeAdoptionOwner, AdoptionFrame>();

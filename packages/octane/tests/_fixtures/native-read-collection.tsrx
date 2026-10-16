@@ -36,9 +36,7 @@ export function ChildDefaults(props: CollectionProps) @{
 }
 
 export function ConditionalReader(props: CollectionProps & { enabled: boolean }) @{
-	<p>
-		{props.enabled ? String(props.count$.get()) : 'idle'}
-	</p>
+	<p>{props.enabled ? String(props.count$.get()) : 'idle'}</p>
 }
 
 function SwitchableChild({
@@ -52,11 +50,8 @@ function SwitchableChild({
 	label: string;
 	value?: number | null;
 }) @{
-	const body =
-		enabled ? source$.get() : null;
-	<output data-collection-child={label}>
-		{enabled ? value + ':' + body : 'idle'}
-	</output>
+	const body = enabled ? source$.get() : null;
+	<output data-collection-child={label}>{enabled ? value + ':' + body : 'idle'}</output>
 }
 
 export function CollectionPanel(props: {
@@ -90,12 +85,17 @@ export function ReplayReader(props: {
 	final$: SignalHandle<number>;
 }) @{
 	const [ready, setReady] = useState(false);
-	const value = ((ready ? props.final$ : props.first$)).get();
+	const value = (ready ? props.final$ : props.first$).get();
 	if (!ready) setReady(true);
 	<p>{String(value)}</p>
 }
 
-export function HydrationDefault({ count$, body$, value = count$.get(), log }: CollectionProps & {
+export function HydrationDefault({
+	count$,
+	body$,
+	value = count$.get(),
+	log,
+}: CollectionProps & {
 	log?: (value: string) => void;
 }) @{
 	const output = useRef<HTMLOutputElement | null>(null);
@@ -106,5 +106,42 @@ export function HydrationDefault({ count$, body$, value = count$.get(), log }: C
 	<section>
 		<input defaultValue="server input" />
 		<output ref={output}>{value + ':' + body}</output>
+	</section>
+}
+
+export function CaughtReader(props: { count$: SignalHandle<number> }) @{
+	<section>
+		@try {
+			<span>{'primary'}</span>
+		} @catch (_error) {
+			<span>{'caught'}</span>
+		}
+		@if (props.count$.get() === 0) {
+			<output>{'0'}</output>
+		} @else {
+			<output>{'1'}</output>
+		}
+	</section>
+}
+
+// The read happens in a call: the renderer, not the calling body, collects it.
+function doubled$(source$: SignalHandle<number>): string {
+	return String(source$.get() * 2);
+}
+
+function HelperChild(props: { source$: SignalHandle<number> }) @{
+	<i>{doubled$(props.source$)}</i>
+}
+
+// Every read goes through doubled$: a body, an arm, a child and rows.
+export function HelperReader(props: { count$: SignalHandle<number>; items: number[] }) @{
+	<section>
+		<b>{doubled$(props.count$)}</b>
+		@if (props.items.length > 0) {
+			<HelperChild source$={props.count$} />
+		}
+		@for (const item of props.items; key item) {
+			<u>{doubled$(props.count$) + ':' + item}</u>
+		}
 	</section>
 }
