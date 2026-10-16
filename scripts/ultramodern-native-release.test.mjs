@@ -35,10 +35,17 @@ const run = {
 const jobs = ['CI provenance', 'validate publishable packages'].map((name) => ({
 	name,
 	conclusion: 'success',
+	head_sha: sha,
+	run_attempt: name === 'CI provenance' ? 2 : 1,
 }));
 
 test('requires successful full package acceptance from a fork main push', () => {
-	assert.equal(validateNativeReleaseRun(run, jobs), sha);
+	assert.deepEqual(validateNativeReleaseRun(run, jobs), { sha, packageAttempt: 1 });
+	for (const suffix of ['@main', '@refs/heads/main'])
+		assert.deepEqual(validateNativeReleaseRun({ ...run, path: run.path + suffix }, jobs), {
+			sha,
+			packageAttempt: 1,
+		});
 	for (const bad of [
 		{ event: 'pull_request' },
 		{ head_branch: 'feature' },
@@ -47,6 +54,8 @@ test('requires successful full package acceptance from a fork main push', () => 
 		{ head_repository: { full_name: 'foreign/octane' } },
 		{ repository: { full_name: 'octanejs/octane' } },
 		{ path: '.github/workflows/other.yml' },
+		{ path: '.github/workflows/other.yml@main' },
+		{ path: '.github/workflows/ci.yml.backup@main' },
 		{ run_attempt: 0 },
 	])
 		assert.throws(() => validateNativeReleaseRun({ ...run, ...bad }, jobs));
@@ -54,9 +63,29 @@ test('requires successful full package acceptance from a fork main push', () => 
 		() => validateNativeReleaseRun(run, [jobs[0]]),
 		/validate publishable packages must pass/,
 	);
-	assert.throws(() =>
-		validateNativeReleaseRun(run, [...jobs.slice(0, 1), { ...jobs[1], conclusion: 'skipped' }]),
-	);
+	for (const bad of [
+		{ conclusion: 'skipped' },
+		{ head_sha: 'b'.repeat(40) },
+		{ run_attempt: 0 },
+		{ run_attempt: 3 },
+		{ run_attempt: undefined },
+	])
+		assert.throws(() => validateNativeReleaseRun(run, [jobs[0], { ...jobs[1], ...bad }]));
+	// A newer failure must not be hidden by a previous successful package job.
+	const later = { ...jobs[1], run_attempt: 2, conclusion: 'failure' };
+	for (const history of [
+		[...jobs, later],
+		[later, ...jobs],
+	]) {
+		assert.throws(() => validateNativeReleaseRun(run, history));
+		assert.deepEqual(
+			validateNativeReleaseRun(
+				run,
+				history.map((job) => ({ ...job, conclusion: 'success' })),
+			),
+			{ sha, packageAttempt: 2 },
+		);
+	}
 });
 
 function fixture(context) {
@@ -111,7 +140,7 @@ test('checks accepted archive bytes, embedded identities, source and safe paths'
 	assert.throws(() => validateNativeReleaseCohort(f.accepted, sha));
 });
 
-test('resumes a partial draft without replacing assets, and leaves no temporary files', (context) => {
+test('resumes an earlier accepted attempt after a partial rerun and interrupted upload', (context) => {
 	const f = fixture(context);
 	const temporaryRoot = path.join(f.root, 'temporary');
 	mkdirSync(temporaryRoot);
@@ -125,8 +154,10 @@ test('resumes a partial draft without replacing assets, and leaves no temporary 
 		git: (...args) => assert.deepEqual(args, ['merge-base', '--is-ancestor', sha, 'origin/main']),
 		gh: (...args) => {
 			if (args[0] === 'api') {
-				if (args[1].endsWith('/runs/123')) return JSON.stringify(run);
-				if (args[1].includes('/jobs?')) return JSON.stringify([{ jobs }]);
+				if (args[1].endsWith('/runs/123'))
+					return JSON.stringify({ ...run, path: run.path + '@main' });
+				if (args[1] === 'repos/BleedingDev/octane/actions/runs/123/jobs?filter=all&per_page=100')
+					return JSON.stringify([{ jobs }]);
 				if (args[1] === 'graphql') {
 					assert(args.includes(`tag=ultramodern-octane-${sha.slice(0, 12)}`));
 					return JSON.stringify({
@@ -146,7 +177,7 @@ test('resumes a partial draft without replacing assets, and leaves no temporary 
 				throw Object.assign(new Error('missing release'), { stderr: 'HTTP 404' });
 			}
 			if (args[0] === 'run') {
-				assert.equal(args[args.indexOf('--name') + 1], 'octane-compiler-cohort-123-2');
+				assert.equal(args[args.indexOf('--name') + 1], 'octane-compiler-cohort-123-1');
 				cpSync(f.accepted, args[args.indexOf('--dir') + 1], { recursive: true });
 				return '';
 			}

@@ -12,19 +12,24 @@ const integrity = (bytes) => `sha512-${createHash('sha512').update(bytes).digest
 export function validateNativeReleaseRun(run, jobs) {
 	assert.equal(run.repository?.full_name, repository);
 	assert.equal(run.head_repository?.full_name, repository);
-	assert.equal(run.path, '.github/workflows/ci.yml');
+	assert.match(run.path, /^\.github\/workflows\/ci\.yml(?:@.+)?$/);
 	assert.equal(run.event, 'push');
 	assert.equal(run.head_branch, 'main');
 	assert.equal(run.status, 'completed');
 	assert.equal(run.conclusion, 'success');
 	assert.match(run.head_sha, /^[a-f0-9]{40}$/);
 	assert(Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0);
-	for (const name of ['CI provenance', 'validate publishable packages'])
-		assert(
-			jobs.some((job) => job.name === name && job.conclusion === 'success'),
-			`${name} must pass`,
-		);
-	return run.head_sha;
+	const accepted = ['CI provenance', 'validate publishable packages'].map((name) => {
+		const job = jobs
+			.filter((job) => job.name === name)
+			.sort((a, b) => b.run_attempt - a.run_attempt)[0];
+		assert.equal(job?.conclusion, 'success', `${name} must pass`);
+		assert.equal(job.head_sha, run.head_sha);
+		assert(Number.isSafeInteger(job.run_attempt) && job.run_attempt > 0);
+		assert(job.run_attempt <= run.run_attempt);
+		return job;
+	});
+	return { sha: run.head_sha, packageAttempt: accepted[1].run_attempt };
 }
 
 export function validateNativeReleaseCohort(directory, sourceCommit) {
@@ -52,11 +57,11 @@ export function publishNativeRelease(runId, commands = {}) {
 	const api = (...args) => JSON.parse(gh('api', ...args));
 	const run = api(`repos/${repository}/actions/runs/${runId}`);
 	const jobs = api(
-		`repos/${repository}/actions/runs/${runId}/attempts/${run.run_attempt}/jobs?per_page=100`,
+		`repos/${repository}/actions/runs/${runId}/jobs?filter=all&per_page=100`,
 		'--paginate',
 		'--slurp',
 	).flatMap((page) => page.jobs);
-	const sha = validateNativeReleaseRun(run, jobs);
+	const { sha, packageAttempt } = validateNativeReleaseRun(run, jobs);
 	(commands.git ?? ((...args) => execFileSync('git', args)))(
 		'merge-base',
 		'--is-ancestor',
@@ -75,7 +80,7 @@ export function publishNativeRelease(runId, commands = {}) {
 			'--repo',
 			repository,
 			'--name',
-			`octane-compiler-cohort-${runId}-${run.run_attempt}`,
+			`octane-compiler-cohort-${runId}-${packageAttempt}`,
 			'--dir',
 			accepted,
 		);
