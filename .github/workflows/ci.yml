@@ -438,12 +438,16 @@ jobs:
         # it lives in the `website-unit` project, and a project that declares its
         # own `exclude` makes Vitest ignore the CLI flag. The flag was here and
         # did nothing. See the `website-unit` project in vitest.config.js.
+        # Keep one worker per GitHub-hosted shard so compiler wall-clock guards
+        # do not compete with other Vitest workers. All tests and their limits
+        # stay unchanged; the matrix still runs four shards in parallel.
         env:
           OCTANE_EXCLUDE_WEBSITE_DOCS: "1"
         run: >-
           pnpm test
           --config vitest.ci-sharded.config.js
           --shard=${{ matrix.shard }}
+          --maxWorkers=1
           --exclude "$WEBSITE_A11Y_SPEC"
           --exclude "$WEBSITE_E2E_SPEC"
           --exclude "$WEBSITE_SSR_SPEC"
