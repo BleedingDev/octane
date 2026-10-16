@@ -81,12 +81,15 @@ export function publishNativeRelease(runId, commands = {}) {
 		);
 		const files = validateNativeReleaseCohort(accepted, sha);
 		const tag = `ultramodern-octane-${sha.slice(0, 12)}`;
-		let release;
-		try {
-			release = api(`repos/${repository}/releases/tags/${tag}`);
-		} catch (error) {
-			if (!String(error.stderr).includes('HTTP 404')) throw error;
-		}
+		// GraphQL can resolve a pending draft tag; REST's tag endpoint only sees published releases.
+		const id = api(
+			'graphql',
+			'-f',
+			'query=query($tag: String!) { repository(owner: "BleedingDev", name: "octane") { release(tagName: $tag) { databaseId } } }',
+			'-f',
+			`tag=${tag}`,
+		).data.repository.release?.databaseId;
+		const release = id === undefined ? undefined : api(`repos/${repository}/releases/${id}`);
 		if (release) {
 			assert.equal(release.target_commitish, sha);
 			assert(

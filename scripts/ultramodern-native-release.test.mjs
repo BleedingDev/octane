@@ -117,6 +117,7 @@ test('resumes a partial draft without replacing assets, and leaves no temporary 
 	mkdirSync(temporaryRoot);
 	let release;
 	let uploads = 0;
+	let creates = 0;
 	let fail = true;
 	const assets = new Map();
 	const commands = {
@@ -126,7 +127,18 @@ test('resumes a partial draft without replacing assets, and leaves no temporary 
 			if (args[0] === 'api') {
 				if (args[1].endsWith('/runs/123')) return JSON.stringify(run);
 				if (args[1].includes('/jobs?')) return JSON.stringify([{ jobs }]);
-				if (release)
+				if (args[1] === 'graphql') {
+					assert(args.includes(`tag=ultramodern-octane-${sha.slice(0, 12)}`));
+					return JSON.stringify({
+						data: { repository: { release: release ? { databaseId: release.id } : null } },
+					});
+				}
+				// REST tag lookup cannot see a draft; its numeric ID can.
+				if (
+					release &&
+					(args[1].endsWith('/releases/501') ||
+						(args[1].includes('/releases/tags/') && !release.draft))
+				)
 					return JSON.stringify({
 						...release,
 						assets: [...assets.keys()].map((name) => ({ name })),
@@ -140,8 +152,11 @@ test('resumes a partial draft without replacing assets, and leaves no temporary 
 			}
 			const [, command, tag] = args;
 			assert.equal(tag, `ultramodern-octane-${sha.slice(0, 12)}`);
-			if (command === 'create') release = { target_commitish: sha, draft: true };
-			else if (command === 'upload') {
+			if (command === 'create') {
+				assert(!release, 'The existing draft must be resumed, not created again');
+				release = { id: 501, target_commitish: sha, draft: true };
+				creates++;
+			} else if (command === 'upload') {
 				if (fail && uploads === 1) throw new Error('upload interrupted');
 				const file = args[3],
 					name = path.basename(file);
@@ -169,6 +184,7 @@ test('resumes a partial draft without replacing assets, and leaves no temporary 
 	assert.deepEqual(readdirSync(temporaryRoot), []);
 	publishNativeRelease('123', commands);
 	assert.equal(uploads, 4);
+	assert.equal(creates, 1);
 	assert.deepEqual(readdirSync(temporaryRoot), []);
 	assets.set('cohort.json', Buffer.from('modified remote bytes'));
 	assert.throws(() => publishNativeRelease('123', commands), /Never replace published bytes/);
