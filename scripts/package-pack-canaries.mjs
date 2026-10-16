@@ -1,4 +1,12 @@
-import { realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+	copyFileSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import semver from 'semver';
 
@@ -1166,4 +1174,39 @@ export const verifiedPublishedTypes = {
 	syntaxPropsArePrecise,
 };
 `;
+}
+
+// Retain the exact archives accepted by the pack canaries for downstream
+// qualification. Publication still belongs to the validated release workflow.
+export function retainPackedCompilerCohort(output, archives, manifests, sourceCommit) {
+	if (!path.isAbsolute(output) || !/^[a-f0-9]{40}$/.test(sourceCommit)) {
+		throw new Error('Pass an absolute new artifact directory and the tested Git commit.');
+	}
+	const names = ['octane', '@octanejs/tanstack-router', '@octanejs/rspack-plugin'];
+	const packages = names.map((name) => {
+		const archive = archives.get(name);
+		const manifest = manifests.get(name);
+		if (!archive || manifest?.name !== name) throw new Error(`Missing accepted archive: ${name}`);
+		const bytes = readFileSync(archive);
+		return {
+			name,
+			version: manifest.version,
+			file: path.basename(archive),
+			integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
+		};
+	});
+	// mkdir is exclusive. A pre-existing directory belongs to the caller and
+	// must survive both success and failure without any writes.
+	mkdirSync(output);
+	try {
+		for (const entry of packages)
+			copyFileSync(archives.get(entry.name), path.join(output, entry.file));
+		writeFileSync(
+			path.join(output, 'cohort.json'),
+			`${JSON.stringify({ sourceCommit, packages }, null, 2)}\n`,
+		);
+	} catch (error) {
+		rmSync(output, { recursive: true, force: true });
+		throw error;
+	}
 }

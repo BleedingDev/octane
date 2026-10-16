@@ -1327,6 +1327,15 @@ jobs:
       # mapper (lanes and what each proves: scripts/package-pack-canaries.mjs).
       - name: Pack and validate every publishable package
         run: pnpm packages:pack:check
+        env:
+          OCTANE_PACK_ARTIFACT_DIR: ${{ runner.temp }}/octane-compiler-cohort
+
+      - name: Retain accepted runtime, router and compiler archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: octane-compiler-cohort-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/octane-compiler-cohort
+          if-no-files-found: error
 
   # This stable marker lets consecutive lightweight commits inherit the last
   # full suite transitively. A lightweight run reaches it only after the scope

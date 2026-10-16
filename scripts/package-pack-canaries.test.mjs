@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
+import * as fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, test } from 'node:test';
@@ -26,6 +28,7 @@ import {
 	findExternalDependencySpecs,
 	isForbiddenNativeGraphModule,
 	isWithinDirectory,
+	retainPackedCompilerCohort,
 	renderPackedExampleWorkspace,
 	renderPackedCommonjsConsumerSource,
 	renderPackedDraggableEsmConsumerSource,
@@ -1035,5 +1038,86 @@ describe('isWithinDirectory', () => {
 		const workspace = path.join(path.sep, 'repo', 'octane');
 		assert.equal(isWithinDirectory(workspace, path.join(workspace, 'packages', 'octane')), true);
 		assert.equal(isWithinDirectory(workspace, path.join(path.sep, 'repo', 'octane-copy')), false);
+	});
+});
+
+describe('retainPackedCompilerCohort', () => {
+	function fixture(context) {
+		const root = mkdtempSync(path.join(tmpdir(), 'packed-compiler-cohort-'));
+		context.after(() => rmSync(root, { recursive: true, force: true }));
+		const names = ['octane', '@octanejs/tanstack-router', '@octanejs/rspack-plugin'];
+		const archives = new Map();
+		const manifests = new Map();
+		for (const [index, name] of names.entries()) {
+			const archive = path.join(root, `candidate-${index}.tgz`);
+			writeFileSync(archive, `accepted archive for ${name}`);
+			archives.set(name, archive);
+			manifests.set(name, { name, version: '0.13.8' });
+		}
+		return {
+			root,
+			archives,
+			manifests,
+			output: path.join(root, 'accepted'),
+			commit: 'a'.repeat(40),
+		};
+	}
+
+	test('retains the exact accepted bytes, identities and npm integrity without changing inputs', (context) => {
+		const f = fixture(context);
+		retainPackedCompilerCohort(f.output, f.archives, f.manifests, f.commit);
+		const cohort = JSON.parse(fs.readFileSync(path.join(f.output, 'cohort.json'), 'utf8'));
+		assert.equal(cohort.sourceCommit, f.commit);
+		assert.equal(cohort.packages.length, 3);
+		for (const entry of cohort.packages) {
+			const original = fs.readFileSync(f.archives.get(entry.name));
+			assert.deepEqual(fs.readFileSync(path.join(f.output, entry.file)), original);
+			assert.equal(entry.version, f.manifests.get(entry.name).version);
+			assert.equal(
+				entry.integrity,
+				`sha512-${createHash('sha512').update(original).digest('base64')}`,
+			);
+		}
+		assert.throws(
+			() => retainPackedCompilerCohort(f.output, f.archives, f.manifests, f.commit),
+			/EEXIST/,
+		);
+		assert.deepEqual(
+			JSON.parse(fs.readFileSync(path.join(f.output, 'cohort.json'), 'utf8')),
+			cohort,
+		);
+	});
+
+	test('rejects an incomplete cohort before creating output', (context) => {
+		const f = fixture(context);
+		f.archives.delete('@octanejs/tanstack-router');
+		assert.throws(
+			() => retainPackedCompilerCohort(f.output, f.archives, f.manifests, f.commit),
+			/Missing accepted archive/,
+		);
+		assert.equal(fs.existsSync(f.output), false);
+	});
+
+	test('cleans only its new directory if retaining the second archive fails', (context) => {
+		const f = fixture(context);
+		const original = fs.copyFileSync;
+		let copies = 0;
+		context.mock.method(fs.default, 'copyFileSync', (...args) => {
+			if (++copies === 2) throw new Error('copy failed');
+			return original(...args);
+		});
+		syncBuiltinESMExports();
+		try {
+			assert.throws(
+				() => retainPackedCompilerCohort(f.output, f.archives, f.manifests, f.commit),
+				/copy failed/,
+			);
+			assert.equal(copies, 2);
+			assert.equal(fs.existsSync(f.output), false);
+			for (const archive of f.archives.values()) assert.equal(fs.existsSync(archive), true);
+		} finally {
+			context.mock.restoreAll();
+			syncBuiltinESMExports();
+		}
 	});
 });

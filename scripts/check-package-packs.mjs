@@ -64,6 +64,7 @@ import {
 	renderPackedTsrxConsumerTypeProbe,
 	renderPackedStrictBrowserConsumerTypeProbe,
 	renderPackedStrictBrowserConsumerSource,
+	retainPackedCompilerCohort,
 } from './package-pack-canaries.mjs';
 import { LYNX_TOOLCHAIN_LANES } from '../packages/rspeedy-plugin-octane/src/toolchain-lanes.js';
 import {
@@ -2194,6 +2195,19 @@ try {
 				failures.push(`${validation.label}: validation failed\n${detail}`);
 			}
 		}
+	}
+	if (!failures.length && process.env.OCTANE_PACK_ARTIFACT_DIR) {
+		execFileSync('git', ['diff', '--exit-code', 'HEAD'], { cwd: REPO_ROOT, stdio: 'inherit' });
+		const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+			cwd: REPO_ROOT,
+			encoding: 'utf8',
+		}).trim();
+		retainPackedCompilerCohort(
+			process.env.OCTANE_PACK_ARTIFACT_DIR,
+			packedArchives,
+			packedManifests,
+			sourceCommit,
+		);
 	}
 } finally {
 	rmSync(tempRoot, { recursive: true, force: true });
