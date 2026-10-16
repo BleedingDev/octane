@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { act } from 'octane';
+import { act, startTransition } from 'octane';
 import { mount, nextPaint } from '../_helpers';
 import { RouterProvider } from '@octanejs/tanstack-router';
 import { makeConcurrentRouter, createDeferred } from '../_fixtures/concurrent-navigation.tsrx';
@@ -15,6 +15,39 @@ async function flush() {
 }
 
 describe('@octanejs/tanstack-router — concurrent navigation (startTransition)', () => {
+	it.each(['invalidate', 'navigate'] as const)(
+		'settles an async action awaiting router.%s',
+		async (operation) => {
+			const deferred = createDeferred<string>();
+			deferred.resolve('Slow page');
+			const router = makeConcurrentRouter('/', deferred);
+			await router.load();
+			const r = mount(RouterProvider as any, { router });
+			await flush();
+			let settled = false;
+			let failure: unknown;
+			try {
+				startTransition(async () => {
+					try {
+						if (operation === 'invalidate') await router.invalidate({ sync: true });
+						else await router.navigate({ to: '/slow' });
+						settled = true;
+					} catch (error) {
+						failure = error;
+					}
+				});
+				await flush();
+				expect(failure).toBeUndefined();
+				expect(settled).toBe(true);
+				expect(r.find(operation === 'invalidate' ? '.home' : '.slow').textContent).toBe(
+					operation === 'invalidate' ? 'Home' : 'Slow page',
+				);
+			} finally {
+				r.unmount();
+			}
+		},
+	);
+
 	// The router drives navigation state commits through octane's startTransition
 	// (Transitioner.tsrx), so React's transition/Suspense contract applies:
 	//
