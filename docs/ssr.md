@@ -788,9 +788,9 @@ second, renderer-free bootstrap entry:
 
 ```ts
 export default defineConfig({
-  router: {
-    routes: [new RenderRoute({ path: '/', entry: '/src/App.tsrx', hydrate: 'islands' })],
-  },
+	router: {
+		routes: [new RenderRoute({ path: '/', entry: '/src/App.tsrx', hydrate: 'islands' })],
+	},
 });
 ```
 
@@ -845,11 +845,11 @@ entry. A string selects a module's default (or first PascalCase) export; use an
 
 ```ts
 export default defineConfig({
-  rootBoundary: {
-    pending: '/src/RootPending.tsrx',
-    catch: ['RootCatch', '/src/RootCatch.tsrx'],
-  },
-  // ...router
+	rootBoundary: {
+		pending: '/src/RootPending.tsrx',
+		catch: ['RootCatch', '/src/RootCatch.tsrx'],
+	},
+	// ...router
 });
 ```
 
@@ -868,11 +868,11 @@ import:
 
 ```tsrx
 module server {
-  import { database } from './database.js';
+	import { database } from './database.js';
 
-  export async function saveName(name: string) {
-    return database.users.save({ name });
-  }
+	export async function saveName(name: string) {
+		return database.users.save({ name });
+	}
 }
 
 import { saveName } from 'server';
@@ -889,8 +889,8 @@ hydration-data and hydrate-module scripts in both dev and production:
 import { OCTANE_NONCE_STATE_KEY } from '@octanejs/vite-plugin';
 
 const cspNonce = async (context, next) => {
-  context.state.set(OCTANE_NONCE_STATE_KEY, crypto.randomUUID());
-  return next();
+	context.state.set(OCTANE_NONCE_STATE_KEY, crypto.randomUUID());
+	return next();
 };
 ```
 
