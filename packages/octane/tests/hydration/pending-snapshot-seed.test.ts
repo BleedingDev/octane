@@ -36,7 +36,9 @@ function streamedFrames(html: string) {
 	const frames = [
 		...html.matchAll(/__octaneStreamedRenderer\.receive\((\{.*?\})\);<\/script>/g),
 	].map((match) => JSON.parse(match[1]!) as { kind: string });
-	const selection = html.match(/v\.register\((\{.*?\})\);\}\)\(globalThis\);<\/script>/);
+	const selection = html.match(
+		/globalThis\.__octaneStreamedSignalSelections\.register\((\{.*?\})\);<\/script>/,
+	);
 	expect(selection).not.toBeNull();
 	expect(frames.map((frame) => frame.kind)).toEqual(['open', 'value', 'complete']);
 	const renderer = {

@@ -18782,6 +18782,9 @@ function activateHydrateBoundary(state: HydrateSlot): void {
 	}
 	const hydration =
 		preserved?.hydration ?? new HydrationCapability(block, getNextSibling(state.start), null);
+	// Native publishers keep ancestor context live; only their native signal reads
+	// have server history. Adopt the same shape while reconciling dynamic values.
+	hydration.reconcileValues = state.props.__publisher !== undefined;
 	// A suspended first attempt keeps its capability, so re-check each attempt.
 	if (!hydration.staleServerValues && hydrateServerValuesStale(state))
 		hydration.staleServerValues = true;
@@ -22376,6 +22379,8 @@ function skipFoldedHeadPrefix(container: RootContainer, node: Node | null): Node
  * discard its methods together with the marker/mismatch/seed helper graph.
  */
 class HydrationCapability {
+	/** Native publisher values can reflect a different initial live ancestor context. */
+	reconcileValues = false;
 	/**
 	 * Parent captures changed before this dormant boundary activated, so the
 	 * server HTML predates the client's state. Any difference from it, a text or
@@ -22583,7 +22588,8 @@ class HydrationCapability {
 		const undo = this.undo;
 		this.speculative = false;
 		this.saved = this.undo = null;
-		if (undo !== null && outer?.speculative) (outer.undo ??= []).push(...undo);
+		if (undo !== null && (outer?.speculative || (this.reconcileValues && outer?.undoable)))
+			(outer.undo ??= []).push(...undo);
 		this.passSeeds(outer);
 	}
 
@@ -22619,6 +22625,36 @@ class HydrationCapability {
 		this.speculative = this.undoable = false;
 		this.saved = this.undo = null;
 		if (undo !== null) for (let i = undo.length - 1; i >= 0; i--) undo[i]();
+	}
+
+	/** Live publisher writes must restore absent attributes as well as their values. */
+	private saveAttribute(el: Element, name: string): void {
+		const ns = attrNamespace(name);
+		if (inRootHydrationAttempt()) journalAttr(el, name, ns);
+		if (!this.speculative && !this.undoable) return;
+		const server = STAGED_DOM
+			? STAGED_DOM.view(el).getAttribute(name)
+			: Element.prototype.getAttribute.call(el, name);
+		(this.undo ??= []).push(() => {
+			const target = STAGED_DOM ? STAGED_DOM.view(el) : el;
+			const methods = STAGED_DOM ? target : Element.prototype;
+			if (server === null) {
+				if (ns) methods.removeAttributeNS.call(target, ns, name.slice(name.indexOf(':') + 1));
+				else methods.removeAttribute.call(target, name);
+			} else if (ns) methods.setAttributeNS.call(target, ns, name, server);
+			else methods.setAttribute.call(target, name, server);
+		});
+	}
+
+	/** Restore the comparison record with the live props an aborted publisher wrote. */
+	saveDescriptor(el: Element): void {
+		if (!this.reconcileValues || (!this.speculative && !this.undoable)) return;
+		const previous = getDeoptDesc(el);
+		(this.undo ??= []).push(() => {
+			(STAGED_DOM ? STAGED_DOM.view(el as Element & DeoptStamped) : (el as Element & DeoptStamped))[
+				DEOPT_DESC
+			] = previous;
+		});
 	}
 
 	isActive(): boolean {
@@ -23752,6 +23788,14 @@ class HydrationCapability {
 		loc: string | undefined,
 	): boolean {
 		const equal = server === text || isTextParserNormalizedMatch(server, text);
+		if (!equal && this.reconcileValues && node?.nodeType === 3) {
+			if (inRootHydrationAttempt()) journalText(node as Text, server);
+			if (this.speculative || this.undoable)
+				(this.undo ??= []).push(() => {
+					(STAGED_DOM ? STAGED_DOM.view(node) : node).nodeValue = server;
+				});
+			return false;
+		}
 		if (!equal) {
 			if (
 				host !== null &&
@@ -24769,14 +24813,21 @@ class HydrationCapability {
 	allowAttribute(el: Element, name: string, next: string | null): boolean {
 		if (el === null) this.missingElement();
 		if (this.isFresh(el)) return true;
-		if (process.env.NODE_ENV === 'production' && !this.staleServerValues) return false;
+		if (process.env.NODE_ENV === 'production' && !this.staleServerValues && !this.reconcileValues)
+			return false;
 		// Read through the prototype: a form's named control can shadow its method.
 		const ns = attrNamespace(name);
 		const server = ns
-			? (STAGED_DOM ? STAGED_DOM.view(el) : el).getAttributeNS(
-					ns,
-					name.indexOf(':') >= 0 ? name.slice(name.indexOf(':') + 1) : name,
-				)
+			? STAGED_DOM
+				? STAGED_DOM.view(el).getAttributeNS(
+						ns,
+						name.indexOf(':') >= 0 ? name.slice(name.indexOf(':') + 1) : name,
+					)
+				: Element.prototype.getAttributeNS.call(
+						el,
+						ns,
+						name.indexOf(':') >= 0 ? name.slice(name.indexOf(':') + 1) : name,
+					)
 			: STAGED_DOM
 				? STAGED_DOM.view(el).getAttribute(name)
 				: Element.prototype.getAttribute.call(el, name);
@@ -24784,8 +24835,13 @@ class HydrationCapability {
 			server !== next &&
 			domBindingClaims.get(el)?.get(name) !== server &&
 			!(next !== null && isAttributeParserNormalizedMatch(server, next))
-		)
+		) {
+			if (this.reconcileValues) {
+				this.saveAttribute(el, name);
+				return true;
+			}
 			this.unpatched(el, `attribute \`${name}\``, server, next);
+		}
 		return false;
 	}
 
@@ -24800,6 +24856,7 @@ class HydrationCapability {
 	keepsClass(el: Element, next: string | null, absentIsEmpty: boolean): boolean {
 		if (el === null) this.missingElement();
 		if (this.isFresh(el)) return false;
+		if (this.reconcileValues) return !this.allowAttribute(el, 'class', next);
 		if (process.env.NODE_ENV !== 'production' || this.staleServerValues)
 			(this.classes ??= new Map()).set(el, { next, absentIsEmpty });
 		return true;
@@ -24823,7 +24880,8 @@ class HydrationCapability {
 	): boolean {
 		if (el === null) this.missingElement();
 		if (this.isFresh(el)) return false;
-		if (process.env.NODE_ENV === 'production' && !this.staleServerValues) return true;
+		if (process.env.NODE_ENV === 'production' && !this.staleServerValues && !this.reconcileValues)
+			return true;
 		const style = (STAGED_DOM ? STAGED_DOM.view(el as HTMLElement) : (el as HTMLElement)).style;
 		const server = style.cssText;
 		const expectedStyle = domNode(
@@ -24856,6 +24914,13 @@ class HydrationCapability {
 			}
 		}
 		const expected = expectedStyle.cssText;
+		if (this.reconcileValues) {
+			if (claims?.get('style') !== server && server !== expected) {
+				this.saveAttribute(el, 'style');
+				style.cssText = expected;
+			}
+			return true;
+		}
 		if (
 			(server !== expected ||
 				(!expected && !removed && (STAGED_DOM ? STAGED_DOM.view(el) : el).hasAttribute('style'))) &&
@@ -37977,7 +38042,7 @@ function hasDeoptOwnedChild(el: Element): boolean {
 	return false;
 }
 interface DeoptStamped {
-	[DEOPT_DESC]?: ElementDescriptor;
+	[DEOPT_DESC]?: ElementDescriptor | undefined;
 }
 function getDeoptDesc(n: Node): ElementDescriptor | undefined {
 	return (STAGED_DOM ? STAGED_DOM.view(n as Node & DeoptStamped) : (n as Node & DeoptStamped))[
@@ -38036,6 +38101,7 @@ function setDeoptDesc(el: Element, d: ElementDescriptor): void {
 	if (TRANSITION_JOURNAL !== null) {
 		TRANSITION_JOURNAL.push(JOURNAL_PROP, el, DEOPT_DESC, getDeoptDesc(el));
 	}
+	if (hydrating) activeHydration()?.saveDescriptor(el);
 	(STAGED_DOM ? STAGED_DOM.view(el as Element & DeoptStamped) : (el as Element & DeoptStamped))[
 		DEOPT_DESC
 	] = record;
@@ -43922,6 +43988,8 @@ interface InitialSuspenseHydration {
 	idStart: number;
 	seedRaw: string | null;
 	nativeRaw: string | null;
+	/** A resumed native publisher still reconciles its live ancestor values. */
+	reconcileValues: boolean;
 	/** The captures changed before a dormant boundary activated; see staleServerValues. */
 	stale?: true;
 }
@@ -44000,6 +44068,7 @@ function takeInitialSuspenseHydration(
 			start,
 			end,
 			idStart: 0,
+			reconcileValues: hydration.reconcileValues,
 			...payload,
 			consume: () => {
 				initialStreamedPayloads?.delete(owner);
@@ -44051,6 +44120,7 @@ function takeInitialSuspenseHydration(
 		idStart,
 		seedRaw,
 		nativeRaw,
+		reconcileValues: hydration.reconcileValues,
 	};
 }
 
@@ -44162,6 +44232,7 @@ function renderInitialSuspenseHydration(
 	hydration.protectRootAnchor(initial.end);
 	const previousHydration = currentHydration;
 	// Only the activation knows; a retry runs outside it, over the restored arm.
+	hydration.reconcileValues = initial.reconcileValues;
 	if (previousHydration?.staleServerValues || initial.stale)
 		hydration.staleServerValues = initial.stale = true;
 	if (previousHydration?.retryPresentation !== undefined)

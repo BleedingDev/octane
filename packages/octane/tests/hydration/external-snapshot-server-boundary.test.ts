@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as Server from 'octane/server';
 import { prerender } from 'octane/static';
 import type { ExternalSnapshot, ExternalSnapshotRequest } from 'octane/server';
-import {
+import { loadServerFixture } from '../_server-fixture.js';
+import { collectReadableStream, deferred } from '../_server-stream.js';
+
+const {
 	SnapshotHost,
 	SnapshotStreamingHost,
 	createNestedSnapshotRemote,
@@ -10,8 +13,10 @@ import {
 	SnapshotPlain,
 	SnapshotRemote,
 	SnapshotTheme,
-} from '../_fixtures/external-snapshot-server-boundary.tsrx';
-import { collectReadableStream, deferred } from '../_server-stream.js';
+} = loadServerFixture<typeof import('../_fixtures/external-snapshot-server-boundary.tsrx')>(
+	'packages/octane/tests/_fixtures/external-snapshot-server-boundary.tsrx',
+	{ compileOptions: { dev: process.env.OCTANE_TEST_COMPILE_MODE !== 'prod', hmr: false } },
+);
 
 const authority = { publisherBuildId: 'boundary-publisher', runtimeABI: 1 as const };
 const releases: Array<() => void> = [];
