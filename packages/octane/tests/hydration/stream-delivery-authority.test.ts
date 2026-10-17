@@ -593,6 +593,62 @@ describe('emitted pre-client authority mailboxes', () => {
 		},
 	);
 
+	it('releases a partially acquired signal owner when renderer admission fails without disrupting peers', async () => {
+		const realm: Record<string, unknown> = {};
+		const ownerDocument = document.implementation.createHTMLDocument('Failed renderer admission');
+		const host = authority('host'),
+			offender = authority('offender'),
+			sibling = authority('sibling');
+		const open = (owner: StreamFrameIdentity) =>
+			runScript(
+				streamedRendererFrameScript({
+					identity: owner,
+					channel: 'result',
+					kind: 'open',
+					resource: 'stream',
+					sequence: 0,
+				}),
+				realm,
+				ownerDocument,
+			);
+		for (const owner of [host, offender, sibling]) {
+			runScript(announce(owner), realm, ownerDocument);
+		}
+		for (let count = 0; count < 513; count++) {
+			runScript(streamedRendererFrameScript(frame(offender)), realm, ownerDocument);
+		}
+		for (const owner of [host, sibling]) open(owner);
+		const bootstrap = (owner: StreamFrameIdentity, signalOwner = { scopeKey: owner.ownerKey }) =>
+			bootstrapStreamedSignalResults({
+				buildId: owner.buildId,
+				documentId: owner.documentId,
+				signalOwner,
+				target: realm,
+			});
+		const first = bootstrap(host);
+		let second: ReturnType<typeof bootstrap> | undefined;
+		let recovered: ReturnType<typeof bootstrap> | undefined;
+		try {
+			second = bootstrap(sibling);
+			const signalOwner = { scopeKey: offender.ownerKey };
+			expect(() => bootstrap(offender, signalOwner)).toThrow(/mailbox overflowed/);
+			const replacement = { ...offender, buildId: 'replacement-publisher' };
+			runScript(announce(replacement), realm, ownerDocument);
+			open(replacement);
+			// A failed join must release its activator on this physical owner.
+			recovered = bootstrap(replacement, signalOwner);
+			expect(await recovered.receiver.receive({ ...frame(replacement), sequence: 1 })).toBe(
+				'accepted',
+			);
+			expect(await first.receiver.receive({ ...frame(host), sequence: 1 })).toBe('accepted');
+			expect(await second.receiver.receive({ ...frame(sibling), sequence: 1 })).toBe('accepted');
+		} finally {
+			recovered?.dispose();
+			second?.dispose();
+			first.dispose();
+		}
+	});
+
 	it('preserves previously admitted publishers through bounded pre-client cardinality exhaustion', async () => {
 		const realm: Record<string, unknown> = {};
 		const ownerDocument = document.implementation.createHTMLDocument('Pre-client exhaustion');
