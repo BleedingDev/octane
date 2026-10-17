@@ -18938,6 +18938,7 @@ export function externalSnapshotBoundary<P>(
 	validateExternalSnapshotAuthority(options.authority);
 	const authority = Object.freeze({ ...options.authority });
 	const streamSlot = Symbol('octane.external.stream');
+	const streamOwnerSlot = Symbol('octane.external.stream-owner');
 	// Only this opt-in factory reaches the streamed transport implementation.
 	const descriptor: ExternalHydrateDescriptor = {
 		authority,
@@ -18979,9 +18980,10 @@ export function externalSnapshotBoundary<P>(
 				extra,
 			);
 			const state = scope.slots[0] as HydrateSlot;
+			const streamJoined = useRef(false, streamOwnerSlot);
 			useLayoutEffect(
 				() => {
-					if (!state.serverPreserved) return;
+					if (!state.serverPreserved || streamJoined.current) return;
 					// Only a committed host may consume publisher history. An abandoned
 					// root hydration must leave its frames available for the next attempt.
 					const bridge = bootstrapStreamedSignalHydration({
@@ -18990,8 +18992,11 @@ export function externalSnapshotBoundary<P>(
 						signalOwner: state.idState.dataOwner!,
 						target: state.wrapper.ownerDocument.defaultView as unknown as Record<string, unknown>,
 					});
+					streamJoined.current = true;
+					// Suspense and Activity disconnect layout effects while retaining the
+					// mounted boundary. Its publisher lease ends only at actual unmount.
+					registerHookCleanup(scope, () => bridge.dispose());
 					requestHydrateBoundary(state);
-					return () => bridge.dispose();
 				},
 				[state],
 				streamSlot,

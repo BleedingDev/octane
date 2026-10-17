@@ -5556,6 +5556,7 @@ export function ssrComponent(
 	// A fragment renderer renders its enclosing component's JSX under that
 	// component's identity, exactly like the inline HTML the client also folds.
 	const renderer = invocationSite === RENDERER_INVOCATION_SITE;
+	if (renderer) identityScoped = true;
 	let signalInstanceKey: ServerSignalInstanceKey | undefined =
 		!renderer && SERVER_SIGNAL_BINDINGS_ENABLED && RESOLVED !== null
 			? serverStructuralSignalInstanceKey(invocationSite, key)

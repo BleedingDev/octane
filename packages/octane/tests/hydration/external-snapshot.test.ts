@@ -412,6 +412,134 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		},
 	);
 
+	it.each(['suspense', 'activity'] as const)(
+		'keeps a committed publisher lease across host %s hide and reveal',
+		async (mode) => {
+			const source = `import {use,useState} from 'octane';import {load} from './data';export function Remote(){const value=use(load());const [count,setCount]=useState(0);return <button onClick={()=>setCount(count+1)}>{value+':'+count}</button>;}`;
+			const serverData = Promise.resolve('publisher history');
+			const server = pair(source, '/remote/CommittedHistory.tsx', dev, {
+				'./data': { load: () => serverData },
+			}).server;
+			const browserData = deferred<string>();
+			const client = pair(source, '/remote/CommittedHistory.tsx', dev, {
+				'./data': { load: () => browserData.promise },
+			}).client;
+			const snapshot = transport(server.Remote);
+			const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
+			const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
+			const host =
+				mode === 'suspense'
+					? `import {Suspense} from 'octane';import {Boundary} from './remote';function read(value){if(value!==undefined)throw value;return 'host ready';}function Sibling(props){return <span>{read(props.gate.pending)}</span>;}export function App(props){return <Suspense fallback={<p data-pending="">host pending</p>}><section data-host=""><Boundary/><Sibling gate={props.gate}/></section></Suspense>;}`
+					: `import {Activity,Suspense} from 'octane';import {Boundary} from './remote';export function App(props) @{ <Suspense fallback={<p>loading snapshot</p>}><Activity mode={props.mode}><section data-host=""><Boundary/></section></Activity></Suspense> }`;
+			const hostId =
+				mode === 'activity' ? '/host/CommittedHistory.tsrx' : '/host/CommittedHistory.tsx';
+			const sHost = pair(host, hostId, dev, {
+				'./remote': { Boundary: S },
+			}).server;
+			const cHost = pair(host, hostId, dev, {
+				'./remote': { Boundary: C },
+			}).client;
+			const documentId = 'committed-history-' + mode;
+			const options = { externalSnapshots: { documentId } };
+			const gate = { pending: undefined as Promise<void> | undefined };
+			const container = document.createElement('div');
+			container.innerHTML = (await prerender(sHost.App, { mode: 'visible', gate }, options)).html;
+			activateStreamedMarkup(container);
+			document.body.append(container);
+			const section = container.querySelector<HTMLElement>('[data-host]')!;
+			const button = container.querySelector('button')!;
+			const pending = deferred<void>();
+			const errors: unknown[] = [];
+			const bridge = bootstrapStreamedSignalHydration({ buildId: 'host-build', documentId });
+			const root = Client.hydrateRoot(
+				container,
+				cHost.App,
+				{ mode: 'visible', gate },
+				{
+					...options,
+					signalOwner: bridge.signalOwner,
+					onRecoverableError: (error) => errors.push(error),
+					onUncaughtError: (error) => errors.push(error),
+				},
+			);
+			try {
+				await Client.act(async () => {});
+				expect(container.querySelector('button')).toBe(button);
+				await Client.act(() => button.click());
+				expect(button.textContent).toBe('publisher history:1');
+
+				if (mode === 'suspense') gate.pending = pending.promise;
+				await Client.act(() => {
+					Client.flushSync(() =>
+						root.render(cHost.App, { mode: mode === 'activity' ? 'hidden' : 'visible', gate }),
+					);
+				});
+				expect(container.querySelector('[data-host]')).toBe(section);
+				expect(section.style.display).toBe('none');
+				if (mode === 'suspense') {
+					expect(container.querySelector('[data-pending]')?.textContent).toBe('host pending');
+				}
+				expect(errors).toEqual([]);
+
+				// Settle the browser's data while the publisher is hidden; its adopted server
+				// history and local state must remain usable when the host shows it again.
+				browserData.resolve('publisher history');
+				await Client.act(async () => {});
+				expect(section.style.display).toBe('none');
+				gate.pending = undefined;
+				pending.resolve();
+				await Client.act(() => root.render(cHost.App, { mode: 'visible', gate }));
+				expect(container.querySelector('[data-host]')).toBe(section);
+				expect(section.style.display).not.toBe('none');
+				expect(container.querySelector('[data-pending]')).toBeNull();
+				expect(container.querySelector('button')).toBe(button);
+				expect(button.textContent).toBe('publisher history:1');
+				await Client.act(() => button.click());
+				expect(button.textContent).toBe('publisher history:2');
+				expect(errors).toEqual([]);
+			} finally {
+				gate.pending = undefined;
+				pending.resolve();
+				browserData.resolve('publisher history');
+				root.unmount();
+				bridge.dispose();
+				container.remove();
+			}
+		},
+	);
+
+	it('keeps ordinary JSX snapshot retries and sibling requests distinct', async () => {
+		const serverData = Promise.resolve('publisher history');
+		const server = pair(
+			`import {use,useState} from 'octane';import {load} from './data';export function Remote(props){const value=use(load());const [count,setCount]=useState(0);return <button onClick={()=>setCount(count+1)}>{props.label+':'+value+':'+count}</button>;}`,
+			'/remote/ActivityHistory.tsx',
+			dev,
+			{ './data': { load: () => serverData } },
+		).server;
+		const Boundary = Server.externalSnapshotBoundary({
+			authority,
+			component: server.Remote,
+			snapshot: transport(server.Remote),
+		});
+		const host = pair(
+			`import {Activity,Suspense} from 'octane';import {Boundary} from './remote';export function App(props){return <Suspense fallback={<p>loading snapshot</p>}><Activity mode={props.mode}><section data-host=""><Boundary label="first"/><Boundary label="second"/></section></Activity></Suspense>;}`,
+			'/host/ActivityHistory.tsx',
+			dev,
+			{ './remote': { Boundary } },
+		).server;
+		const result = await prerender(
+			host.App,
+			{ mode: 'visible' },
+			{ externalSnapshots: { documentId: 'jsx-activity-history' } },
+		);
+		const container = document.createElement('div');
+		container.innerHTML = result.html;
+		expect([...container.querySelectorAll('button')].map((button) => button.textContent)).toEqual([
+			'first:publisher history:0',
+			'second:publisher history:0',
+		]);
+	});
+
 	it('retains compiled signal and ID adoption with publisher-local native providers', async () => {
 		const { server, client } = pair(
 			`import {useContext,useId} from 'octane';import {useSignal$} from 'octane/signals/client';import {Other} from './contexts';export function Remote(props){const value$=useSignal$(props.initial);const id=useId();const context=useContext(Other);return <section><input id={id} defaultValue="draft"/><button onClick={()=>value$.set(value=>value+1)}>{props.label+':'+value$.get()+':'+context}</button></section>;}`,

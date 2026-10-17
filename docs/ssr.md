@@ -287,6 +287,8 @@ automatically, but its component has already been imported by the caller.
 Streamed results are isolated by publisher build, document and native owner,
 including sibling boundaries and host-owned signals. Removing a boundary
 retires its owned stream bridge; it does not reset a sibling or the host's data.
+A committed boundary keeps its publisher lease while Suspense or Activity hides
+its content, and releases it only when the boundary actually unmounts.
 This identity validation is not transport authentication or HTML sanitization.
 The host must select and authenticate a trusted publisher and serve matching
 compiled client code. Forward the native request and reply unchanged instead
