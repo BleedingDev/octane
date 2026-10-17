@@ -57,6 +57,27 @@ export function earlySignalBootstrapScript(options: EarlySignalBootstrapOptions 
 	);
 }
 
+let STREAMED_SIGNAL_MAILBOXES_JS: string | undefined;
+/** @internal Shared pre-client ingress; refusal belongs to one publisher/document/owner. */
+export function streamedSignalMailboxesJs(): string {
+	return (STREAMED_SIGNAL_MAILBOXES_JS ??=
+		'(function(g){var z="__octaneStreamedSignalSelections";' +
+		'function key(i){if(!i||i.protocol!==1)return;var a=[i.buildId,i.documentId,i.ownerKey];' +
+		'for(var j=0;j<3;j++)if(typeof a[j]!=="string"||!a[j]||a[j].length>1024)return;return JSON.stringify(a);}' +
+		'function bytes(v){return new TextEncoder().encode(JSON.stringify(v)).byteLength;}' +
+		'function mailbox(field,frames,max,limit,item){var a=[],ks=[],r=[],n=0,v={version:1,authorities:ks,refused:r,exhausted:false};v[field]=a;' +
+		'v[frames?"receive":"register"]=function(x){var k=key(frames?x&&x.identity:x);if(k===undefined||r.indexOf(k)!==-1)return;' +
+		'var known=ks.indexOf(k)!==-1;if(v.exhausted&&!known)return;var b=bytes(x),kb=known?0:new TextEncoder().encode(k).byteLength;' +
+		'if(!known&&(ks.length>=max||n+kb>limit)){v.exhausted=true;return;}' +
+		'if(a.length+r.length>=max||b>item||n+b+kb>limit){' +
+		'var at=0;for(var j=0;j<a.length;j++){var p=a[j];if(key(frames?p&&p.identity:p)===k)n-=bytes(p);else a[at++]=p;}a.length=at;' +
+		'if(a.length+r.length>=max||n+kb>limit){v.exhausted=true;if(known){ks.splice(ks.indexOf(k),1);n-=new TextEncoder().encode(k).byteLength;}return;}' +
+		'if(!known){ks.push(k);n+=kb;}r.push(k);return;}' +
+		'if(!known){ks.push(k);n+=kb;}a.push(x);n+=b;};return v;}' +
+		'if(!g[z])g[z]=mailbox("identities",false,256,4194304,4194304);' +
+		'var k="__octaneStreamedRenderer";if(!g[k])g[k]=mailbox("frames",true,512,16777216,4194304);})(globalThis);');
+}
+
 let STREAMED_SIGNAL_BOOTSTRAP_JS: string | undefined;
 let STREAMED_SIGNAL_INDEPENDENT_BOOTSTRAP_JS: string | undefined;
 let STREAMED_SIGNAL_FORM_BOOTSTRAP_JS: string | undefined;
@@ -70,13 +91,8 @@ export function streamedSignalBootstrapJs(
 	formSubmissions = false,
 ): string {
 	const signals = (STREAMED_SIGNAL_BOOTSTRAP_JS ??=
-		'(function(g){var z="__octaneStreamedSignalSelections",v=g[z];' +
-		'if(!v){var a=[];g[z]={version:1,identities:a,register:function(i){' +
-		'if(a.length>=256){this.overflow=true;return;}a.push(i);}};}' +
-		'var k="__octaneStreamedRenderer",e=g[k];if(e)return;' +
-		'var q=[];g[k]={version:1,frames:q,receive:function(f){' +
-		'if(q.length>=512){this.overflow=true;return;}q.push(f);}};' +
-		'var s=g.__octaneEarlySignalControls||(g.__octaneEarlySignalControls={q:[],n:0});' +
+		streamedSignalMailboxesJs() +
+		'(function(g){var s=g.__octaneEarlySignalControls||(g.__octaneEarlySignalControls={q:[],n:0});' +
 		'if(!s.l){s.l=1;document.addEventListener("input",function(e){var t=e.target;' +
 		'if(!t||!t.getAttribute||!t.getAttribute("' +
 		SIGNAL_CONTROL_ATTR +

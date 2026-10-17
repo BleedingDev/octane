@@ -25,6 +25,7 @@ import {
 } from '../streamed-signals-protocol.js';
 import {
 	installStreamedRendererGlobal,
+	readStreamedMailboxAuthorities,
 	streamedRendererAuthorityKey,
 	type StreamedRendererAuthority,
 	type StreamedRendererDeliveryOptions,
@@ -46,6 +47,9 @@ interface EarlyStreamedSignalSelections {
 	readonly version: 1;
 	readonly identities: unknown[];
 	overflow?: boolean;
+	readonly authorities?: unknown;
+	readonly refused?: unknown;
+	readonly exhausted?: unknown;
 	register(identity: unknown): void;
 }
 
@@ -59,6 +63,7 @@ interface StreamedSelectionRouter {
 	readonly early: EarlyStreamedSignalSelections;
 	readonly leases: Map<string, (identity: StreamFrameIdentity) => void>;
 	readonly retired: Set<string>;
+	readonly admitted: Set<string>;
 	readonly refused: Set<string>;
 	exhausted: boolean;
 	removed: boolean;
@@ -85,21 +90,29 @@ function installSelectionLease(
 	)
 		throw new Error(formatClientError(124));
 	if (router === undefined) {
-		let initialBytes = 0;
+		const history = readStreamedMailboxAuthorities(
+			early,
+			early.identities,
+			false,
+			256,
+			formatClientError(268),
+		);
+		const { admitted, refused } = history;
+		let initialBytes = history.bytes;
 		for (const identity of early.identities)
 			initialBytes += new TextEncoder().encode(JSON.stringify(identity)).byteLength;
-		if (early.identities.length > 256 || initialBytes > 4 * 1024 * 1024)
+		if (early.identities.length + refused.size > 256 || initialBytes > 4 * 1024 * 1024)
 			throw new Error(formatClientError(268));
 		const leases = new Map<string, (identity: StreamFrameIdentity) => void>();
 		const retired = new Set<string>();
-		const refused = new Set<string>();
 		const originalRegister = early.register;
 		const created: StreamedSelectionRouter = {
 			early,
 			leases,
 			retired,
+			admitted,
 			refused,
-			exhausted: false,
+			exhausted: history.exhausted,
 			removed: false,
 			pendingBytes: initialBytes,
 			restore() {
@@ -117,11 +130,22 @@ function installSelectionLease(
 				return;
 			}
 			if (retired.has(candidateKey)) return;
-			if (refused.has(candidateKey) || created.exhausted) throw new Error(formatClientError(268));
+			if (refused.has(candidateKey) || (created.exhausted && !admitted.has(candidateKey)))
+				throw new Error(formatClientError(268));
 			const bytes = new TextEncoder().encode(JSON.stringify(candidate)).byteLength;
+			const known = admitted.has(candidateKey);
+			const authorityBytes = known ? 0 : new TextEncoder().encode(candidateKey).byteLength;
+			if (
+				!known &&
+				(admitted.size + refused.size + retired.size >= 256 ||
+					created.pendingBytes + authorityBytes > 4 * 1024 * 1024)
+			) {
+				created.exhausted = true;
+				throw new Error(formatClientError(268));
+			}
 			if (
 				early.identities.length + refused.size + retired.size >= 256 ||
-				created.pendingBytes + bytes > 4 * 1024 * 1024
+				created.pendingBytes + bytes + authorityBytes > 4 * 1024 * 1024
 			) {
 				// Keep one refusal instead of this authority's incomplete selections.
 				let retained = 0;
@@ -134,7 +158,7 @@ function installSelectionLease(
 					else early.identities[retained++] = queued;
 				}
 				early.identities.length = retained;
-				const refusalBytes = new TextEncoder().encode(candidateKey).byteLength;
+				const refusalBytes = authorityBytes;
 				if (
 					early.identities.length + refused.size + retired.size >= 256 ||
 					created.pendingBytes + refusalBytes > 4 * 1024 * 1024
@@ -142,20 +166,26 @@ function installSelectionLease(
 					// Exhaustion cannot forget the rejected key and admit it later.
 					// Existing leases still deliver directly, before this cold mailbox.
 					created.exhausted = true;
+					if (admitted.delete(candidateKey))
+						created.pendingBytes -= new TextEncoder().encode(candidateKey).byteLength;
 				} else {
+					admitted.delete(candidateKey);
 					refused.add(candidateKey);
 					created.pendingBytes += refusalBytes;
 				}
 				throw new Error(formatClientError(268));
 			}
+			admitted.add(candidateKey);
 			early.identities.push(candidate);
-			created.pendingBytes += bytes;
+			created.pendingBytes += bytes + authorityBytes;
 		};
 		early.register = route;
 		router = created;
 		streamedSelectionRouters.set(target, router);
 	}
-	if (router.exhausted || router.refused.has(key)) throw new Error(formatClientError(268));
+	if ((router.exhausted && !router.admitted.has(key)) || router.refused.has(key))
+		throw new Error(formatClientError(268));
+	router.admitted.delete(key);
 	router.leases.set(key, register);
 	const installed = router;
 	let removed = false;
@@ -164,6 +194,8 @@ function installSelectionLease(
 			const matching: StreamFrameIdentity[] = [];
 			let retained = 0;
 			let pendingBytes = 0;
+			for (const admittedKey of installed.admitted)
+				pendingBytes += new TextEncoder().encode(admittedKey).byteLength;
 			for (const retiredKey of installed.retired)
 				pendingBytes += new TextEncoder().encode(retiredKey).byteLength;
 			for (const refusedKey of installed.refused)
@@ -187,6 +219,7 @@ function installSelectionLease(
 			const retirementBytes = new TextEncoder().encode(key).byteLength;
 			if (
 				early.identities.length + installed.refused.size + installed.retired.size >= 256 ||
+				installed.admitted.size + installed.refused.size + installed.retired.size >= 256 ||
 				installed.pendingBytes + retirementBytes > 4 * 1024 * 1024
 			)
 				installed.exhausted = true;

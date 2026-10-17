@@ -1,3 +1,4 @@
+import { streamedSignalMailboxesJs } from './early-signals.js';
 import { formatServerError } from '../error-codes.server.generated.js';
 import { encodeSignalValue } from '../data-encoding.js';
 import { STREAM_SCRIPT_ATTR } from '../stream-protocol.js';
@@ -321,7 +322,7 @@ function streamedSignalSelectionScript(identity: StreamFrameIdentity, nonce?: st
 		.replace(/>/g, '\\u003e')
 		.replace(/\u2028/g, '\\u2028')
 		.replace(/\u2029/g, '\\u2029');
-	return `<script ${STREAM_SCRIPT_ATTR}${nonce === undefined ? '' : ` nonce="${escapeAttribute(nonce)}"`}>(function(g){var k="__octaneStreamedRenderer",e=g[k];if(!e){var q=[];g[k]={version:1,frames:q,receive:function(f){if(q.length>=512){this.overflow=true;return;}q.push(f);}};}var z="__octaneStreamedSignalSelections",v=g[z];if(!v){var a=[];v=g[z]={version:1,identities:a,register:function(i){if(a.length>=256){this.overflow=true;return;}a.push(i);}};}v.register(${encoded});})(globalThis);</script>`;
+	return `<script ${STREAM_SCRIPT_ATTR}${nonce === undefined ? '' : ` nonce="${escapeAttribute(nonce)}"`}>${streamedSignalMailboxesJs()}globalThis.__octaneStreamedSignalSelections.register(${encoded});</script>`;
 }
 
 /**

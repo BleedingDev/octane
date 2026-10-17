@@ -5,6 +5,7 @@ import { prerender } from '../../src/runtime.server.js';
 import * as ClientSignals from '../../src/signals/client.js';
 import * as ServerSignals from '../../src/signals/server.js';
 import * as Signals from '../../src/signals/index.js';
+import { bootstrapStreamedSignalHydration } from '../../src/hydration/streamed-signals.js';
 import { createContext } from '../../src/universal-native.js';
 import { loadCompiledFixtureSource } from '../_server-fixture.js';
 import { activateStreamedMarkup, deferred, resetStreamRuntimeGlobals } from '../_server-stream.js';
@@ -339,6 +340,78 @@ function registerTheme() {
 }
 
 describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
+	it.each([false, true])(
+		'retries a suspended host without losing publisher adoption or stream history, host lease=%s',
+		async (hostLease) => {
+			const source = `import {use,useState,useLayoutEffect} from 'octane';import {load,onReady} from './data';export function Remote(){const value=use(load());const [count,setCount]=useState(0);useLayoutEffect(()=>onReady(),[]);return <button onClick={()=>setCount(count+1)}>{value+':'+count}</button>;}`;
+			const server = pair(source, '/remote/RetryHistory.tsx', dev, {
+				'./data': { load: () => Promise.resolve('publisher history'), onReady() {} },
+			}).server;
+			const browserData = deferred<string>();
+			const clientLoad = vi.fn(() => browserData.promise);
+			const onReady = vi.fn();
+			const client = pair(source, '/remote/RetryHistory.tsx', dev, {
+				'./data': { load: clientLoad, onReady },
+			}).client;
+			const snapshot = transport(server.Remote);
+			const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
+			const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
+			const host = `import {Boundary} from './remote';function read(value){if(value!==undefined)throw value;return 'host ready';}function Sibling(props){return <span>{read(props.gate.pending)}</span>;}export function App(props){return <main><Boundary/><Sibling gate={props.gate}/></main>;}`;
+			const sHost = pair(host, '/host/RetryHistory.tsx', dev, {
+				'./remote': { Boundary: S },
+			}).server;
+			const cHost = pair(host, '/host/RetryHistory.tsx', dev, {
+				'./remote': { Boundary: C },
+			}).client;
+			const documentId = 'retry-history-' + hostLease;
+			const options = { externalSnapshots: { documentId } };
+			const container = document.createElement('div');
+			container.innerHTML = (await prerender(sHost.App, { gate: {} }, options)).html;
+			activateStreamedMarkup(container);
+			document.body.append(container);
+			const button = container.querySelector('button')!;
+			const pending = deferred<void>();
+			const gate = { pending: pending.promise as Promise<void> | undefined };
+			const errors: unknown[] = [];
+			const bridge = hostLease
+				? bootstrapStreamedSignalHydration({ buildId: 'host-build', documentId })
+				: undefined;
+			const root = Client.hydrateRoot(
+				container,
+				cHost.App,
+				{ gate },
+				{
+					...options,
+					...(bridge === undefined ? {} : { signalOwner: bridge.signalOwner }),
+					onRecoverableError: (error) => errors.push(error),
+					onUncaughtError: (error) => errors.push(error),
+				},
+			);
+			try {
+				await Client.act(async () => {});
+				expect(container.querySelector('button')).toBe(button);
+				expect(onReady).not.toHaveBeenCalled();
+				gate.pending = undefined;
+				pending.resolve();
+				await Client.act(async () => {});
+				expect(container.querySelector('button')).toBe(button);
+				expect(button.textContent).toBe('publisher history:0');
+				expect(onReady).toHaveBeenCalled();
+				browserData.resolve('publisher history');
+				await Client.act(async () => {});
+				await Client.act(() => button.click());
+				expect(button.textContent).toBe('publisher history:1');
+				expect(clientLoad).toHaveBeenCalled();
+				expect(errors).toEqual([]);
+			} finally {
+				pending.resolve();
+				root.unmount();
+				bridge?.dispose();
+				container.remove();
+			}
+		},
+	);
+
 	it('retains compiled signal and ID adoption with publisher-local native providers', async () => {
 		const { server, client } = pair(
 			`import {useContext,useId} from 'octane';import {useSignal$} from 'octane/signals/client';import {Other} from './contexts';export function Remote(props){const value$=useSignal$(props.initial);const id=useId();const context=useContext(Other);return <section><input id={id} defaultValue="draft"/><button onClick={()=>value$.set(value=>value+1)}>{props.label+':'+value$.get()+':'+context}</button></section>;}`,

@@ -17137,11 +17137,6 @@ interface ExternalHydrateDescriptor {
 		documentId: string,
 		serverPreserved: boolean,
 	) => { owner: SignalOwner; identifierPrefix: string };
-	readonly openStream: (
-		owner: SignalOwner,
-		documentId: string,
-		target: Record<string, unknown>,
-	) => ReturnType<typeof bootstrapStreamedSignalHydration>;
 }
 
 const externalHydrateDescriptors = /* @__PURE__ */ new WeakSet<ExternalHydrateDescriptor>();
@@ -18178,6 +18173,12 @@ function findHydrateSeedSidecar(
 	return null;
 }
 
+function removeHydrateSeedSidecar(wrapper: HTMLElement, sidecar: HTMLScriptElement): void {
+	const next = domNode(sidecar).nextSibling;
+	if (TRANSITION_JOURNAL !== null) journalUndo(() => domNode(wrapper).insertBefore(sidecar, next));
+	domNode(sidecar).remove();
+}
+
 function createHydrateSlot(
 	props: InternalHydrateProps,
 	scope: Scope,
@@ -18249,7 +18250,6 @@ function createHydrateSlot(
 		TRANSITION_JOURNAL?.push(JOURNAL_ATTR, wrapper, HYDRATE_ID_COUNT_ATTR, rawCount);
 	}
 	let externalOwner: SignalOwner | undefined;
-	let releaseExternalStream: (() => void) | undefined;
 	if (props.__external !== undefined) {
 		const documentId = parentBlock.idState.renderOwner?.externalSnapshotDocumentId;
 		if (typeof documentId !== 'string' || documentId.length === 0)
@@ -18273,14 +18273,6 @@ function createHydrateSlot(
 			dataOwner: externalOwner,
 			externalNamespace: identity.identifierPrefix,
 		};
-		if (serverPreserved) {
-			const bridge = props.__external.openStream(
-				externalOwner,
-				documentId,
-				wrapper.ownerDocument.defaultView as unknown as Record<string, unknown>,
-			);
-			releaseExternalStream = () => bridge.dispose();
-		}
 	}
 	// An independent root may already have compacted its server ranges. The
 	// parent reserves its IDs but owns only the wrapper, never its child list or
@@ -18293,12 +18285,12 @@ function createHydrateSlot(
 		const seed = findHydrateSeedSidecar(wrapper);
 		if (seed !== null) {
 			seedRaw = (STAGED_DOM ? STAGED_DOM.view(seed) : seed).textContent || '[]';
-			(STAGED_DOM ? STAGED_DOM.view(seed) : seed).remove();
+			removeHydrateSeedSidecar(wrapper, seed);
 		}
 		const nativeSeed = findHydrateSeedSidecar(wrapper, NATIVE_SIGNAL_SEED_ATTR);
 		if (nativeSeed !== null) {
 			nativeSeedRaw = (STAGED_DOM ? STAGED_DOM.view(nativeSeed) : nativeSeed).textContent || '';
-			(STAGED_DOM ? STAGED_DOM.view(nativeSeed) : nativeSeed).remove();
+			removeHydrateSeedSidecar(wrapper, nativeSeed);
 		}
 	} else {
 		// The server opens every ordinary wrapper with the boundary's own range. An
@@ -18336,9 +18328,7 @@ function createHydrateSlot(
 	if (externalOwner !== undefined) {
 		stampSignalInstanceKey(block, rootSignalInstanceKey(idState));
 		const owner = externalOwner;
-		const releaseStream = releaseExternalStream;
 		registerHookCleanup(block, () => {
-			releaseStream?.();
 			retireRendererSignalOwner(owner);
 		});
 	}
@@ -18406,8 +18396,8 @@ function createHydrateSlot(
 		// listener. The parent root retains only the wrapper's outer lifetime.
 	} else if (serverPreserved && pendingIntents !== undefined && initialStrategy._t !== 'never') {
 		state.replays.push(...pendingIntents.filter((intent) => !intent.earlyBinding));
-		requestHydrateBoundary(state);
-	} else if (serverPreserved) {
+		if (props.__external === undefined) requestHydrateBoundary(state);
+	} else if (serverPreserved && props.__external === undefined) {
 		const shouldDefer = initialStrategy._d ? initialStrategy._d() : initialStrategy._t !== 'load';
 		if (!shouldDefer && initialStrategy._t !== 'never') requestHydrateBoundary(state);
 	}
@@ -18873,7 +18863,7 @@ function initializeHydrateComponent(
 						// though the still-mounted boundary had unmounted.
 						cleanupHydrateStrategy(state);
 						invalidateHydrateActivation(state);
-					} else if (!state.activationRequested) {
+					} else if (!state.activationRequested && props.__external === undefined) {
 						const shouldDefer = surroundingUpdate
 							? false
 							: strategy._d
@@ -18947,6 +18937,7 @@ export function externalSnapshotBoundary<P>(
 		throw new TypeError(formatClientError(356));
 	validateExternalSnapshotAuthority(options.authority);
 	const authority = Object.freeze({ ...options.authority });
+	const streamSlot = Symbol('octane.external.stream');
 	// Only this opt-in factory reaches the streamed transport implementation.
 	const descriptor: ExternalHydrateDescriptor = {
 		authority,
@@ -18964,22 +18955,15 @@ export function externalSnapshotBoundary<P>(
 					domNode(wrapper).getAttribute(HYDRATE_ID_COUNT_ATTR) !== '0'
 				)
 					throw new TypeError(formatClientError(349));
-				domNode(sidecar).remove();
+				if (TRANSITION_JOURNAL !== null)
+					TRANSITION_JOURNAL.push(JOURNAL_ATTR, wrapper, HYDRATE_ID_COUNT_ATTR, '0');
+				removeHydrateSeedSidecar(wrapper, sidecar);
 				domNode(wrapper).removeAttribute(HYDRATE_ID_COUNT_ATTR);
 			}
 			return {
 				owner: Object.freeze({ scopeKey: externalSnapshotOwnerKey(documentId, boundaryId) }),
 				identifierPrefix: boundaryId + '-external-',
 			};
-		},
-		openStream: (signalOwner, documentId, target) => {
-			const bridge = bootstrapStreamedSignalHydration({
-				buildId: authority.publisherBuildId,
-				documentId,
-				signalOwner,
-				target,
-			});
-			return bridge;
 		},
 	};
 	externalHydrateDescriptors.add(descriptor);
@@ -18993,6 +18977,24 @@ export function externalSnapshotBoundary<P>(
 				} as InternalHydrateProps,
 				scope,
 				extra,
+			);
+			const state = scope.slots[0] as HydrateSlot;
+			useLayoutEffect(
+				() => {
+					if (!state.serverPreserved) return;
+					// Only a committed host may consume publisher history. An abandoned
+					// root hydration must leave its frames available for the next attempt.
+					const bridge = bootstrapStreamedSignalHydration({
+						buildId: authority.publisherBuildId,
+						documentId: state.parentBlock.idState.renderOwner!.externalSnapshotDocumentId!,
+						signalOwner: state.idState.dataOwner!,
+						target: state.wrapper.ownerDocument.defaultView as unknown as Record<string, unknown>,
+					});
+					requestHydrateBoundary(state);
+					return () => bridge.dispose();
+				},
+				[state],
+				streamSlot,
 			);
 		},
 		COMPONENT_FLAG_BOUNDARY,

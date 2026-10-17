@@ -301,6 +301,13 @@ rerunning application loaders or lifecycle hooks in the publisher. A context
 codec can capture, restore and dispose that request-owned router. Do not
 serialize the router instance or its executable options as ordinary props.
 
+Capture requires router-core's server-load lifecycle to publish `pending`
+before running loaders and remain pending until every overlapping load settles.
+The currently pinned router-core 1.171.34 does not provide that contract. This
+feature must adopt the owning server-load fix before publication. It is tracked
+in [TanStack/router#8740](https://github.com/TanStack/router/pull/8740) and
+[BleedingDev/router#1](https://github.com/BleedingDev/router/pull/1).
+
 ### Leading list ranges on an owned SSR host
 
 `getLeadingHydrationListRange(host)` from `octane/hydration` returns the first

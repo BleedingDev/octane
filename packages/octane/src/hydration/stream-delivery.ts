@@ -26,6 +26,9 @@ interface EarlyStreamedRendererGlobal extends StreamedRendererGlobal {
 	readonly version: 1;
 	readonly frames: unknown[];
 	readonly overflow?: boolean;
+	readonly authorities?: unknown;
+	readonly refused?: unknown;
+	readonly exhausted?: unknown;
 }
 
 export interface StreamedRendererDeliveryOptions {
@@ -45,6 +48,64 @@ export type StreamedRendererAuthority = Pick<
 /** @internal The publisher, document and data owner jointly authorize a stream. */
 export function streamedRendererAuthorityKey(authority: StreamedRendererAuthority): string {
 	return JSON.stringify([authority.buildId, authority.documentId, authority.ownerKey]);
+}
+
+/** @internal Read bounded authority histories emitted before the client imports. */
+export function readStreamedMailboxAuthorities(
+	early:
+		| { readonly authorities?: unknown; readonly refused?: unknown; readonly exhausted?: unknown }
+		| undefined,
+	values: readonly unknown[],
+	frames: boolean,
+	limit: number,
+	errorMessage: string,
+) {
+	function fail(): never {
+		throw new Error(errorMessage);
+	}
+	const admitted = new Set<string>();
+	const refused = new Set<string>();
+	let bytes = 0;
+	if (early?.authorities !== undefined) {
+		if (!Array.isArray(early.authorities) || early.authorities.length > limit) fail();
+		for (const key of early.authorities) {
+			if (typeof key !== 'string' || key.length > 3 * 1024 * 6 + 10) fail();
+			let parts: unknown;
+			try {
+				parts = JSON.parse(key);
+			} catch {
+				fail();
+			}
+			if (
+				!Array.isArray(parts) ||
+				parts.length !== 3 ||
+				parts.some((part) => typeof part !== 'string' || !part || part.length > 1024) ||
+				JSON.stringify(parts) !== key ||
+				admitted.has(key)
+			)
+				fail();
+			admitted.add(key);
+		}
+	}
+	for (const value of values) {
+		const identity =
+			frames && value !== null && typeof value === 'object'
+				? (value as { identity?: unknown }).identity
+				: value;
+		if (isStreamFrameIdentity(identity)) admitted.add(streamedRendererAuthorityKey(identity));
+	}
+	if (admitted.size > limit) fail();
+	if (early?.refused !== undefined) {
+		if (!Array.isArray(early.refused) || early.refused.length > limit) fail();
+		for (const key of early.refused) {
+			if (typeof key !== 'string' || !admitted.delete(key) || refused.has(key)) fail();
+			refused.add(key);
+		}
+	}
+	if (early?.exhausted !== undefined && typeof early.exhausted !== 'boolean') fail();
+	for (const key of admitted) bytes += new TextEncoder().encode(key).byteLength;
+	for (const key of refused) bytes += new TextEncoder().encode(key).byteLength;
+	return { admitted, refused, bytes, exhausted: early?.exhausted === true };
 }
 
 export interface StreamedRendererReadOptions extends StreamedRendererDeliveryOptions {
@@ -262,6 +323,7 @@ interface StreamedRendererRouter {
 	readonly ingress: EarlyStreamedRendererGlobal & { overflow?: boolean };
 	readonly leases: Map<string, ReturnType<typeof createGlobalDelivery>>;
 	readonly retired: Set<string>;
+	readonly admitted: Set<string>;
 	readonly refused: Set<string>;
 	exhausted: boolean;
 	pendingBytes: number;
@@ -328,15 +390,22 @@ export function installStreamedRendererGlobal(
 		if (early?.overflow === true) throw new Error(formatClientError(228));
 		const leases = new Map<string, ReturnType<typeof createGlobalDelivery>>();
 		const retired = new Set<string>();
-		const refused = new Set<string>();
 		const buffered = early?.frames ?? [];
-		let initialBytes = 0;
+		const history = readStreamedMailboxAuthorities(
+			early,
+			buffered,
+			true,
+			512,
+			formatClientError(228),
+		);
+		const { admitted, refused } = history;
+		let initialBytes = history.bytes;
 		for (const frame of buffered) {
 			const bytes = new TextEncoder().encode(JSON.stringify(frame)).byteLength;
 			if (bytes > DEFAULT_MAX_FRAME_BYTES) throw new Error(formatClientError(228));
 			initialBytes += bytes;
 		}
-		if (buffered.length > 512 || initialBytes > DEFAULT_PENDING_BYTES)
+		if (buffered.length + refused.size > 512 || initialBytes > DEFAULT_PENDING_BYTES)
 			throw new Error(formatClientError(228));
 		const created: StreamedRendererRouter = {
 			ingress: {
@@ -363,17 +432,27 @@ export function installStreamedRendererGlobal(
 					if (
 						retired.has(frameKey) ||
 						refused.has(frameKey) ||
-						created.exhausted ||
+						(created.exhausted && !admitted.has(frameKey)) ||
 						!isStreamedRendererFrame(frame)
 					)
 						return;
 					// Claimed authorities go directly to their delivery queue. Only
 					// unclaimed frames count against this separate early mailbox.
 					const bytes = new TextEncoder().encode(JSON.stringify(frame)).byteLength;
+					const known = admitted.has(frameKey);
+					const authorityBytes = known ? 0 : new TextEncoder().encode(frameKey).byteLength;
+					if (
+						!known &&
+						(admitted.size + refused.size + retired.size >= 512 ||
+							created.pendingBytes + authorityBytes > DEFAULT_PENDING_BYTES)
+					) {
+						created.exhausted = true;
+						return;
+					}
 					if (
 						buffered.length + refused.size + retired.size >= 512 ||
 						bytes > DEFAULT_MAX_FRAME_BYTES ||
-						created.pendingBytes + bytes > DEFAULT_PENDING_BYTES
+						created.pendingBytes + bytes + authorityBytes > DEFAULT_PENDING_BYTES
 					) {
 						// Replace this authority's incomplete history with a bounded refusal.
 						// The marker shares the mailbox budget; it must survive later joins.
@@ -387,7 +466,7 @@ export function installStreamedRendererGlobal(
 							else buffered[retained++] = queued;
 						}
 						buffered.length = retained;
-						const refusalBytes = new TextEncoder().encode(frameKey).byteLength;
+						const refusalBytes = authorityBytes;
 						if (
 							buffered.length + refused.size + retired.size >= 512 ||
 							created.pendingBytes + refusalBytes > DEFAULT_PENDING_BYTES
@@ -395,20 +474,25 @@ export function installStreamedRendererGlobal(
 							// No slot remains to remember another failed key. Refuse future
 							// joins explicitly instead of hydrating a silently truncated stream.
 							created.exhausted = true;
+							if (admitted.delete(frameKey))
+								created.pendingBytes -= new TextEncoder().encode(frameKey).byteLength;
 						} else {
+							admitted.delete(frameKey);
 							refused.add(frameKey);
 							created.pendingBytes += refusalBytes;
 						}
 						return;
 					}
+					admitted.add(frameKey);
 					buffered.push(frame);
-					created.pendingBytes += bytes;
+					created.pendingBytes += bytes + authorityBytes;
 				},
 			},
 			leases,
 			retired,
+			admitted,
 			refused,
-			exhausted: false,
+			exhausted: history.exhausted,
 			pendingBytes: initialBytes,
 			removed: false,
 		};
@@ -421,14 +505,17 @@ export function installStreamedRendererGlobal(
 	}
 	if (
 		router.ingress.overflow === true ||
-		router.exhausted ||
+		(router.exhausted && !router.admitted.has(key)) ||
 		router.refused.has(key) ||
 		(key === EXCLUSIVE_AUTHORITY && router.refused.size !== 0)
 	)
 		throw new Error(formatClientError(228));
+	router.admitted.delete(key);
 	router.leases.set(key, delivery);
 	let retained = 0;
 	let pendingBytes = 0;
+	for (const admittedKey of router.admitted)
+		pendingBytes += new TextEncoder().encode(admittedKey).byteLength;
 	for (const retiredKey of router.retired)
 		pendingBytes += new TextEncoder().encode(retiredKey).byteLength;
 	for (const refusedKey of router.refused)
@@ -455,6 +542,7 @@ export function installStreamedRendererGlobal(
 		const retirementBytes = new TextEncoder().encode(key).byteLength;
 		if (
 			installed.ingress.frames.length + installed.refused.size + installed.retired.size >= 512 ||
+			installed.admitted.size + installed.refused.size + installed.retired.size >= 512 ||
 			installed.pendingBytes + retirementBytes > DEFAULT_PENDING_BYTES
 		)
 			installed.exhausted = true;

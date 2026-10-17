@@ -4,6 +4,11 @@ import {
 	type StreamedRendererGlobal,
 } from '../../src/hydration/stream-delivery.js';
 import { bootstrapStreamedSignalResults } from '../../src/hydration/streamed-signals.js';
+import { earlySignalBootstrapScript } from '../../src/server/early-signals.js';
+import {
+	createStreamedSignalInjection,
+	streamedRendererFrameScript,
+} from '../../src/server/streamed-signals.js';
 import type {
 	StreamFrameIdentity,
 	StreamedRendererFrame,
@@ -442,5 +447,176 @@ describe('streamed renderer authority leases', () => {
 		await Promise.resolve();
 		expect(selected.receive).not.toHaveBeenCalled();
 		expect(realm).not.toHaveProperty('__octaneStreamedRenderer');
+	});
+});
+
+describe('emitted pre-client authority mailboxes', () => {
+	function runScript(html: string, realm: Record<string, unknown>, ownerDocument: Document) {
+		const script = html.match(/<script[^>]*>([\s\S]*)<\/script>/)?.[1];
+		expect(script).toBeDefined();
+		new Function('globalThis', 'document', script!)(realm, ownerDocument);
+	}
+	function announce(owner: StreamFrameIdentity) {
+		const injection = createStreamedSignalInjection(owner, Promise.resolve('complete'), {
+			announceSelection: true,
+		});
+		void injection.done.catch(() => {});
+		const script = injection.take();
+		injection.cancel(new Error('announcement captured'));
+		return script;
+	}
+	function authority(ownerKey: string): StreamFrameIdentity {
+		return { ...identity('shared-owner', ownerKey), documentId: `${ownerKey}-document` };
+	}
+
+	it.each([
+		['bootstrap', 'host-first'],
+		['bootstrap', 'offender-first'],
+		['announcement', 'host-first'],
+		['announcement', 'offender-first'],
+	])(
+		'isolates renderer overflow before any lease using %s with %s arrival',
+		async (initializer, order) => {
+			const realm = {};
+			const ownerDocument = document.implementation.createHTMLDocument('Pre-client renderer');
+			const host = authority('host'),
+				offender = authority('offender'),
+				sibling = authority('sibling');
+			runScript(
+				initializer === 'bootstrap' ? earlySignalBootstrapScript() : announce(offender),
+				realm,
+				ownerDocument,
+			);
+			const emit = (owner: StreamFrameIdentity) =>
+				runScript(streamedRendererFrameScript(frame(owner)), realm, ownerDocument);
+			if (order === 'host-first') emit(host);
+			for (let count = 0; count < 513; count++) emit(offender);
+			if (order === 'offender-first') emit(host);
+			emit(sibling);
+			const first = receiver(),
+				second = receiver();
+			const removeFirst = installStreamedRendererGlobal(first, realm, { authority: host });
+			let removeSecond: (() => void) | undefined;
+			try {
+				removeSecond = installStreamedRendererGlobal(second, realm, { authority: sibling });
+				expect(() =>
+					installStreamedRendererGlobal(receiver(), realm, { authority: offender }),
+				).toThrow(/mailbox overflowed/);
+				await vi.waitFor(() =>
+					expect(second.receive).toHaveBeenCalledExactlyOnceWith(frame(sibling)),
+				);
+				expect(first.receive).toHaveBeenCalledExactlyOnceWith(frame(host));
+			} finally {
+				removeSecond?.();
+				removeFirst();
+			}
+		},
+	);
+
+	it.each(['host-first', 'offender-first'])(
+		'isolates emitted signal announcements before bootstrap with %s arrival',
+		async (order) => {
+			const realm = {};
+			const ownerDocument = document.implementation.createHTMLDocument('Pre-client selections');
+			const host = authority('host'),
+				offender = authority('offender'),
+				sibling = authority('sibling');
+			if (order === 'host-first') runScript(announce(host), realm, ownerDocument);
+			for (let count = 0; count < 257; count++) runScript(announce(offender), realm, ownerDocument);
+			if (order === 'offender-first') runScript(announce(host), realm, ownerDocument);
+			runScript(announce(sibling), realm, ownerDocument);
+			for (const owner of [host, sibling])
+				runScript(
+					streamedRendererFrameScript({
+						identity: owner,
+						channel: 'result',
+						kind: 'open',
+						resource: 'stream',
+						sequence: 0,
+					}),
+					realm,
+					ownerDocument,
+				);
+			const bootstrap = (owner: StreamFrameIdentity) =>
+				bootstrapStreamedSignalResults({
+					buildId: owner.buildId,
+					documentId: owner.documentId,
+					signalOwner: { scopeKey: owner.ownerKey },
+					target: realm,
+				});
+			const first = bootstrap(host);
+			let second: ReturnType<typeof bootstrap> | undefined;
+			try {
+				second = bootstrap(sibling);
+				expect(() => bootstrap(offender)).toThrow(/mailbox overflowed/);
+				expect(await first.receiver.receive({ ...frame(host), sequence: 1 })).toBe('accepted');
+				expect(await second.receiver.receive({ ...frame(sibling), sequence: 1 })).toBe('accepted');
+			} finally {
+				second?.dispose();
+				first.dispose();
+			}
+		},
+	);
+
+	it('preserves previously admitted publishers through bounded pre-client cardinality exhaustion', async () => {
+		const realm: Record<string, unknown> = {};
+		const ownerDocument = document.implementation.createHTMLDocument('Pre-client exhaustion');
+		const host = authority('host'),
+			sibling = authority('sibling');
+		for (const owner of [host, sibling]) {
+			runScript(announce(owner), realm, ownerDocument);
+			runScript(
+				streamedRendererFrameScript({
+					identity: owner,
+					channel: 'result',
+					kind: 'open',
+					resource: 'stream',
+					sequence: 0,
+				}),
+				realm,
+				ownerDocument,
+			);
+		}
+		for (let count = 0; count < 513; count++) {
+			const owner = authority(`unclaimed-${count}`);
+			if (count < 257) runScript(announce(owner), realm, ownerDocument);
+			runScript(streamedRendererFrameScript(frame(owner)), realm, ownerDocument);
+		}
+		const selections = realm.__octaneStreamedSignalSelections as {
+			identities: unknown[];
+			authorities: string[];
+			refused: string[];
+			exhausted: boolean;
+		};
+		const frames = realm.__octaneStreamedRenderer as {
+			frames: unknown[];
+			authorities: string[];
+			refused: string[];
+			exhausted: boolean;
+		};
+		expect(selections.exhausted).toBe(true);
+		expect(frames.exhausted).toBe(true);
+		expect(selections.authorities.length).toBeLessThanOrEqual(256);
+		expect(frames.authorities.length).toBeLessThanOrEqual(512);
+		expect(selections.identities.length + selections.refused.length).toBeLessThanOrEqual(256);
+		expect(frames.frames.length + frames.refused.length).toBeLessThanOrEqual(512);
+		const bootstrap = (owner: StreamFrameIdentity) =>
+			bootstrapStreamedSignalResults({
+				buildId: owner.buildId,
+				documentId: owner.documentId,
+				signalOwner: { scopeKey: owner.ownerKey },
+				target: realm,
+			});
+		const first = bootstrap(host);
+		let second: ReturnType<typeof bootstrap> | undefined;
+		try {
+			second = bootstrap(sibling);
+			expect(() => bootstrap(authority('unclaimed-512'))).toThrow(/mailbox overflowed/);
+			expect(await first.receiver.receive({ ...frame(host), sequence: 1 })).toBe('accepted');
+			expect(await second.receiver.receive({ ...frame(sibling), sequence: 1 })).toBe('accepted');
+		} finally {
+			second?.dispose();
+			first.dispose();
+		}
 	});
 });
