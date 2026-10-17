@@ -1,3 +1,6 @@
+// Bundlers replace this literal environment guard; keep it independent of Node types.
+declare const process: { env: { NODE_ENV?: string } };
+
 import { formatClientError } from '../error-codes.client.generated.js';
 import { decodeSignalValue, snapshotSignalValue } from './encoding.js';
 import { SignalFrameError, SignalSerializationError } from './errors.js';
@@ -299,6 +302,8 @@ export class ScopeImpl implements Scope, GraphOwner {
 				for (const resource of this.resources.values()) resource.dispose();
 				this.resources.clear();
 			}
+			if (process.env.NODE_ENV !== 'production' && hotQueryLifecycle)
+				hotQueryLifecycle.dispose(this);
 			this.streams?.clear();
 			if (this.derivedBindings) {
 				for (const binding of this.derivedBindings.values()) binding.dispose();
@@ -315,10 +320,24 @@ export class ScopeImpl implements Scope, GraphOwner {
 	}
 }
 
+// Installed only when a development hot query actually creates a generation.
+let hotQueryLifecycle:
+	| {
+			suspend(scope: ScopeImpl): void;
+			resume(scope: ScopeImpl): void;
+			dispose(scope: ScopeImpl): void;
+			activeRequests(scope: ScopeImpl): number;
+	  }
+	| undefined;
+export function installHotQueryLifecycle(driver: NonNullable<typeof hotQueryLifecycle>): void {
+	hotQueryLifecycle = driver;
+}
+
 /** Internal document lifecycle; the facade marks every owner before cancellation runs user code. */
 export function suspendScopeReads(scope: ScopeImpl): void {
 	if (scope.disposed || scope.readBarrier === undefined) return;
 	scope.streams?.suspend();
+	if (process.env.NODE_ENV !== 'production' && hotQueryLifecycle) hotQueryLifecycle.suspend(scope);
 	if (scope.requests) for (const entry of scope.requests.values()) entry.stopAttempt();
 	if (scope.derivedBindings)
 		for (const binding of scope.derivedBindings.values()) binding.suspend();
@@ -349,6 +368,7 @@ export function resumeScopeReads(scope: ScopeImpl): void {
 			}
 		if (scope.derivedBindings)
 			for (const binding of scope.derivedBindings.values()) binding.resume();
+		if (process.env.NODE_ENV !== 'production' && hotQueryLifecycle) hotQueryLifecycle.resume(scope);
 	});
 }
 
@@ -646,9 +666,11 @@ function inspectScope(scope: ScopeImpl): ScopeInspection {
 		scopeKey: scope.scopeKey,
 		epoch: scope.epoch,
 		retired: scope.retired,
-		activeRequests: scope.requests
-			? [...scope.requests.values()].filter((entry) => entry.active).length
-			: 0,
+		activeRequests:
+			(scope.requests ? [...scope.requests.values()].filter((entry) => entry.active).length : 0) +
+			(process.env.NODE_ENV !== 'production' && hotQueryLifecycle
+				? hotQueryLifecycle.activeRequests(scope)
+				: 0),
 		adoptionLeases: scope.frames?.size ?? 0,
 		nodes: [...scope.nodes.values()].map((node) => {
 			const dependencies: { scopeKey: string; key: string }[] = [];
@@ -824,7 +846,8 @@ export function createDerivedCellWith<T>(
 	if (!created) {
 		// A later render may declare the same cell with a new computation.
 		const binding = owner.derivedBindings?.get(node);
-		return (binding?.redeclare(compute, sequence, captures, declaring) ?? node) as DerivedSignal<T>;
+		if (binding !== undefined)
+			return binding.redeclare(compute, sequence, captures, declaring) as DerivedSignal<T>;
 	}
 	const binding = new Binding(owner, node, compute, options);
 	binding.declared(sequence, captures, declaring);
@@ -866,8 +889,8 @@ export function createResourceCellWith<T>(
 		if (!created) {
 			// A later render may declare the same cell with a new description.
 			const binding = owner.resources?.get(declared) as ResourceBinding<T> | undefined;
-			return (binding?.redeclare(describe, sequence, captures, declaring) ??
-				declared) as Resource<T>;
+			if (binding !== undefined)
+				return binding.redeclare(describe, sequence, captures, declaring) as Resource<T>;
 		}
 		node = declared;
 	}

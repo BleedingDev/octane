@@ -261,6 +261,11 @@ type ServerErrorArguments = {
 	356: [];
 	357: [];
 	358: [];
+	359: [];
+	360: [];
+	361: [];
+	362: [];
+	363: [];
 };
 
 export function formatServerError<Code extends keyof ServerErrorArguments>(
@@ -1077,6 +1082,28 @@ export function formatServerError<Code extends keyof ServerErrorArguments>(
 			case 358:
 				return formatDevErrorMessage(
 					'External snapshot timeout must be finite and between 0 and 2147483647 milliseconds. Boundary timeouts must be greater than 0.',
+					args,
+				);
+			case 359:
+				return formatDevErrorMessage(
+					'A historical signal owner cannot change its module generation.',
+					args,
+				);
+			case 360:
+				return formatDevErrorMessage(
+					'The hot declaration no longer belongs to its native owner.',
+					args,
+				);
+			case 361:
+				return formatDevErrorMessage(
+					'The signal module generation is stale or already being installed.',
+					args,
+				);
+			case 362:
+				return formatDevErrorMessage('The hot declaration changed its native cell identity.', args);
+			case 363:
+				return formatDevErrorMessage(
+					'The hot signal generation has no current native publisher admission.',
 					args,
 				);
 			default:

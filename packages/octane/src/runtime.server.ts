@@ -1,3 +1,9 @@
+import {
+	PUBLISHER_BOUNDARY_ATTR,
+	createPublisherBoundaryDescriptor,
+	serializePublisherBoundaryDescriptor,
+	type PublisherBoundaryDescriptor,
+} from './publisher-boundary-protocol.js';
 declare const process: { env: { NODE_ENV?: string } };
 
 export { trustHTML, type TrustedHTML } from './trusted-html.js';
@@ -5793,6 +5799,7 @@ function streamTokenForPendingHtml(html: string): string | null {
 
 type InternalHydrateProps = HydrateProps & {
 	readonly __external?: ExternalSnapshotRequest;
+	readonly __publisher?: PublisherBoundaryDescriptor;
 	readonly __independent?: {
 		readonly manifestTemplate: IndependentHydrateManifestTemplate;
 		readonly captures: readonly unknown[];
@@ -5998,7 +6005,7 @@ const PermanentStaticHydrate = /* @__PURE__ */ markComponentFlags(
 const hydrate = /* @__PURE__ */ markComponentFlags(
 	function Hydrate(rawProps: HydrateProps, scope: SSRScope): string {
 		const props = rawProps as InternalHydrateProps;
-		const id = props.__external?.boundaryId ?? useId();
+		const id = props.__external?.boundaryId ?? props.__publisher?.boundaryId ?? useId();
 		// The client always creates an HTMLDivElement. Force the same namespace for
 		// SSR children and attribute semantics instead of inheriting SVG/MathML from
 		// the call site. Direct placement in foreign content remains unsupported: an
@@ -6047,7 +6054,10 @@ const hydrate = /* @__PURE__ */ markComponentFlags(
 						} finally {
 							nativeReads = finishNativeSeedCapture(nativeCapture, previousNativeReads, false);
 						}
-						const idCount = props.__external === undefined ? ID_COUNTER - childIdStart : 0;
+						const idCount =
+							props.__external === undefined && props.__publisher === undefined
+								? ID_COUNTER - childIdStart
+								: 0;
 						const childSeeds = isolateSerial(serialStart);
 						const permanentStaticAncestor = PERMANENT_STATIC_HYDRATE_DEPTH !== 0;
 						const attrs = ssrHydrateAttrs(
@@ -6089,6 +6099,16 @@ const hydrate = /* @__PURE__ */ markComponentFlags(
 							? ''
 							: ssrIndependentHydrateSidecar(props, id);
 
+						const publisherSidecar =
+							props.__publisher === undefined
+								? ''
+								: '<script type="application/json" ' +
+									PUBLISHER_BOUNDARY_ATTR +
+									NONCE_ATTR +
+									'>' +
+									serializePublisherBoundaryDescriptor(props.__publisher) +
+									'</script>';
+
 						return (
 							'<div' +
 							attrs +
@@ -6098,6 +6118,7 @@ const hydrate = /* @__PURE__ */ markComponentFlags(
 							seedSidecar +
 							nativeSidecar +
 							externalSidecar +
+							publisherSidecar +
 							independentSidecar +
 							'</div>'
 						);
@@ -9077,11 +9098,11 @@ type ResolvedMap = Map<string, SuspenseOutcome> & {
 	/** Optional renderer resources; allocated only by a participating adapter. */
 	resources?: ServerRenderResources | undefined;
 	/** One request/account owner shared by every pass and streamed region. */
-	signalOwner?: SignalOwner;
+	signalOwner?: SignalOwner | undefined;
 	initialDocumentSignals?: ScopeSeed | undefined;
 	ownedSignalOwner?: boolean;
-	signalInstances?: Map<string, SignalRendererOwnerIdentity>;
-	signalIdentityKeys?: Map<string, ServerOpaqueSignalKeys>;
+	signalInstances?: Map<string, SignalRendererOwnerIdentity> | undefined;
+	signalIdentityKeys?: Map<string, ServerOpaqueSignalKeys> | undefined;
 	hasSignalControls?: boolean;
 	/** Render-local stable ids for non-primitive and long string control/list keys. */
 	asyncIdentities: Map<unknown, number>;
@@ -9440,6 +9461,8 @@ function runFullFramedPass(
 	identifierPrefix: string = '',
 	markers: boolean = true,
 ): FullPassResult {
+	// Compiled providers can enter directly, without constructing a descriptor.
+	registerServerRendererContextProvider(renderServerContextProvider);
 	const saved = saveAmbient();
 	NATIVE_SERVER_PASS = NATIVE_READ_COLLECTOR?.beginPass() ?? -1;
 	NATIVE_SERVER_READS = null;
@@ -10534,6 +10557,227 @@ export async function renderExternalSnapshot(
 		styles,
 		head: result.head ?? '',
 	});
+}
+
+interface ServerPublisherBoundary {
+	readonly descriptor: PublisherBoundaryDescriptor;
+	readonly owner: SignalOwner;
+	readonly instances: Map<string, SignalRendererOwnerIdentity>;
+	readonly identityKeys: Map<string, ServerOpaqueSignalKeys>;
+	readonly replays: Map<ServerComponent, ServerComponent>;
+	closed: boolean;
+}
+
+const PUBLISHER_BOUNDARIES = /* @__PURE__ */ new WeakMap<
+	ResolvedMap,
+	Map<string, ServerPublisherBoundary>
+>();
+const PUBLISHER_REPLAY_BODIES = /* @__PURE__ */ new WeakMap<
+	ServerComponent,
+	ServerPublisherBoundary
+>();
+
+function releaseServerPublisher(state: ServerPublisherBoundary): void {
+	if (state.closed) return;
+	state.closed = true;
+	const collector = NATIVE_READ_COLLECTOR;
+	const token = collector?.pauseLifecycle() ?? -1;
+	let failure: { error: unknown } | undefined;
+	try {
+		for (const instance of state.instances.values()) {
+			try {
+				retireSignalOwnerIdentity(instance);
+			} catch (error) {
+				failure ??= { error };
+			}
+		}
+		try {
+			retireSignalOwnerIdentity(state.owner);
+		} catch (error) {
+			failure ??= { error };
+		}
+	} finally {
+		state.instances.clear();
+		state.identityKeys.clear();
+		state.replays.clear();
+		if (token >= 0) collector!.resumeLifecycle(token);
+	}
+	if (failure !== undefined) throw failure.error;
+}
+
+function withServerPublisherIdentity<T>(
+	state: ServerPublisherBoundary,
+	render: () => T,
+	instance: ServerSignalInstanceKey = JSON.stringify([state.descriptor.identifierPrefix, 'root']),
+): T {
+	if (state.closed) throw new TypeError(formatServerError(353));
+	const resolved = RESOLVED!;
+	const previous = {
+		owner: resolved.signalOwner,
+		instances: resolved.signalInstances,
+		identityKeys: resolved.signalIdentityKeys,
+		initial: resolved.initialDocumentSignals,
+		prefix: SIGNAL_INSTANCE_PREFIX,
+		instance: SIGNAL_COMPONENT_INSTANCE_KEY,
+		active: SERVER_SIGNAL_OWNER_ACTIVE,
+		control: SIGNAL_CONTROL_SITE,
+		list: SIGNAL_LIST_KEYS,
+		idPrefix: ID_PREFIX,
+		id: ID_COUNTER,
+	};
+	const head = HEAD;
+	const headSuffix = head?.rootSuffix;
+	const deferred = DEFERRED;
+	const deferredStart = deferred?.length ?? 0;
+	resolved.signalOwner = state.owner;
+	resolved.signalInstances = state.instances;
+	resolved.signalIdentityKeys = state.identityKeys;
+	resolved.initialDocumentSignals = undefined;
+	SIGNAL_INSTANCE_PREFIX = state.descriptor.identifierPrefix;
+	SIGNAL_COMPONENT_INSTANCE_KEY = instance;
+	SERVER_SIGNAL_OWNER_ACTIVE = false;
+	SIGNAL_CONTROL_SITE = '';
+	SIGNAL_LIST_KEYS = null;
+	ID_PREFIX = state.descriptor.identifierPrefix;
+	ID_COUNTER = 0;
+	if (head !== null) head.rootSuffix = headOwnershipSuffix(state.descriptor.identifierPrefix);
+	try {
+		// Deferred JSX records and children still read after their component body returns.
+		return withServerSignalBinding(render);
+	} finally {
+		// Discovery invokes the real suspended component in its original frame.
+		// Its body must re-enter this same request lease after the ambient restore.
+		if (deferred !== null) {
+			for (let i = deferredStart; i < deferred.length; i++) {
+				const job = deferred[i]!;
+				if (PUBLISHER_REPLAY_BODIES.has(job.comp)) continue;
+				let replay = state.replays.get(job.comp);
+				if (replay === undefined) {
+					const component = job.comp;
+					replay = (props, scope) =>
+						withServerPublisherIdentity(
+							state,
+							() =>
+								serverComponentOutput(
+									invokeServerSignalComponent(component, props, scope, serverSignalOwner(FRAME)),
+									scope,
+								),
+							SIGNAL_COMPONENT_INSTANCE_KEY,
+						);
+					state.replays.set(component, replay);
+					PUBLISHER_REPLAY_BODIES.set(replay, state);
+				}
+				job.comp = replay;
+			}
+		}
+		resolved.signalOwner = previous.owner;
+		resolved.signalInstances = previous.instances;
+		resolved.signalIdentityKeys = previous.identityKeys;
+		resolved.initialDocumentSignals = previous.initial;
+		SIGNAL_INSTANCE_PREFIX = previous.prefix;
+		SIGNAL_COMPONENT_INSTANCE_KEY = previous.instance;
+		SERVER_SIGNAL_OWNER_ACTIVE = previous.active;
+		SIGNAL_CONTROL_SITE = previous.control;
+		SIGNAL_LIST_KEYS = previous.list;
+		ID_PREFIX = previous.idPrefix;
+		ID_COUNTER = previous.id;
+		if (head !== null) head.rootSuffix = headSuffix!;
+	}
+}
+
+/** Execute a local publisher under private data and ID ownership, with live ancestor contexts. */
+export function publisherBoundary<C extends ServerEntryComponent>(
+	component: C,
+	options: { readonly publisherKey: string },
+): C {
+	const publisherKey = options.publisherKey;
+	EXTERNAL_SNAPSHOT_DISCOVERY ??= new WeakSet();
+	if (typeof component !== 'function') throw new TypeError(formatServerError(356));
+	createPublisherBoundaryDescriptor(publisherKey, null, 'validate', null);
+	const boundary = markComponentFlags(
+		function PublisherBoundary(props: any, scope: SSRScope): string {
+			const resolved = RESOLVED;
+			const resources = getServerRenderResourceContext();
+			if (resolved === null || resources === null) throw new TypeError(formatServerError(350));
+			const streamed = resolved.resourceOptions?.streamedSignals;
+			const configuredDocument = resolved.resourceOptions?.externalSnapshots?.documentId;
+			if (
+				streamed !== undefined &&
+				configuredDocument !== undefined &&
+				streamed.documentId !== configuredDocument
+			)
+				throw new TypeError(formatServerError(349));
+			const documentId = streamed?.documentId ?? null;
+			const streamBuildId = streamed?.buildId ?? null;
+			const boundaryId = useId();
+			const base = '@publisher:' + asyncIdentityKey(boundary, false);
+			const occurrence = FRAME === null ? 0 : nextFrameOccurrence(FRAME, base);
+			const key = asyncFramePath(FRAME) + '|' + base + '#' + occurrence;
+			let states = PUBLISHER_BOUNDARIES.get(resolved);
+			let state = states?.get(key);
+			if (EXTERNAL_SNAPSHOT_DISCOVERY?.has(resolved) && state === undefined) throw SSR_SUSPENSE;
+			if (states === undefined) {
+				states = new Map();
+				PUBLISHER_BOUNDARIES.set(resolved, states);
+				const owned = states;
+				resources.registerCleanup(() => {
+					let failure: { error: unknown } | undefined;
+					for (const state of owned.values()) {
+						try {
+							releaseServerPublisher(state);
+						} catch (error) {
+							failure ??= { error };
+						}
+					}
+					owned.clear();
+					PUBLISHER_BOUNDARIES.delete(resolved);
+					if (failure !== undefined) throw failure.error;
+				});
+			}
+			if (
+				state !== undefined &&
+				(state.descriptor.documentId !== documentId ||
+					state.descriptor.streamBuildId !== streamBuildId)
+			)
+				throw new TypeError(formatServerError(349));
+			if (
+				!EXTERNAL_SNAPSHOT_DISCOVERY?.has(resolved) &&
+				state !== undefined &&
+				state.descriptor.boundaryId !== boundaryId
+			) {
+				releaseServerPublisher(state);
+				state = undefined;
+			}
+			if (state === undefined) {
+				const descriptor = createPublisherBoundaryDescriptor(
+					publisherKey,
+					documentId,
+					boundaryId,
+					streamBuildId,
+				);
+				state = {
+					descriptor,
+					owner: Object.freeze({ scopeKey: descriptor.ownerKey }),
+					instances: new Map(),
+					identityKeys: new Map(),
+					replays: new Map(),
+					closed: false,
+				};
+				states.set(key, state);
+			}
+			// Ordinary retries keep the native lease. A new parent ID namespace
+			// retires provisional work before claiming the canonical boundary.
+			const hydrateProps: InternalHydrateProps = {
+				when: { _t: 'load' },
+				children: createElement(component, props),
+				__publisher: state.descriptor,
+			};
+			return withServerPublisherIdentity(state, () => hydrate(hydrateProps, scope));
+		},
+		COMPONENT_FLAG_BOUNDARY,
+		'PublisherBoundary',
+	);
+	return boundary as unknown as C;
 }
 
 const EXTERNAL_SNAPSHOT_LOADS = /* @__PURE__ */ new WeakMap<

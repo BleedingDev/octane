@@ -1,3 +1,6 @@
+// Bundlers replace this literal environment guard; keep it independent of Node types.
+declare const process: { env: { NODE_ENV?: string } };
+
 import { formatClientError } from '../error-codes.client.generated.js';
 import {
 	acceptScopeStreamedResult,
@@ -36,6 +39,15 @@ import {
 	registerEarlySignalHydration,
 } from './read-protocol.js';
 import { isSignalHandle } from './handle-protocol.js';
+import {
+	assertHotSignalDeclarationUsable,
+	registerHotSignalDeclaration,
+	resolveHotSignalDeclaration,
+	hotSignalDescriptorStamp,
+	stampHotSignalDescriptor,
+	type HotSignalModuleStamp,
+	type HotSignalDeclarationShape,
+} from './hot-declarations.js';
 import { runAsDeclaredServerSignalReader as readAsDeclared } from './query-attempt-observer.js';
 
 export { isSignalHandle, isWritableSignal } from './handle-protocol.js';
@@ -413,6 +425,9 @@ export abstract class Descriptor<T, H extends SignalHandle<T>> implements OwnerB
 		readonly create: (owner: OwnerScope, declaring: number) => H,
 		readonly site: string | undefined,
 		declared?: Descriptor<T, H>,
+		hotStamp?: HotSignalModuleStamp,
+		factory?: HotSignalDeclarationShape['factory'],
+		queryKind?: 'promise' | 'stream',
 	) {
 		if (declared === undefined) {
 			this.cells = new WeakMap();
@@ -426,6 +441,24 @@ export abstract class Descriptor<T, H extends SignalHandle<T>> implements OwnerB
 			this.owner = declared.owner;
 			this.invocation = declared.invocation;
 			this.lexical = this;
+		}
+		if (process.env.NODE_ENV !== 'production') {
+			const stamp = declared === undefined ? hotStamp : hotSignalDescriptorStamp(declared);
+			if (stamp !== undefined) {
+				stampHotSignalDescriptor(this, stamp);
+				if (declared === undefined)
+					registerHotSignalDeclaration(
+						stamp,
+						site,
+						site?.startsWith('i:')
+							? key.slice(0, key.length - currentSignalDeclarationPath().length)
+							: key,
+						kind,
+						factory!,
+						(scope) => create(scope, 0),
+						queryKind,
+					);
+			}
 		}
 	}
 
@@ -478,6 +511,9 @@ export abstract class Descriptor<T, H extends SignalHandle<T>> implements OwnerB
 	 * received the handle declares its own cell in its own render.
 	 */
 	private resolvedCell(target: OwnerScope, token: SignalOwner): H {
+		const stamp =
+			process.env.NODE_ENV !== 'production' ? hotSignalDescriptorStamp(this) : undefined;
+		if (stamp !== undefined) assertHotSignalDeclarationUsable(stamp);
 		let cell = this.cells.get(target);
 		if (!cell) {
 			// An accepted view resolves to its canonical cell from now on. A render
@@ -486,7 +522,18 @@ export abstract class Descriptor<T, H extends SignalHandle<T>> implements OwnerB
 			const view = this.view;
 			if (view !== undefined && this.viewOwner === target && !isRetiredDeclarationView(view))
 				return view;
-			cell = this.create(target, token === this.owner ? this.invocation : 0);
+			const declaring = token === this.owner ? this.invocation : 0;
+			if (stamp !== undefined) {
+				const owner = scopeOwners.get(target) ?? target;
+				cell = resolveHotSignalDeclaration(
+					stamp,
+					this.site!,
+					target as ScopeImpl,
+					isRendererOwner(owner) ? owner.documentOwner : owner,
+					() => this.create(target, declaring),
+					this.key,
+				);
+			} else cell = this.create(target, declaring);
 			if (isDeclarationView(cell)) {
 				this.view = cell;
 				this.viewOwner = target;
@@ -642,6 +689,8 @@ export function __signalAt<T>(
 	site: string | undefined,
 	initial: T,
 	options?: SignalOptions,
+	_captures?: readonly unknown[],
+	stamp?: HotSignalModuleStamp,
 ): WritableSignal<T> {
 	const explicit = signalOptionsKey(options);
 	site ??= explicit;
@@ -665,6 +714,9 @@ export function __signalAt<T>(
 			);
 		},
 		site,
+		undefined,
+		stamp,
+		'__signalAt',
 	);
 }
 
@@ -678,6 +730,7 @@ export function __derivedScalarAt<T>(
 	compute: DerivedCompute<T>,
 	options?: DerivedOptions & SignalOptions,
 	captures?: readonly unknown[],
+	stamp?: HotSignalModuleStamp,
 ): DerivedSignal<T> {
 	if (typeof compute !== 'function') throw new TypeError(formatClientError(122));
 	const explicit = signalOptionsKey(options);
@@ -697,6 +750,9 @@ export function __derivedScalarAt<T>(
 				declaring,
 			),
 		site,
+		undefined,
+		stamp,
+		'__derivedScalarAt',
 	);
 }
 

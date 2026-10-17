@@ -1,10 +1,15 @@
+import { registerNativeStreamedAuthority } from './native-streamed-authority.js';
 import { formatClientError } from '../error-codes.client.generated.js';
 import {
 	documentSignalOwner,
 	enableSignalDocument,
 	installStreamedSignalOwnerActivator,
 } from '../signals/document-owner.js';
-import { attachStreamedSignalResult, initializeDocumentSignalOwner } from '../signals/facade.js';
+import {
+	attachStreamedSignalResult,
+	initializeDocumentSignalOwner,
+	createSignalOwnerLifecycle,
+} from '../signals/facade.js';
 import { registerSignalOwnerDocument } from '../signals/early-values.js';
 import { retireSignalOwnerIdentity } from '../signals/owner-context.js';
 import {
@@ -441,8 +446,21 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 		earlyRenderer.frames.length = retained;
 	}
 	let uninstallDelivery: () => void;
+	let releaseAuthority: (() => void) | undefined;
 	try {
 		uninstallDelivery = installStreamedRendererGlobal(receiver, target, { ...options, authority });
+		try {
+			const lifecycle = createSignalOwnerLifecycle(signalOwner);
+			releaseAuthority = registerNativeStreamedAuthority(
+				signalOwner,
+				authority,
+				document,
+				() => lifecycle.retired,
+			);
+		} catch (error) {
+			uninstallDelivery();
+			throw error;
+		}
 	} catch (error) {
 		uninstallOwnerActivator();
 		selectionLease.dispose();
@@ -470,6 +488,7 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 		signalOwner,
 		receiver,
 		dispose() {
+			releaseAuthority?.();
 			close(true);
 		},
 		suspend() {

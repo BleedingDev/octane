@@ -32,6 +32,9 @@ function forkResource<T>(this: ResourceBinding<T>, target: ScopedNode<T>): Candi
 		this.owner,
 		target,
 		this.describe,
+		undefined,
+		undefined,
+		this,
 	);
 	fork.candidate = true;
 	fork.queryDefinition = this.queryDefinition;

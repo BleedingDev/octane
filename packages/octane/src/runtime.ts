@@ -29,6 +29,18 @@ import {
 	type ExternalSnapshotAuthority,
 } from './external-snapshot-protocol.js';
 import { bootstrapStreamedSignalHydration } from './hydration/streamed-signals.js';
+import { getNativeHotOwnerDriver } from './native-hot-owner.js';
+import {
+	getNativeStreamedAuthority,
+	type NativeStreamedAuthority,
+} from './hydration/native-streamed-authority.js';
+import {
+	PUBLISHER_BOUNDARY_ATTR,
+	createPublisherBoundaryDescriptor,
+	decodePublisherBoundaryDescriptor,
+	type PublisherBoundaryDescriptor,
+} from './publisher-boundary-protocol.js';
+
 import { joinSignalDocumentLifecycle } from './hydration/document-lifecycle.js';
 
 import { hydrating, hydrationStarted, setHydrating, startHydration } from './hydration-flag.js';
@@ -353,6 +365,7 @@ import {
 	SIGNAL_HANDLE,
 	type SignalHandle,
 	type SignalOwner,
+	type SignalOwnerIdentity,
 	type ScopeSeed,
 	type SignalRendererOwnerIdentity,
 	type WritableSignal,
@@ -17156,8 +17169,201 @@ interface ExternalHydrateDescriptor {
 
 const externalHydrateDescriptors = /* @__PURE__ */ new WeakSet<ExternalHydrateDescriptor>();
 
+interface PublisherHydrateDescriptor {
+	readonly publisherKey: string;
+	readonly component: ComponentBody;
+}
+const publisherHydrateDescriptors = /* @__PURE__ */ new WeakSet<PublisherHydrateDescriptor>();
+const publisherSlotDescriptors = /* @__PURE__ */ new WeakMap<
+	HydrateSlot,
+	PublisherBoundaryDescriptor
+>();
+
+interface NativePublisherHydration {
+	readonly state: HydrateSlot;
+	readonly publisherKey: string;
+	readonly documentId: string;
+	readonly streamAuthority: NativeStreamedAuthority;
+	readonly documentAuthority: NativeStreamedAuthority;
+	readonly documentOwner: SignalOwnerIdentity;
+	readonly expectedCompilerBuild: string | undefined;
+	readonly releases: Map<
+		object,
+		{ readonly release: () => void; readonly blocks: Set<Block>; buildId: string }
+	>;
+	readonly admittedBuilds: Set<string>;
+	owner: SignalOwnerIdentity;
+	ingress: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
+	closed: boolean;
+	remounting: boolean;
+	leaveLifecycle: (() => void) | undefined;
+}
+let nativePublisherHydrations: WeakMap<SignalOwnerIdentity, NativePublisherHydration> | undefined;
+
+function parentStreamedAuthority(
+	block: Block,
+	document: Document,
+): NativeStreamedAuthority | undefined {
+	const owner = block.idState.dataOwner ?? block.idState.renderOwner?.signalOwner;
+	if (owner === undefined) return undefined;
+	const authority =
+		getNativeStreamedAuthority(owner, document) ??
+		nativePublisherHydrations?.get(owner)?.streamAuthority;
+	return authority?.document === document ? authority : undefined;
+}
+
+function publisherContainsComponent(lease: NativePublisherHydration, component: object): boolean {
+	if (
+		lease.closed ||
+		lease.state.block.disposed ||
+		getNativeStreamedAuthority(lease.documentOwner, lease.state.wrapper.ownerDocument) !==
+			lease.documentAuthority
+	)
+		return false;
+	const meta = (component as HmrWrapper)[HMR];
+	if (meta === undefined) return false;
+	for (const block of meta.liveBlocks) {
+		if (
+			!block.disposed &&
+			block.idState.dataOwner === lease.owner &&
+			blockIsAncestor(lease.state.block, block)
+		)
+			return true;
+	}
+	return false;
+}
+
+function remountPublisherHydration(lease: NativePublisherHydration): void {
+	if (lease.closed) return;
+	const state = lease.state;
+	invalidateHydrateActivation(state);
+	const preserved = preservedHydrateActivations?.get(state);
+	if (preserved !== undefined) {
+		releasePreservedHydrateActivation(state);
+		discardOffscreenCapture(preserved.capture);
+	}
+	lease.remounting = true;
+	try {
+		unmountBlock(state.block);
+	} finally {
+		lease.remounting = false;
+	}
+	const oldOwner = lease.owner;
+	retireRendererSignalOwner(oldOwner);
+	nativePublisherHydrations?.delete(oldOwner);
+	if (
+		lease.closed ||
+		state.parentBlock.disposed ||
+		getNativeStreamedAuthority(lease.documentOwner, state.wrapper.ownerDocument) !==
+			lease.documentAuthority
+	)
+		return;
+	lease.owner = Object.freeze({ scopeKey: oldOwner.scopeKey });
+	nativePublisherHydrations!.set(lease.owner, lease);
+	const start = state.wrapper.ownerDocument.createComment('hydrate');
+	const end = state.wrapper.ownerDocument.createComment('/hydrate');
+	state.wrapper.append(start, end);
+	state.start = start;
+	state.end = end;
+	state.idState = {
+		prefix: state.idState.prefix,
+		next: 0,
+		signalState: { prefix: state.idState.prefix, next: 0 },
+		renderOwner: state.parentBlock.idState.renderOwner,
+		dataOwner: lease.owner,
+		externalNamespace: state.idState.prefix,
+	};
+	state.block = createBlock(
+		'control-flow',
+		state.parentBlock,
+		state.wrapper,
+		start,
+		end,
+		() => undefined,
+		undefined,
+	);
+	state.block.idState = state.idState;
+	stampSignalInstanceKey(state.block, rootSignalInstanceKey(state.idState));
+	state.block.body = hydrateBoundaryBody(state);
+	state.serverPreserved = false;
+	state.seedRaw = null;
+	state.nativeSeedRaw = undefined;
+	state.initialCaptures = null;
+	state.serverActivationStarted = false;
+	state.hydrated = false;
+	state.activationRequested = true;
+	state.activationReady = true;
+	state.hasError = false;
+	state.error = undefined;
+	lease.leaveLifecycle?.();
+	lease.leaveLifecycle = joinPublisherLifecycle(state, lease.owner, lease.documentId, undefined);
+	// The validated factory handoff must finish before any replacement body runs.
+	scheduleRender(state.parentBlock);
+}
+
+function admitNativePublisherComponent(component: HmrWrapper, scope: Scope): void {
+	const owner = scope.block.idState.dataOwner;
+	if (owner === undefined || nativePublisherHydrations === undefined) return;
+	const lease = nativePublisherHydrations.get(owner);
+	const driver = getNativeHotOwnerDriver();
+	if (lease === undefined || driver === undefined || !publisherContainsComponent(lease, component))
+		return;
+	const buildId = driver.getComponentBuild(component);
+	if (buildId === undefined) return;
+	let membership = lease.releases.get(component);
+	if (membership !== undefined && membership.buildId !== buildId)
+		throw new TypeError(formatClientError(349));
+	if (membership === undefined) {
+		if (lease.expectedCompilerBuild !== undefined && !lease.admittedBuilds.has(buildId))
+			throw new TypeError(formatClientError(349));
+		const proof = driver.createProof({
+			publisherKey: lease.publisherKey,
+			documentId: lease.documentId,
+			ownerKey: lease.owner.scopeKey,
+			buildId,
+			currentOwner: () =>
+				lease.closed ||
+				getNativeStreamedAuthority(lease.documentOwner, lease.state.wrapper.ownerDocument) !==
+					lease.documentAuthority
+					? undefined
+					: lease.owner,
+			acceptsComponent: (candidate) =>
+				candidate === component && publisherContainsComponent(lease, candidate),
+			suspendIngress: () => lease.ingress?.suspend(),
+			// A compiler generation cannot authorize a new SSR document stream.
+			rotateIngress: (build) => {
+				const admitted = lease.releases.get(component);
+				if (admitted !== undefined) admitted.buildId = build;
+				lease.admittedBuilds.add(build);
+				lease.ingress?.suspend();
+				lease.ingress = undefined;
+			},
+			remount: () => remountPublisherHydration(lease),
+		});
+		membership = { release: driver.admit(component, proof), blocks: new Set(), buildId };
+		lease.admittedBuilds.add(buildId);
+		lease.releases.set(component, membership);
+	}
+	if (membership.blocks.has(scope.block)) return;
+	const current = membership;
+	const block = scope.block;
+	current.blocks.add(block);
+	const cleanup: Cleanup & { [HMR]?: true } = () => {
+		current.blocks.delete(block);
+		if (current.blocks.size === 0 && !lease.remounting) {
+			current.release();
+			if (lease.releases.get(component) === current) lease.releases.delete(component);
+		}
+	};
+	// This exact block was registered by the actual canonical HMR wrapper above.
+	// Its ownership membership follows hooks across compatible template resets.
+	cleanup[HMR] = true;
+	(scope.cleanups ??= []).push(cleanup);
+}
+
 type InternalHydrateProps = HydrateProps & {
 	readonly __external?: ExternalHydrateDescriptor;
+	readonly __publisher?: PublisherHydrateDescriptor;
 	/** Compiler-injected split-child loader. */
 	__load?: () => Promise<HydrateLoadResult>;
 	/** Latest lexical values consumed by the compiler-generated split child. */
@@ -18200,7 +18406,10 @@ function createHydrateSlot(
 	boundaryId: string,
 	boundaryBody: typeof hydrateBoundaryBody,
 ): HydrateSlot {
-	if (props.__external !== undefined && !externalHydrateDescriptors.has(props.__external))
+	if (
+		(props.__external !== undefined && !externalHydrateDescriptors.has(props.__external)) ||
+		(props.__publisher !== undefined && !publisherHydrateDescriptors.has(props.__publisher))
+	)
 		throw new TypeError(formatClientError(349));
 	const parentBlock = scope.block;
 	const parentNode = parentBlock.parentNode;
@@ -18239,7 +18448,7 @@ function createHydrateSlot(
 	let seedRaw: string | null = null;
 	let nativeSeedRaw: string | null = null;
 	let idState = parentBlock.idState;
-	if (serverPreserved && props.__external === undefined) {
+	if (serverPreserved && props.__external === undefined && props.__publisher === undefined) {
 		const rawCount = (STAGED_DOM ? STAGED_DOM.view(wrapper) : wrapper).getAttribute(
 			HYDRATE_ID_COUNT_ATTR,
 		);
@@ -18265,6 +18474,61 @@ function createHydrateSlot(
 		TRANSITION_JOURNAL?.push(JOURNAL_ATTR, wrapper, HYDRATE_ID_COUNT_ATTR, rawCount);
 	}
 	let externalOwner: SignalOwner | undefined;
+	let publisherDescriptor: PublisherBoundaryDescriptor | undefined;
+	const parentAuthority =
+		props.__publisher === undefined && props.__external === undefined
+			? undefined
+			: parentStreamedAuthority(parentBlock, wrapper.ownerDocument);
+	if (props.__publisher !== undefined) {
+		try {
+			const authority = parentAuthority;
+			let descriptor = createPublisherBoundaryDescriptor(
+				props.__publisher.publisherKey,
+				authority?.documentId ?? null,
+				boundaryId,
+				authority?.buildId ?? null,
+			);
+			if (serverPreserved) {
+				const sidecar = findHydrateSeedSidecar(wrapper, PUBLISHER_BOUNDARY_ATTR);
+				if (sidecar === null) throw new TypeError(formatClientError(349));
+				const admitted = decodePublisherBoundaryDescriptor(domNode(sidecar).textContent ?? '');
+				// A nonstream server boundary can render and hydrate, but its sidecar does
+				// not grant document or hot-publisher authority.
+				if (admitted.documentId === null && admitted.streamBuildId === null)
+					descriptor = createPublisherBoundaryDescriptor(
+						props.__publisher.publisherKey,
+						null,
+						boundaryId,
+						null,
+					);
+				if (
+					JSON.stringify(admitted) !== JSON.stringify(descriptor) ||
+					domNode(wrapper).getAttribute(HYDRATE_ID_ATTR) !== boundaryId ||
+					domNode(wrapper).getAttribute(HYDRATE_ID_COUNT_ATTR) !== '0'
+				)
+					throw new TypeError(formatClientError(349));
+				removeHydrateSeedSidecar(wrapper, sidecar);
+				if (TRANSITION_JOURNAL !== null)
+					TRANSITION_JOURNAL.push(JOURNAL_ATTR, wrapper, HYDRATE_ID_COUNT_ATTR, '0');
+				domNode(wrapper).removeAttribute(HYDRATE_ID_COUNT_ATTR);
+			}
+			externalOwner = Object.freeze({ scopeKey: descriptor.ownerKey });
+			publisherDescriptor = descriptor;
+			idState = {
+				prefix: descriptor.identifierPrefix,
+				next: 0,
+				signalState: { prefix: descriptor.identifierPrefix, next: 0 },
+				renderOwner: parentBlock.idState.renderOwner,
+				dataOwner: externalOwner,
+				externalNamespace: descriptor.identifierPrefix,
+			};
+		} catch (error) {
+			const refusal = new PresentationAdoptionMiss(undefined, false);
+			refusal.failure = error;
+			throw refusal;
+		}
+	}
+
 	if (props.__external !== undefined) {
 		const documentId = parentBlock.idState.renderOwner?.externalSnapshotDocumentId;
 		if (typeof documentId !== 'string' || documentId.length === 0)
@@ -18376,8 +18640,10 @@ function createHydrateSlot(
 		loadedBody: null,
 		hydrationWaiters: null,
 		activationGeneration: 0,
-		activationRequested: !serverPreserved && props.__external === undefined,
-		activationReady: !serverPreserved && props.__external === undefined,
+		activationRequested:
+			!serverPreserved && props.__external === undefined && props.__publisher === undefined,
+		activationReady:
+			!serverPreserved && props.__external === undefined && props.__publisher === undefined,
 		serverActivationStarted: false,
 		hydrated: false,
 		didNotify: false,
@@ -18387,6 +18653,7 @@ function createHydrateSlot(
 		independent: props.__independent !== undefined,
 		initialCaptures: null,
 	};
+	if (publisherDescriptor !== undefined) publisherSlotDescriptors.set(state, publisherDescriptor);
 	if (nativeSeedRaw !== null) state.nativeSeedRaw = nativeSeedRaw;
 	if (serverPreserved && !state.independent) {
 		state.initialCaptures = {
@@ -18407,8 +18674,9 @@ function createHydrateSlot(
 		// listener. The parent root retains only the wrapper's outer lifetime.
 	} else if (serverPreserved && pendingIntents !== undefined && initialStrategy._t !== 'never') {
 		state.replays.push(...pendingIntents.filter((intent) => !intent.earlyBinding));
-		if (props.__external === undefined) requestHydrateBoundary(state);
-	} else if (serverPreserved && props.__external === undefined) {
+		if (props.__external === undefined && props.__publisher === undefined)
+			requestHydrateBoundary(state);
+	} else if (serverPreserved && props.__external === undefined && props.__publisher === undefined) {
 		const shouldDefer = initialStrategy._d ? initialStrategy._d() : initialStrategy._t !== 'load';
 		if (!shouldDefer && initialStrategy._t !== 'never') requestHydrateBoundary(state);
 	}
@@ -18848,13 +19116,18 @@ function initializeHydrateComponent(
 			if (state === undefined) {
 				state = createHydrateSlot(props, scope, boundaryId, boundaryBody);
 			} else {
-				if (props.__external !== undefined && !externalHydrateDescriptors.has(props.__external))
+				if (
+					(props.__external !== undefined && !externalHydrateDescriptors.has(props.__external)) ||
+					(props.__publisher !== undefined && !publisherHydrateDescriptors.has(props.__publisher))
+				)
 					throw new TypeError(formatClientError(349));
 				if (
 					state.props.__external?.authority.publisherBuildId !==
 						props.__external?.authority.publisherBuildId ||
 					state.props.__external?.authority.runtimeABI !== props.__external?.authority.runtimeABI
 				)
+					throw new TypeError(formatClientError(355));
+				if (state.props.__publisher !== props.__publisher)
 					throw new TypeError(formatClientError(355));
 				if (state.independent !== (props.__independent !== undefined)) {
 					throw new Error(formatClientError(66));
@@ -18874,7 +19147,11 @@ function initializeHydrateComponent(
 						// though the still-mounted boundary had unmounted.
 						cleanupHydrateStrategy(state);
 						invalidateHydrateActivation(state);
-					} else if (!state.activationRequested && props.__external === undefined) {
+					} else if (
+						!state.activationRequested &&
+						props.__external === undefined &&
+						props.__publisher === undefined
+					) {
 						const shouldDefer = surroundingUpdate
 							? false
 							: strategy._d
@@ -18928,6 +19205,155 @@ export const Hydrate: ComponentBody<HydrateProps> =
 /** Compiler-owned template children with no authored fallback; never a descriptor entry point. */
 export const __HydrateCompiled: ComponentBody<HydrateProps> =
 	/* @__PURE__ */ initializeHydrateComponent(compiledHydrateBoundaryBody);
+
+function joinPublisherLifecycle(
+	state: HydrateSlot,
+	signalOwner: SignalOwner,
+	documentId: string,
+	streamedHydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined,
+): (() => void) | undefined {
+	return joinSignalDocumentLifecycle({
+		document: state.wrapper.ownerDocument,
+		documentId,
+		signalOwner,
+		streamedHydration,
+		onRetire() {
+			teardownHydrateBoundary(state);
+			unmountBlock(state.block, false);
+		},
+	});
+}
+
+function joinNativePublisher(
+	state: HydrateSlot,
+	publisherKey: string,
+	documentId: string | undefined,
+	bridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined,
+	expectedCompilerBuild?: string,
+): (() => void) | undefined {
+	const document = state.wrapper.ownerDocument;
+	const parentAuthority = parentStreamedAuthority(state.parentBlock, document);
+	const parentOwner =
+		state.parentBlock.idState.dataOwner ?? state.parentBlock.idState.renderOwner?.signalOwner;
+	const parentLease =
+		parentOwner === undefined ? undefined : nativePublisherHydrations?.get(parentOwner);
+	const documentOwner = parentLease?.documentOwner ?? parentOwner;
+	const documentAuthority = parentLease?.documentAuthority ?? parentAuthority;
+	let lease: NativePublisherHydration | undefined;
+	const owner = state.idState.dataOwner!;
+	if (
+		parentAuthority !== undefined &&
+		documentId !== undefined &&
+		documentOwner !== undefined &&
+		documentAuthority !== undefined &&
+		publisherSlotDescriptors.get(state)?.documentId !== null
+	) {
+		lease = {
+			state,
+			publisherKey,
+			documentId,
+			streamAuthority:
+				bridge === undefined ? parentAuthority : getNativeStreamedAuthority(owner, document)!,
+			documentAuthority,
+			documentOwner,
+			expectedCompilerBuild,
+			releases: new Map(),
+			admittedBuilds: new Set(expectedCompilerBuild === undefined ? [] : [expectedCompilerBuild]),
+			owner,
+			ingress: bridge,
+			closed: false,
+			remounting: false,
+			leaveLifecycle: undefined,
+		};
+		(nativePublisherHydrations ??= new WeakMap()).set(owner, lease);
+	}
+	let leave: (() => void) | undefined;
+	try {
+		if (documentId !== undefined) leave = joinPublisherLifecycle(state, owner, documentId, bridge);
+		if (lease !== undefined) lease.leaveLifecycle = leave;
+	} catch (error) {
+		nativePublisherHydrations?.delete(owner);
+		throw error;
+	}
+
+	return () => {
+		if (lease !== undefined) {
+			lease.leaveLifecycle?.();
+			lease.closed = true;
+			for (const membership of lease.releases.values()) membership.release();
+			lease.releases.clear();
+			nativePublisherHydrations?.delete(lease.owner);
+			lease.ingress?.dispose();
+		} else leave?.();
+	};
+}
+
+/** Render a local native publisher under private data/ID ownership and live parent contexts. */
+export function publisherBoundary<P>(
+	component: ComponentBody<P>,
+	options: { readonly publisherKey: string },
+): ComponentBody<P> {
+	const publisherKey = options.publisherKey;
+	createPublisherBoundaryDescriptor(publisherKey, null, 'validate', null);
+	if (typeof component !== 'function') throw new TypeError(formatClientError(356));
+	const streamSlot = Symbol('octane.publisher.stream');
+	const joinedSlot = Symbol('octane.publisher.joined');
+	const descriptor: PublisherHydrateDescriptor = Object.freeze({ publisherKey, component });
+	publisherHydrateDescriptors.add(descriptor);
+	return markComponentFlags(
+		function PublisherBoundary(props, scope, extra) {
+			Hydrate(
+				{
+					when: { _t: 'load' },
+					children: createElement(component, props),
+					__publisher: descriptor,
+				} as InternalHydrateProps,
+				scope,
+				extra,
+			);
+			const state = scope.slots[0] as HydrateSlot;
+			const joined = useRef(false, joinedSlot);
+			useLayoutEffect(
+				() => {
+					if (joined.current) return;
+					const parentAuthority = parentStreamedAuthority(
+						state.parentBlock,
+						state.wrapper.ownerDocument,
+					);
+					const bridge =
+						state.serverPreserved && parentAuthority !== undefined
+							? bootstrapStreamedSignalHydration({
+									buildId: parentAuthority.buildId,
+									documentId: parentAuthority.documentId,
+									signalOwner: state.idState.dataOwner!,
+									target: state.wrapper.ownerDocument.defaultView as unknown as Record<
+										string,
+										unknown
+									>,
+								})
+							: undefined;
+					let release: (() => void) | undefined;
+					try {
+						release = joinNativePublisher(state, publisherKey, parentAuthority?.documentId, bridge);
+					} catch (error) {
+						bridge?.dispose();
+						throw error;
+					}
+					joined.current = true;
+					registerHookCleanup(scope, () => {
+						release?.();
+						bridge?.dispose();
+					});
+					requestHydrateBoundary(state);
+				},
+				[state],
+				streamSlot,
+			);
+		},
+		COMPONENT_FLAG_BOUNDARY,
+		'PublisherBoundary',
+	);
+}
 
 /** Adopt external native output inside the existing parent scope and render owner. */
 export function externalSnapshotBoundary<P>(
@@ -19014,16 +19440,13 @@ export function externalSnapshotBoundary<P>(
 						: undefined;
 					let leaveDocumentLifecycle: (() => void) | undefined;
 					try {
-						leaveDocumentLifecycle = joinSignalDocumentLifecycle({
-							document,
+						leaveDocumentLifecycle = joinNativePublisher(
+							state,
+							JSON.stringify(['octane:external', authority.publisherBuildId, state.boundaryId]),
 							documentId,
-							signalOwner: state.idState.dataOwner!,
-							streamedHydration: bridge,
-							onRetire() {
-								teardownHydrateBoundary(state);
-								unmountBlock(state.block, false);
-							},
-						});
+							bridge,
+							authority.publisherBuildId,
+						);
 					} catch (error) {
 						bridge?.dispose();
 						throw error;
@@ -41982,6 +42405,10 @@ export function memo<P>(
 
 export const HMR: unique symbol = Symbol.for('octane.hmr');
 
+interface HmrWrapper {
+	readonly [HMR]?: HmrMeta;
+}
+
 interface HmrMeta {
 	fn: ComponentBody<any>;
 	liveBlocks: Set<Block>;
@@ -42001,11 +42428,19 @@ export function hmr<P>(fn: ComponentBody<P>): ComponentBody<P> {
 				__profileComponentSource(wrapper, incoming);
 			const incomingMeta = (incoming as any)[HMR] as HmrMeta | undefined;
 			const nextFn = incomingMeta ? incomingMeta.fn : incoming;
+			if (typeof nextFn !== 'function') return false;
+			for (const block of meta.liveBlocks) if (block.disposed) meta.liveBlocks.delete(block);
+			const previousABI = (meta.fn as any).__octaneReturnedOutput;
+			const nextABI = (nextFn as any).__octaneReturnedOutput;
+			if (
+				(previousABI !== undefined && previousABI !== true) ||
+				(nextABI !== undefined && nextABI !== true)
+			)
+				return false;
 			// Direct-template shorthand bodies and returned-output shorthand bodies
 			// use different slot-0 ABIs. Let the bundler invalidate/full-reload this
 			// module instead of reusing a live scope with the incompatible layout.
-			if ((meta.fn as any).__octaneReturnedOutput !== (nextFn as any).__octaneReturnedOutput)
-				return false;
+			if (previousABI !== nextABI && meta.liveBlocks.size !== 0) return false;
 			// A hot component may live in a single-element or inherited marker-elision
 			// regime. Reject only incoherent/detached ranges; the accepted path promotes
 			// a self-marked element to an HMR-owned comment range before removing it.
@@ -42049,6 +42484,8 @@ export function hmr<P>(fn: ComponentBody<P>): ComponentBody<P> {
 		// update() if disposed.
 		if (scope === CURRENT_SCOPE && scope !== null) {
 			meta.liveBlocks.add(scope.block);
+			if (process.env.NODE_ENV !== 'production')
+				admitNativePublisherComponent(wrapper as HmrWrapper, scope);
 			// Propagate the wrapped body's return — a return-based (folded) component
 			// hands back a renderable descriptor that renderBlock must still mount.
 			return meta.fn(props as any, scope, extra);

@@ -3600,6 +3600,31 @@
       "message": "External snapshot timeout must be finite and between 0 and 2147483647 milliseconds. Boundary timeouts must be greater than 0.",
       "runtime": ["client", "server"],
       "status": "active"
+    },
+    "359": {
+      "message": "A historical signal owner cannot change its module generation.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "360": {
+      "message": "The hot declaration no longer belongs to its native owner.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "361": {
+      "message": "The signal module generation is stale or already being installed.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "362": {
+      "message": "The hot declaration changed its native cell identity.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "363": {
+      "message": "The hot signal generation has no current native publisher admission.",
+      "runtime": ["client", "server"],
+      "status": "active"
     }
   },
   "strongDiagnostics": {

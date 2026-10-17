@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "nextCode": 359,
+  "nextCode": 364,
   "codes": {
     "1": {
       "message": "Maximum update depth exceeded. Octane limits the number of nested updates to prevent infinite loops.",
@@ -2149,6 +2149,36 @@
     },
     "358": {
       "message": "External snapshot timeout must be finite and between 0 and 2147483647 milliseconds. Boundary timeouts must be greater than 0.",
+      "argumentCount": 0,
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "359": {
+      "message": "A historical signal owner cannot change its module generation.",
+      "argumentCount": 0,
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "360": {
+      "message": "The hot declaration no longer belongs to its native owner.",
+      "argumentCount": 0,
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "361": {
+      "message": "The signal module generation is stale or already being installed.",
+      "argumentCount": 0,
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "362": {
+      "message": "The hot declaration changed its native cell identity.",
+      "argumentCount": 0,
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "363": {
+      "message": "The hot signal generation has no current native publisher admission.",
       "argumentCount": 0,
       "runtime": ["client", "server"],
       "status": "active"

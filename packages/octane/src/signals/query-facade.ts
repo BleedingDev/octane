@@ -1,3 +1,7 @@
+// Bundlers replace this literal environment guard; keep it independent of Node types.
+declare const process: { env: { NODE_ENV?: string } };
+
+import { hotSignalModuleGeneration, type HotSignalModuleStamp } from './hot-declarations.js';
 import { formatClientError } from '../error-codes.client.generated.js';
 import { createResourceCellWith, signalDeclarationSequence } from './engine.js';
 import { declarationKey, Descriptor, descriptorKey, signalOptionsKey } from './facade.js';
@@ -37,6 +41,7 @@ export function __queryAt<A, T>(
 	options?: QueryOptions & SignalOptions,
 	// Compiler-listed render values that select, load and options capture.
 	captures?: readonly unknown[],
+	stamp?: HotSignalModuleStamp,
 ): QuerySignal<T> {
 	if (typeof select !== 'function' || typeof load !== 'function') {
 		throw new TypeError(formatClientError(193));
@@ -70,13 +75,27 @@ export function __queryAt<A, T>(
 					const selection = runWithSignalOwner(owner, select);
 					return selection === skip ? skip : request(selection);
 				},
-				initializeResource,
+				process.env.NODE_ENV !== 'production' && stamp
+					? (scope, node, describe, seed, retained) =>
+							initializeResource(
+								scope,
+								node,
+								describe,
+								seed,
+								retained,
+								hotSignalModuleGeneration(stamp),
+							)
+					: initializeResource,
 				false,
 				sequence,
 				captures,
 				declaring,
 			) as QuerySignal<T>,
 		site,
+		undefined,
+		stamp,
+		'__queryAt',
+		stamp ? (options?.kind ?? 'promise') : undefined,
 	);
 }
 

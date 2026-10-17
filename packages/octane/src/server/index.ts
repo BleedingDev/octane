@@ -281,6 +281,7 @@ export {
 } from '../external-snapshot-protocol.js';
 export {
 	externalSnapshotBoundary,
+	publisherBoundary,
 	prepareExternalSnapshotRequest,
 	releasePreparedExternalSnapshotRequest,
 	renderExternalSnapshot,

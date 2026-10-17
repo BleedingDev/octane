@@ -1,8 +1,11 @@
+// Bundlers replace this literal environment guard; keep it independent of Node types.
+declare const process: { env: { NODE_ENV?: string } };
+
 import { yieldForHostBudget } from '../host-budget.js';
 import { publishNativeProducer } from './read-protocol.js';
 import { formatClientError } from '../error-codes.client.generated.js';
 import { decodeSignalValue, encodeSignalValue } from './encoding.js';
-import { createResourceCellWith } from './engine.js';
+import { createResourceCellWith, installHotQueryLifecycle } from './engine.js';
 import { SignalStreamError } from './errors.js';
 import {
 	ScopedNode,
@@ -33,6 +36,7 @@ import {
 import { RedeclarableBinding } from './redeclaration.js';
 import { candidateHooks } from './transition-state.js';
 import { installResourceCandidates } from '#octane/signal-actions/bindings';
+import { hotDeclarationGeneration } from './hot-declarations.js';
 import {
 	QUERY_REQUEST,
 	skip,
@@ -77,6 +81,89 @@ interface RequestOwner extends GraphOwner {
 				discardCompleted(identity: StreamFrameIdentity): void;
 		  }
 		| undefined;
+}
+
+interface QueryGenerationNamespace {
+	readonly generation: string;
+	readonly owner: RequestOwner;
+	readonly requests: Map<string, RequestEntry>;
+	readonly queryDefinitions: Map<string, QueryDefinition>;
+	readonly consumers: Set<ResourceBinding>;
+}
+const hotQueryNamespaces = new WeakMap<RequestOwner, Map<string, QueryGenerationNamespace>>();
+const hotQueryBindings = new WeakMap<ResourceBinding, QueryGenerationNamespace>();
+const hotRequestCaches = new WeakMap<RequestEntry, Map<string, RequestEntry>>();
+function requestCache(entry: RequestEntry): Map<string, RequestEntry> | undefined {
+	return (
+		(process.env.NODE_ENV !== 'production' ? hotRequestCaches.get(entry) : undefined) ??
+		entry.owner.requests
+	);
+}
+const hotQueryLifecycle = {
+	activeRequests(owner: RequestOwner): number {
+		let count = 0;
+		for (const namespace of hotQueryNamespaces.get(owner)?.values() ?? [])
+			for (const entry of namespace.requests.values()) if (entry.active) count++;
+		return count;
+	},
+	dispose(owner: RequestOwner): void {
+		for (const namespace of hotQueryNamespaces.get(owner)?.values() ?? [])
+			for (const consumer of namespace.consumers) consumer.dispose();
+		hotQueryNamespaces.delete(owner);
+	},
+	suspend(owner: RequestOwner): void {
+		for (const namespace of hotQueryNamespaces.get(owner)?.values() ?? [])
+			for (const entry of namespace.requests.values()) entry.stopAttempt();
+	},
+	resume(owner: RequestOwner): void {
+		for (const namespace of hotQueryNamespaces.get(owner)?.values() ?? [])
+			for (const entry of namespace.requests.values()) {
+				if (owner.readBarrier !== undefined || owner.retired) return;
+				if (
+					!entry.active &&
+					!entry.state.snapshot.complete &&
+					entry.state.snapshot.status !== 'error' &&
+					entry.consumers.size
+				)
+					entry.start(entry.state.snapshot.status !== 'ready');
+			}
+	},
+};
+function joinQueryGeneration(binding: ResourceBinding, generation: string | ResourceBinding): void {
+	const inherited = typeof generation === 'string' ? undefined : hotQueryBindings.get(generation);
+	if (typeof generation !== 'string' && inherited === undefined) return;
+	const key = inherited?.generation ?? (generation as string);
+	if (!key.trim()) throw new TypeError(formatClientError(363));
+	assertAlive(binding.owner);
+	let namespaces = hotQueryNamespaces.get(binding.owner);
+	if (namespaces === undefined) hotQueryNamespaces.set(binding.owner, (namespaces = new Map()));
+	let namespace = namespaces.get(key);
+	if (namespace === undefined) {
+		namespace = {
+			generation: key,
+			owner: binding.owner,
+			requests: new Map(),
+			queryDefinitions: new Map(),
+			consumers: new Set(),
+		};
+		namespaces.set(key, namespace);
+	}
+	namespace.consumers.add(binding);
+	hotQueryBindings.set(binding, namespace);
+	installHotQueryLifecycle(hotQueryLifecycle);
+}
+function leaveQueryGeneration(binding: ResourceBinding): void {
+	const namespace = hotQueryBindings.get(binding);
+	if (namespace === undefined) return;
+	hotQueryBindings.delete(binding);
+	namespace.consumers.delete(binding);
+	if (namespace.consumers.size === 0) {
+		namespace.queryDefinitions.clear();
+		const namespaces = hotQueryNamespaces.get(namespace.owner);
+		if (namespaces?.get(namespace.generation) === namespace)
+			namespaces.delete(namespace.generation);
+		if (namespaces?.size === 0) hotQueryNamespaces.delete(namespace.owner);
+	}
 }
 
 class Request<T> implements QueryRequest<T> {
@@ -229,7 +316,7 @@ export class RequestEntry {
 			generation !== this.generation ||
 			this.owner.readBarrier !== undefined ||
 			this.owner.retired ||
-			this.owner.requests?.get(this.request.identity) !== this ||
+			requestCache(this)?.get(this.request.identity) !== this ||
 			!this.consumers.size
 		)
 			return;
@@ -293,7 +380,7 @@ export class RequestEntry {
 			this.generation !== identity.attempt ||
 			this.owner.readBarrier !== undefined ||
 			this.owner.retired ||
-			this.owner.requests?.get(this.request.identity) !== this ||
+			requestCache(this)?.get(this.request.identity) !== this ||
 			!this.consumers.size
 		) {
 			return false;
@@ -327,8 +414,8 @@ export class RequestEntry {
 	remove(consumer: ResourceBinding): void {
 		this.consumers.delete(consumer);
 		if (this.consumers.size) return;
-		if (this.owner.requests?.get(this.request.identity) === this) {
-			this.owner.requests?.delete(this.request.identity);
+		if (requestCache(this)?.get(this.request.identity) === this) {
+			requestCache(this)?.delete(this.request.identity);
 		}
 		this.stopAttempt();
 	}
@@ -561,8 +648,13 @@ export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
 		public describe: Describe<T> | undefined,
 		seed?: { entry: SignalSeedEntry; value: unknown },
 		retained = seed,
+		generation?: string | ResourceBinding,
 	) {
 		super();
+		if (process.env.NODE_ENV !== 'production') {
+			generation ??= hotDeclarationGeneration(node);
+			if (generation !== undefined) joinQueryGeneration(this, generation);
+		}
 		this.seeded = seed;
 		const identity = retained?.entry.request;
 		this.retainedRequest = identity
@@ -627,7 +719,14 @@ export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
 		const node: ScopedNode<T> = createDeclarationView(this.node, (target) =>
 			candidateHooks.resource!.call(binding, target),
 		);
-		const binding: ResourceBinding<T> = new ResourceBinding(this.owner, node, describe);
+		const binding: ResourceBinding<T> = new ResourceBinding(
+			this.owner,
+			node,
+			describe,
+			undefined,
+			undefined,
+			this,
+		);
 		// A view is private like a candidate fork: it never owns receiver streams.
 		binding.candidate = true;
 		binding.retainedRequest = this.retainedRequest;
@@ -684,10 +783,11 @@ export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
 			this.sequence = sequence;
 			if (fork.queryDefinition !== undefined) {
 				this.queryDefinition = fork.queryDefinition;
-				(this.owner.queryDefinitions ??= new Map()).set(
-					fork.queryDefinition.key,
-					fork.queryDefinition,
-				);
+				(
+					(process.env.NODE_ENV !== 'production'
+						? hotQueryBindings.get(this)?.queryDefinitions
+						: undefined) ?? (this.owner.queryDefinitions ??= new Map())
+				).set(fork.queryDefinition.key, fork.queryDefinition);
 			}
 			fork.selected = undefined;
 			fork.pendingPromise = undefined;
@@ -720,7 +820,11 @@ export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
 				return idleState();
 			}
 			request = described;
-			const previousDefinition = this.owner.queryDefinitions?.get(request.queryKey);
+			const namespace =
+				process.env.NODE_ENV !== 'production' ? hotQueryBindings.get(this) : undefined;
+			const previousDefinition = (namespace?.queryDefinitions ?? this.owner.queryDefinitions)?.get(
+				request.queryKey,
+			);
 			// A redeclared facade replaces its own loader closure; only a different
 			// declaration under the same query key is incompatible.
 			if (
@@ -734,7 +838,10 @@ export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
 			this.queryDefinition = request.definition;
 			// Private forks and views publish their definition only on acceptance.
 			if (!this.candidate)
-				(this.owner.queryDefinitions ??= new Map()).set(request.queryKey, request.definition);
+				(namespace?.queryDefinitions ?? (this.owner.queryDefinitions ??= new Map())).set(
+					request.queryKey,
+					request.definition,
+				);
 		} catch (error) {
 			if (isThenable(error)) {
 				this.pendingObserver = captureCurrentServerSignalQueryAttemptObserver(this.owner.scopeKey);
@@ -763,13 +870,18 @@ export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
 				this.retainedRequest = undefined;
 				releaseRetention(this.node);
 			}
-			let entry = this.owner.requests?.get(request.identity);
+			const namespace =
+				process.env.NODE_ENV !== 'production' ? hotQueryBindings.get(this) : undefined;
+			const cache = namespace?.requests ?? (this.owner.requests ??= new Map());
+			let entry = cache.get(request.identity);
 			let start = false;
 			if (!entry) {
 				const seed =
 					this.seeded && matchesSeed(request, this.seeded.entry) ? this.seeded : undefined;
 				entry = new RequestEntry(this.owner, request, seed);
-				(this.owner.requests ??= new Map()).set(request.identity, entry);
+				cache.set(request.identity, entry);
+				if (process.env.NODE_ENV !== 'production' && namespace !== undefined)
+					hotRequestCaches.set(entry, cache);
 				start = !seed || !seed.entry.complete;
 			}
 			this.seeded = undefined;
@@ -900,15 +1012,19 @@ export class ResourceBinding<T = any> extends RedeclarableBinding<Describe<T>> {
 	}
 
 	dispose(): void {
-		this.forgetStaged();
-		this.probed = undefined;
-		this.releaseView();
-		this.detach();
-		this.pendingObserver = undefined;
-		this.describe = undefined;
-		this.seeded = undefined;
-		this.retainedRequest = undefined;
-		this.streamedSelection = undefined;
+		try {
+			this.forgetStaged();
+			this.probed = undefined;
+			this.releaseView();
+			this.detach();
+			this.pendingObserver = undefined;
+			this.describe = undefined;
+			this.seeded = undefined;
+			this.retainedRequest = undefined;
+			this.streamedSelection = undefined;
+		} finally {
+			if (process.env.NODE_ENV !== 'production') leaveQueryGeneration(this);
+		}
 	}
 }
 
@@ -927,10 +1043,11 @@ export function initializeResource<T>(
 	describe: () => QueryRequest<T> | typeof skip,
 	seed?: { entry: SignalSeedEntry; value: unknown },
 	retained = seed,
+	generation?: string | ResourceBinding,
 ): ResourceBinding<T> {
 	// Only a bundle that creates resources carries their candidate producer.
 	installResourceCandidates();
-	return new ResourceBinding(owner, node, describe, seed, retained);
+	return new ResourceBinding(owner, node, describe, seed, retained, generation);
 }
 
 // Stream ingress owns these operations so ordinary resource consumers can remove them.

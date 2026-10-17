@@ -1,3 +1,4 @@
+import type { HotSignalModuleStamp } from './hot-declarations.js';
 import { formatClientError } from '../error-codes.client.generated.js';
 import { createDeclaredDerivedCell } from './computations.js';
 import { signalDeclarationSequence } from './engine.js';
@@ -14,6 +15,7 @@ export function __derivedAt<T>(
 	compute: DerivedCompute<T>,
 	options?: DerivedOptions & SignalOptions,
 	captures?: readonly unknown[],
+	stamp?: HotSignalModuleStamp,
 ): DerivedSignal<T> {
 	if (typeof compute !== 'function') throw new TypeError(formatClientError(122));
 	const explicit = signalOptionsKey(options);
@@ -32,6 +34,9 @@ export function __derivedAt<T>(
 			return createDeclaredDerivedCell(owner, key, wrapped, options, sequence, captures, declaring);
 		},
 		site,
+		undefined,
+		stamp,
+		'__derivedAt',
 	);
 }
 
