@@ -4,6 +4,7 @@ import * as Signals from 'octane/signals';
 import { installSignalDocumentLifecycle } from 'octane/hydration/streamed-signals';
 import { loadCompiledFixtureSource } from '../_server-fixture.js';
 import { deferred } from '../_server-stream.js';
+import { installViewTransitionMocks } from '../conformance/_helpers/view-transition-mocks.js';
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -27,10 +28,47 @@ function transition(type: 'pagehide' | 'pageshow', persisted = true) {
 	window.dispatchEvent(new PageTransitionEvent(type, { persisted }));
 }
 
+function holdViewTransition() {
+	const mocks = installViewTransitionMocks();
+	const fontReady = deferred<void>();
+	const fonts = { status: 'loaded', ready: fontReady.promise };
+	const previousFonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+	Object.defineProperty(document, 'fonts', { configurable: true, value: fonts });
+	const handles: {
+		update: () => void | Promise<void>;
+		ready: ReturnType<typeof deferred<void>>;
+		finished: ReturnType<typeof deferred<void>>;
+	}[] = [];
+	(document as unknown as Record<string, unknown>).startViewTransition = (input: {
+		update: () => void | Promise<void>;
+	}) => {
+		const ready = deferred<void>();
+		const finished = deferred<void>();
+		handles.push({ update: input.update, ready, finished });
+		return { ready: ready.promise, finished: finished.promise, skipTransition() {} };
+	};
+	const releaseFonts = () => {
+		fonts.status = 'loaded';
+		fontReady.resolve(undefined);
+	};
+	cleanups.push(() => {
+		releaseFonts();
+		for (const handle of handles) {
+			handle.ready.resolve(undefined);
+			handle.finished.resolve(undefined);
+		}
+		if (previousFonts === undefined) delete (document as unknown as Record<string, unknown>).fonts;
+		else Object.defineProperty(document, 'fonts', previousFonts);
+		mocks.restore();
+	});
+	return { handles, fonts, requestFont: () => (fonts.status = 'loading'), releaseFonts };
+}
+
 function mount$(
 	first: ReturnType<typeof reader>,
 	second?: ReturnType<typeof reader>,
 	withHostSignalOwner = true,
+	requestFont?: () => void,
 ) {
 	const retiredPublishers: { label: string; status: string; hostDraft: string }[] = [];
 	const remote = loadCompiledFixtureSource(
@@ -66,12 +104,26 @@ function mount$(
 	});
 	const host = loadCompiledFixtureSource(
 		`
+		import { useInsertionEffect, ViewTransition } from 'octane';
 		import { Boundary } from 'publisher-boundary';
 		export function Host({ loadA, loadB, showA, onRetire, readHostDraft$ }) @{
 			<main>
 				@if (showA) { <Boundary load={loadA} label="A" onRetire={onRetire} readHostDraft$={readHostDraft$} /> }
 				@if (loadB) { <Boundary load={loadB} label="B" onRetire={onRetire} readHostDraft$={readHostDraft$} /> }
 			</main>
+		}
+		function RemovalGate({ removal }) @{
+			if (removal !== undefined) {
+				removal.attempted();
+				throw removal.pending;
+			}
+			<span data-removal-gate />
+		}
+		export function TransitionHost(props) @{
+			useInsertionEffect(() => {
+				if (!props.showA) props.requestFont();
+			}, [props.showA]);
+			<ViewTransition><Host {...props} /><RemovalGate removal={props.removal} /></ViewTransition>
 		}
 	`,
 		{
@@ -102,13 +154,15 @@ function mount$(
 		...(withHostSignalOwner ? { signalOwner } : {}),
 		externalSnapshots: { documentId: 'host-document' },
 	});
-	const render = (showA: boolean) =>
-		root.render(host.Host, {
+	const render = (showA: boolean, removal?: { pending: Promise<void>; attempted: () => void }) =>
+		root.render(requestFont === undefined ? host.Host : host.TransitionHost, {
 			loadA: first.load,
 			loadB: second?.load,
 			showA,
 			onRetire,
 			readHostDraft$,
+			requestFont,
+			removal,
 		});
 	cleanups.push(() => {
 		root.unmount();
@@ -211,6 +265,100 @@ it('does not restart a removed publisher while a retained sibling resumes', asyn
 	retained.attempts[0].result.resolve('old sibling result');
 	await Client.act(async () => {});
 	expect(container.querySelector('output')!.textContent).toBe('sibling resumed');
+	expect(onMismatch).not.toHaveBeenCalled();
+});
+
+it('keeps publisher data live for cleanup when a deferred-layout removal publishes', async () => {
+	const viewTransition = holdViewTransition();
+	const pending = reader();
+	const { container, render, retiredPublishers, onMismatch } = mount$(
+		pending,
+		undefined,
+		false,
+		viewTransition.requestFont,
+	);
+	await Client.act(async () => {});
+	const input = container.querySelector('input')!;
+	input.value = 'draft until publication';
+	Client.startTransition(() => render(false));
+	await vi.waitFor(() => expect(viewTransition.handles).toHaveLength(1));
+	expect(container.querySelector('input')).toBe(input);
+	expect(input.value).toBe('draft until publication');
+	expect(pending.attempts[0].signal.aborted).toBe(false);
+	expect(retiredPublishers).toEqual([]);
+	const handle = viewTransition.handles[0];
+	try {
+		const updated = handle.update();
+		await vi.waitFor(() => expect(viewTransition.fonts.status).toBe('loading'));
+		expect(retiredPublishers).toEqual([
+			{ label: 'A', status: 'pending', hostDraft: 'host remains live' },
+		]);
+		expect(pending.attempts[0].signal.aborted).toBe(true);
+		expect(container.querySelector('input')).toBeNull();
+		viewTransition.releaseFonts();
+		await updated;
+		handle.ready.resolve(undefined);
+		handle.finished.resolve(undefined);
+		await Client.act(async () => {});
+		transition('pagehide');
+		transition('pageshow');
+		pending.attempts[0].result.resolve('retired completion');
+		await Client.act(async () => {});
+		expect(pending.attempts).toHaveLength(1);
+		expect(container.textContent).not.toContain('retired completion');
+		expect(onMismatch).not.toHaveBeenCalled();
+	} finally {
+		viewTransition.releaseFonts();
+	}
+});
+
+it('keeps a publisher live when its suspended transition removal is abandoned', async () => {
+	const viewTransition = holdViewTransition();
+	const pending = reader();
+	const removal = deferred<void>();
+	const attempted = vi.fn();
+	const { container, render, retiredPublishers, onMismatch } = mount$(
+		pending,
+		undefined,
+		false,
+		() => {},
+	);
+	await Client.act(async () => {});
+	const input = container.querySelector('input')!;
+	input.value = 'retained after rollback';
+	Client.startTransition(() => render(false, { pending: removal.promise, attempted }));
+	await vi.waitFor(() => expect(viewTransition.handles).toHaveLength(1));
+	expect(attempted).toHaveBeenCalled();
+	expect(pending.attempts[0].signal.aborted).toBe(false);
+	expect(retiredPublishers).toEqual([]);
+	const handle = viewTransition.handles[0];
+	await handle.update();
+	handle.ready.resolve(undefined);
+	handle.finished.resolve(undefined);
+	await Promise.resolve();
+	expect(container.querySelector('input')).toBe(input);
+	expect(input.value).toBe('retained after rollback');
+	expect(pending.attempts[0].signal.aborted).toBe(false);
+	expect(retiredPublishers).toEqual([]);
+	Client.flushSync(() => render(true));
+	removal.resolve(undefined);
+	await Client.act(async () => {});
+	expect(container.querySelector('input')).toBe(input);
+	expect(input.value).toBe('retained after rollback');
+	expect(pending.attempts[0].signal.aborted).toBe(false);
+	expect(retiredPublishers).toEqual([]);
+	transition('pagehide');
+	expect(pending.attempts[0].signal.aborted).toBe(true);
+	transition('pageshow');
+	await Client.act(async () => {});
+	expect(pending.attempts).toHaveLength(2);
+	pending.attempts[1].result.resolve('resumed publisher');
+	pending.attempts[0].result.resolve('obsolete transition result');
+	await Client.act(async () => {});
+	expect(container.querySelector('output')!.textContent).toBe('resumed publisher');
+	expect(container.querySelector('input')).toBe(input);
+	expect(input.value).toBe('retained after rollback');
+	expect(retiredPublishers).toEqual([]);
 	expect(onMismatch).not.toHaveBeenCalled();
 });
 
