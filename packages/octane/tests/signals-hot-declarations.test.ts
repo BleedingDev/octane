@@ -573,6 +573,7 @@ describe('native hot signal generations', () => {
 		h.execute(initial, false, (stamp) => {
 			__signalAt('g:count$', 1, undefined, undefined, stamp);
 		});
+		expect(globals[bridgeKey].allowStatus(h.runtime, 'check')).toBe(false);
 		expect(() => admitHotSignalPublisher(h.component, {} as any)).toThrow();
 		const foreign = createNativeHotSignalOwnerProof({
 			publisherKey: 'foreign',

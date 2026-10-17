@@ -126,6 +126,8 @@ const transactions = new WeakMap<HotSignalExecutionFrame, Transaction>();
 const abortResults = new WeakMap<HotSignalExecutionFrame, boolean>();
 const claims = new WeakMap<ScopedNode, Set<ModuleState>>();
 const activeModules = new WeakSet<ModuleState>();
+// A fully retired native publisher leaves no work requiring a live lease.
+const admittedModules = new WeakSet<ModuleState>();
 
 interface HotDeclarationBarrier {
 	readonly generation: string;
@@ -345,8 +347,9 @@ function pruneRetiredScopes(state: ModuleState): void {
 }
 
 function validateModule(state: ModuleState): void {
-	if (state.retired || !state.runtime || !state.admissions.size) fail();
+	if (state.retired || !state.runtime) fail();
 	pruneRetiredScopes(state);
+	if (!state.admissions.size && (!admittedModules.has(state) || state.cells.size !== 0)) fail();
 	for (const proof of state.admissions) {
 		if (
 			proof.buildId !== state.buildId ||
@@ -405,6 +408,7 @@ export function admitHotSignalPublisher(component: object, proof: HotSignalOwner
 		if (member.runtime !== state.runtime || member.executableId !== state.executableId) fail();
 	}
 	state.admissions.add(authority);
+	admittedModules.add(state);
 	authority.memberships.add(state);
 	let released = false;
 	return () => {
@@ -461,6 +465,7 @@ export function __hotSignalModule(manifest: HotSignalModuleManifest): HotSignalM
 		rebindGeneration: transaction ? `${transaction.generation}:${snapshot.moduleId}` : undefined,
 	};
 	for (const authority of state.admissions) authority.memberships.add(state);
+	if (previous && admittedModules.has(previous)) admittedModules.add(state);
 	if (transaction) {
 		transaction.fresh.set(snapshot.moduleId, state);
 		if (sameShape(previous!.manifest, snapshot)) {
@@ -478,16 +483,6 @@ export function __hotSignalModule(manifest: HotSignalModuleManifest): HotSignalM
 	moduleStamps.set(state, stamp);
 	installBridge();
 	return stamp;
-}
-
-/** @internal Namespace only work belonging to a native admitted execution. */
-export function hotSignalModuleGeneration(stamp: HotSignalModuleStamp): string | undefined {
-	const state = stamps.get(stamp);
-	if (!state || state.aborted || state.retired) fail();
-	return state.runtime
-		? (state.rebindGeneration ??
-				`${state.buildId}:${state.executableId}:${state.manifest.generation}`)
-		: undefined;
 }
 
 /** @internal Register a recipe without materializing an owner or starting work. */

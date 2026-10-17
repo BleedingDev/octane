@@ -7,6 +7,7 @@ import rspack, { type Compiler, type Stats } from '@rspack/core';
 import { afterEach, expect, it } from 'vitest';
 import { createStreamedSignalHmrRuntimeModule } from '../src/streamed-signals-hmr.js';
 import { OctaneRspackPlugin } from '../src/index.js';
+import { drainProducers } from '../../octane/tests/_fixtures/signals-async-controls.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -76,7 +77,7 @@ async function applyBuild(
 	throw new Error(`Native HMR did not reach compilation ${stats.hash}.`);
 }
 
-function nativeCompiler(root: string) {
+function nativeCompiler(root: string, mode: 'development' | 'production' = 'development') {
 	mkdirSync(join(root, 'node_modules'));
 	symlinkSync(
 		fileURLToPath(new URL('../../octane', import.meta.url)),
@@ -87,7 +88,7 @@ function nativeCompiler(root: string) {
 		JSON.stringify({ private: true, dependencies: { octane: '*' } }),
 	);
 	return rspack({
-		mode: 'development',
+		mode,
 		target: 'node',
 		context: root,
 		entry: './entry.cjs',
@@ -99,11 +100,348 @@ function nativeCompiler(root: string) {
 		},
 		output: { path: join(root, 'dist'), filename: 'entry.cjs', library: { type: 'commonjs2' } },
 		plugins: [
-			new rspack.HotModuleReplacementPlugin(),
+			...(mode === 'development' ? [new rspack.HotModuleReplacementPlugin()] : []),
 			new OctaneRspackPlugin({ root, environment: 'client', parallel: false }),
 		],
 	})!;
 }
+
+it.each([
+	['production', 'sharing'],
+	['development', 'sharing'],
+	['production', 'conflict'],
+	['development', 'conflict'],
+] as const)(
+	'preserves initial query ownership in %s for %s',
+	async (mode, scenario) => {
+		const root = realpathSync(mkdtempSync(join(tmpdir(), 'octane-native-initial-query-')));
+		roots.push(root);
+		writeFileSync(
+			join(root, 'shared.cjs'),
+			`
+exports.calls = 0;
+exports.load = function() { exports.calls++; return 'shared result'; };
+`,
+		);
+		const querySource = `
+import { query$ } from 'octane/signals';
+import { load } from './shared.cjs';
+const feed$ = query$(() => 'same', (argument, context) => load(argument, context), { key: 'feed', kind: 'promise' });
+export function Remote() @{ <output data-query>{feed$.get()}</output> }
+`;
+		writeFileSync(join(root, 'first.tsrx'), querySource);
+		writeFileSync(join(root, 'second.tsrx'), querySource);
+		writeFileSync(
+			join(root, 'host.tsrx'),
+			`
+import { First } from './components.cjs';
+import { Remote as Second } from './second.tsrx';
+export function Host() @{ <main><First />${scenario === 'sharing' ? '<Second />' : ''}</main> }
+`,
+		);
+		writeFileSync(join(root, 'components.cjs'), `exports.First = require('./first.tsrx').Remote;`);
+		writeFileSync(
+			join(root, 'entry.cjs'),
+			`
+const { createRoot, flushSync } = require('octane');
+const { createScope, createResource, query } = require('octane/signals');
+const shared = require('./shared.cjs');
+const owner = createScope({ scopeKey: 'initial-query-owner' });
+let mounted, retained;
+exports.originalCalls = 0;
+exports.errors = [];
+exports.prime = async function() {
+ ${
+		scenario === 'conflict'
+			? `
+ const request = query('g:feed', function() { exports.originalCalls++; return 'original result'; });
+ retained = createResource(owner, 'independent-consumer', () => request('same'));
+ try { retained.get(); } catch (pending) { if (typeof pending?.then !== 'function') throw pending; await pending; }
+ `
+			: ''
+ }
+};
+exports.retained = function() { return retained?.get(); };
+exports.mount = function() {
+ const { Host } = require('./host.tsrx');
+ mounted = createRoot(document.querySelector('#app'), { signalOwner: owner, onUncaughtError(error) { exports.errors.push(error); } });
+ flushSync(function() { mounted.render(Host, {}); });
+};
+exports.settle = function() { flushSync(function() {}); };
+exports.calls = function() { return shared.calls; };
+exports.dispose = function() { mounted?.unmount(); owner.dispose(); };
+`,
+		);
+		const { JSDOM } = createRequire(import.meta.url)('jsdom');
+		const dom = new JSDOM(
+			'<!doctype html><html><head></head><body><div id="app"></div></body></html>',
+			{
+				url: 'http://localhost/',
+				pretendToBeVisual: true,
+			},
+		);
+		const names = [
+			'window',
+			'document',
+			'Node',
+			'Text',
+			'NodeFilter',
+			'HTMLElement',
+			'Element',
+			'Event',
+			'CustomEvent',
+			'MutationObserver',
+			'requestAnimationFrame',
+			'cancelAnimationFrame',
+		] as const;
+		const previous = new Map(
+			names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]),
+		);
+		for (const name of names) {
+			const value =
+				name === 'requestAnimationFrame' || name === 'cancelAnimationFrame'
+					? dom.window[name].bind(dom.window)
+					: dom.window[name];
+			Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+		}
+		try {
+			await withWatch(nativeCompiler(root, mode), async () => {
+				const entry = createRequire(import.meta.url)(join(root, 'dist/entry.cjs'));
+				try {
+					await entry.prime();
+					if (scenario === 'conflict') expect(entry.retained()).toBe('original result');
+					entry.mount();
+					await drainProducers();
+					entry.settle();
+					if (scenario === 'sharing') {
+						expect(entry.errors).toEqual([]);
+						expect(entry.calls()).toBe(1);
+						expect(
+							[...dom.window.document.querySelectorAll('[data-query]')].map(
+								(node) => node.textContent,
+							),
+						).toEqual(['shared result', 'shared result']);
+					} else {
+						expect(entry.errors).toHaveLength(1);
+						expect(entry.errors[0]).toBeInstanceOf(TypeError);
+						expect(String(entry.errors[0])).toMatch(
+							/[Ii]ncompatible query|Minified Octane error #202/,
+						);
+						expect(entry.calls()).toBe(0);
+						expect(entry.originalCalls).toBe(1);
+						expect(entry.retained()).toBe('original result');
+					}
+				} finally {
+					entry.dispose();
+				}
+			});
+		} finally {
+			for (const name of names) {
+				const descriptor = previous.get(name);
+				if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+				else delete (globalThis as any)[name];
+			}
+			dom.window.close();
+		}
+	},
+	30_000,
+);
+
+it('uses ordinary query identity in a fresh publisher after an admitted query update', async () => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), 'octane-native-fresh-query-owner-')));
+	roots.push(root);
+	writeFileSync(
+		join(root, 'queries.cjs'),
+		`
+const { createResource, query, skip } = require('octane/signals');
+let fresh = false, firstOwner, freshOwner, retained, pending;
+const versions = [];
+exports.originalCalls = 0;
+exports.selection = function(owner) {
+ firstOwner ??= owner;
+ if (fresh) { freshOwner = owner; return skip; }
+ return 'same';
+};
+exports.load = function(version, argument, context) {
+ versions.push(version);
+ if (version === 1 && versions.length > 1) {
+  pending = context.signal;
+  return new Promise(function() {});
+ }
+ return 'query' + version;
+};
+exports.prepareFresh = function() { fresh = true; };
+exports.primeFresh = async function() {
+ const request = query('g:feed', function() { exports.originalCalls++; return 'ordinary result'; });
+ retained = createResource(freshOwner, 'independent-consumer', () => request('same'));
+ try { retained.get(); } catch (promise) { if (typeof promise?.then !== 'function') throw promise; await promise; }
+ fresh = false;
+ return retained.get();
+};
+exports.pending = function() { return pending; };
+exports.firstOwner = function() { return firstOwner; };
+exports.freshOwner = function() { return freshOwner; };
+exports.versions = function() { return versions; };
+`,
+	);
+	writeFileSync(
+		join(root, 'entry.cjs'),
+		`
+const { createRoot, flushSync } = require('octane');
+const { earlySignalBootstrapScript } = require('octane/server');
+const { bootstrapStreamedSignalHydration } = require('octane/hydration/streamed-signals');
+const queries = require('./queries.cjs');
+let mounted, bridge;
+exports.mount = function() {
+ document.head.insertAdjacentHTML('beforeend', earlySignalBootstrapScript());
+ window.eval(document.querySelector('script[data-octane-stream]').textContent);
+ bridge = bootstrapStreamedSignalHydration({ buildId: 'fresh-query-stream', documentId: 'fresh-query-document', target: window });
+ const { Host } = require('./host.tsrx');
+ mounted = createRoot(document.querySelector('#app'), { signalOwner: bridge.signalOwner });
+ flushSync(function() { mounted.render(Host, {}); });
+};
+exports.queries = queries;
+exports.click = function(selector) { flushSync(function() { document.querySelector(selector).click(); }); };
+exports.settle = function() { flushSync(function() {}); };
+exports.update = function() { return module.hot.check(true); };
+exports.runtime = function() { return __webpack_require__.__octaneHotSignalRuntime; };
+exports.dispose = function() { mounted?.unmount(); bridge?.dispose(); };
+`,
+	);
+	writeFileSync(
+		join(root, 'host.tsrx'),
+		`
+import { publisherBoundary, useState } from 'octane';
+import { Remote } from './remote.tsrx';
+const Publisher = publisherBoundary(Remote, { publisherKey: 'remote/query' });
+export function Host() @{
+ const [count, setCount] = useState(5);
+ const [shown, setShown] = useState(true);
+ <main>
+  <button data-host onClick={() => setCount(count + 1)}>{count}</button>
+  <button data-toggle onClick={() => setShown(!shown)}>toggle</button>
+  @try {
+   @if (shown) { <Publisher /> }
+  } @catch (error) {
+   <output data-error>{String(error)}</output>
+  }
+ </main>
+}
+`,
+	);
+	const source = (version: number) => `
+import { query$, signal$, currentSignalOwner } from 'octane/signals';
+import { selection, load } from './queries.cjs';
+const enabled$ = signal$(true);
+const feed$ = query$(() => selection(currentSignalOwner(), enabled$.get()), (argument, context) => load(${version}, argument, context), { key: 'feed', kind: 'promise' });
+export function Remote() @{
+ const state = feed$.snapshot();
+ if (state.status === 'error') throw state.error;
+ <section>
+  <button data-query-refresh onClick={() => feed$.refetch()}>refresh</button>
+  <button data-query-activate onClick={() => enabled$.set(!enabled$.get())}>activate</button>
+  <output data-query>{feed$.latest('waiting')}</output>
+ </section>
+}
+globalThis.__octaneNativeHmrEffects.push('query${version}');
+`;
+	writeFileSync(join(root, 'remote.tsrx'), source(1));
+	const { JSDOM } = createRequire(import.meta.url)('jsdom');
+	const dom = new JSDOM(
+		'<!doctype html><html><head></head><body><div id="app"></div></body></html>',
+		{
+			url: 'http://localhost/',
+			runScripts: 'outside-only',
+			pretendToBeVisual: true,
+		},
+	);
+	const names = [
+		'window',
+		'document',
+		'Node',
+		'Text',
+		'NodeFilter',
+		'HTMLElement',
+		'Element',
+		'Event',
+		'CustomEvent',
+		'MutationObserver',
+		'requestAnimationFrame',
+		'cancelAnimationFrame',
+	] as const;
+	const previous = new Map(
+		names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]),
+	);
+	for (const name of names) {
+		const value =
+			name === 'requestAnimationFrame' || name === 'cancelAnimationFrame'
+				? dom.window[name].bind(dom.window)
+				: dom.window[name];
+		Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+	}
+	try {
+		await withWatch(nativeCompiler(root), async (_first, nextBuild) => {
+			(globalThis as any).__octaneNativeHmrEffects = [];
+			let reloads = 0;
+			(globalThis as any).location = {
+				reload() {
+					reloads++;
+				},
+			};
+			const entry = createRequire(import.meta.url)(join(root, 'dist/entry.cjs'));
+			const text = (selector: string) => dom.window.document.querySelector(selector)?.textContent;
+			try {
+				entry.mount();
+				await drainProducers();
+				entry.settle();
+				expect(text('[data-query]')).toBe('query1');
+				const host = dom.window.document.querySelector('[data-host]');
+				entry.click('[data-host]');
+				entry.click('[data-query-refresh]');
+				await drainProducers();
+				const pending = entry.queries.pending();
+				expect(pending).toBeInstanceOf(AbortSignal);
+				expect(pending.aborted).toBe(false);
+				const changedBuild = nextBuild((stats) => hasFactoryEffect(stats, 'query2'));
+				writeFileSync(join(root, 'remote.tsrx'), source(2));
+				await applyBuild(entry, await changedBuild);
+				await drainProducers();
+				entry.settle();
+				expect(pending.aborted).toBe(true);
+				expect(text('[data-query]')).toBe('query2');
+				expect(text('[data-error]')).toBeUndefined();
+				expect(entry.queries.versions()).toEqual([1, 1, 2]);
+				entry.queries.prepareFresh();
+				entry.click('[data-toggle]');
+				expect(dom.window.document.querySelector('[data-query]')).toBeNull();
+				expect(entry.queries.firstOwner().retired).toBe(true);
+				entry.click('[data-toggle]');
+				expect(text('[data-query]')).toBe('waiting');
+				expect(entry.queries.freshOwner()).not.toBe(entry.queries.firstOwner());
+				expect(entry.queries.freshOwner().retired).toBe(false);
+				expect(await entry.queries.primeFresh()).toBe('ordinary result');
+				entry.click('[data-query-activate]');
+				await drainProducers();
+				entry.settle();
+				expect(text('[data-error]')).toMatch(/[Ii]ncompatible query|Minified Octane error #202/);
+				expect(entry.queries.originalCalls).toBe(1);
+				expect(entry.queries.versions()).toEqual([1, 1, 2]);
+				expect(dom.window.document.querySelector('[data-host]')).toBe(host);
+				expect(text('[data-host]')).toBe('6');
+				expect(reloads).toBe(0);
+			} finally {
+				entry.dispose();
+			}
+		});
+	} finally {
+		for (const name of names) {
+			const descriptor = previous.get(name);
+			if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+			else delete (globalThis as any)[name];
+		}
+		dom.window.close();
+	}
+}, 30_000);
 
 it('updates eligible ordinary modules repeatedly without signal-owner admission', async () => {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), 'octane-native-ordinary-hmr-')));
@@ -433,13 +771,16 @@ ${options.fail ? `globalThis.__octaneFailedHmrExports = { count$, result$ }; thr
 );
 
 it.each([
-	['bootstrapped', 'direct'],
-	['unbootstrapped', 'direct'],
-	['bootstrapped', 'default-memo'],
-	['unbootstrapped', 'default-memo'],
+	['bootstrapped', 'direct', 'local', 'mounted'],
+	['unbootstrapped', 'direct', 'local', 'mounted'],
+	['bootstrapped', 'default-memo', 'local', 'mounted'],
+	['unbootstrapped', 'default-memo', 'local', 'mounted'],
+	['bootstrapped', 'direct', 'external', 'mounted'],
+	['bootstrapped', 'default-memo', 'external', 'mounted'],
+	['bootstrapped', 'direct', 'local', 'retired'],
 ] as const)(
-	'admits mounted native publishers in the %s document through %s exports',
-	async (authority, exposure) => {
+	'admits native publishers in the %s document through %s exports using %s boundary with %s ownership',
+	async (authority, exposure, boundary, ownership) => {
 		const memo = exposure === 'default-memo';
 		const root = realpathSync(mkdtempSync(join(tmpdir(), 'octane-native-publisher-hmr-')));
 		roots.push(root);
@@ -449,17 +790,25 @@ it.each([
 const { createRoot, flushSync } = require('octane');
 const { earlySignalBootstrapScript } = require('octane/server');
 const { bootstrapStreamedSignalHydration } = require('octane/hydration/streamed-signals');
+${
+	ownership === 'retired'
+		? `require('./ordinary.cjs');
+module.hot.accept('./ordinary.cjs', function() { require('./ordinary.cjs'); });`
+		: ''
+}
 let mounted, bridge;
 exports.mount = function(bootstrap) {
   if (bootstrap) {
     document.head.insertAdjacentHTML('beforeend', earlySignalBootstrapScript());
     window.eval(document.querySelector('script[data-octane-stream]').textContent);
     bridge = bootstrapStreamedSignalHydration({
-      buildId: __webpack_hash__, documentId: 'native-watch-document', target: window
+      buildId: 'native-host-stream', documentId: 'native-watch-document', target: window
     });
   }
   const { Host } = require('./host.tsrx');
-  mounted = createRoot(document.querySelector('#app'), bridge ? { signalOwner: bridge.signalOwner } : {});
+  mounted = createRoot(document.querySelector('#app'), bridge ? {
+    signalOwner: bridge.signalOwner, externalSnapshots: { documentId: 'native-watch-document' }
+  } : {});
   flushSync(function() { mounted.render(Host, {}); });
 };
 exports.click = function(selector) { flushSync(function() { document.querySelector(selector).click(); }); };
@@ -473,19 +822,28 @@ exports.dispose = function() { mounted?.unmount(); bridge?.dispose(); };
 		writeFileSync(
 			join(root, 'host.tsrx'),
 			`
-import { publisherBoundary, useState } from 'octane';
+import { publisherBoundary, externalSnapshotBoundary, useState } from 'octane';
 import ${memo ? 'RemoteA' : '{ RemoteA }'} from './remote-a.tsrx';
-const Remote = publisherBoundary(RemoteA, { publisherKey: 'remote/Widget' });
+const Remote = ${
+				boundary === 'external'
+					? `externalSnapshotBoundary({
+  authority: { publisherBuildId: 'native-publisher-stream', runtimeABI: 1 },
+  component: RemoteA,
+  snapshot() { throw new Error('A client boundary must not call server transport.'); }
+})`
+					: `publisherBoundary(RemoteA, { publisherKey: 'remote/Widget' })`
+			};
 function Sibling() @{
   const [value, setValue] = useState(41);
   <button data-sibling onClick={() => setValue(value + 1)}>{value}</button>
 }
 export function Host() @{
   const [value, setValue] = useState(5);
+  ${ownership === 'retired' ? 'const [shown, setShown] = useState(true);' : ''}
   <main>
     <button data-host onClick={() => setValue(value + 1)}>{value}</button>
     <Sibling />
-    <Remote />
+    ${ownership === 'retired' ? '<button data-publisher-toggle onClick={() => setShown(!shown)}>toggle</button>@if (shown) { <Remote /> }' : '<Remote />'}
   </main>
 }
 `,
@@ -532,6 +890,11 @@ globalThis.__octaneNativeHmrEffects.push('remoteA${version}');
 ${failed ? "throw new Error('native publisher factory failed');" : ''}
 `;
 		writeFileSync(join(root, 'remote-a.tsrx'), source(1));
+		if (ownership === 'retired')
+			writeFileSync(
+				join(root, 'ordinary.cjs'),
+				"globalThis.__octaneNativeHmrEffects.push('ordinary1');",
+			);
 		const { JSDOM } = createRequire(import.meta.url)('jsdom');
 		const dom = new JSDOM(
 			'<!doctype html><html><head></head><body><div id="app"></div></body></html>',
@@ -596,6 +959,8 @@ ${failed ? "throw new Error('native publisher factory failed');" : ''}
 					expect(text('[data-remote-count]')).toBe('3');
 					expect(text('[data-remote-b]')).toBe('101');
 					const runtime = entry.runtime();
+					expect(runtime.buildId).not.toBe('native-host-stream');
+					expect(runtime.buildId).not.toBe('native-publisher-stream');
 					for (const version of memo ? [2, 3, 4] : [2, 3]) {
 						const changedBuild = nextBuild((stats) => hasFactoryEffect(stats, `remoteA${version}`));
 						writeFileSync(join(root, 'remote-a.tsrx'), source(version));
@@ -629,6 +994,38 @@ ${failed ? "throw new Error('native publisher factory failed');" : ''}
 						expect(dom.window.document.querySelector('[data-sibling]')).toBe(sibling);
 						expect(text('[data-host]')).toBe('6');
 						expect(text('[data-sibling]')).toBe('42');
+					}
+					if (ownership === 'retired') {
+						entry.click('[data-publisher-toggle]');
+						expect(dom.window.document.querySelector('[data-remote-a]')).toBeNull();
+						expect(dom.window.document.querySelector('[data-host]')).toBe(host);
+						expect(dom.window.document.querySelector('[data-sibling]')).toBe(sibling);
+						const unrelatedBuild = nextBuild((stats) => hasFactoryEffect(stats, 'ordinary2'));
+						writeFileSync(
+							join(root, 'ordinary.cjs'),
+							"globalThis.__octaneNativeHmrEffects.push('ordinary2');",
+						);
+						await applyBuild(entry, await unrelatedBuild);
+						entry.settle();
+						expect((globalThis as any).__octaneNativeHmrEffects).toContain('ordinary2');
+						expect(reloads).toBe(0);
+						entry.click('[data-publisher-toggle]');
+						expect(text('[data-remote-count]')).toBe('1');
+						expect(text('[data-remote-result]')).toBe('4');
+						expect(text('[data-remote-b]')).toBe('100');
+						entry.click('[data-remote-increment]');
+						const remountedBuild = nextBuild((stats) => hasFactoryEffect(stats, 'remoteA4'));
+						writeFileSync(join(root, 'remote-a.tsrx'), source(4));
+						await applyBuild(entry, await remountedBuild);
+						entry.settle();
+						expect(text('[data-remote-count]')).toBe('2');
+						expect(text('[data-remote-result]')).toBe('6');
+						expect(dom.window.document.querySelector('[data-host]')).toBe(host);
+						expect(dom.window.document.querySelector('[data-sibling]')).toBe(sibling);
+						expect(text('[data-host]')).toBe('6');
+						expect(text('[data-sibling]')).toBe('42');
+						expect(reloads).toBe(0);
+						return;
 					}
 					const coldVersion = memo ? 5 : 4;
 					const changedBuild = nextBuild((stats) =>

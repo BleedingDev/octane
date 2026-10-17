@@ -19445,7 +19445,7 @@ export function externalSnapshotBoundary<P>(
 							JSON.stringify(['octane:external', authority.publisherBuildId, state.boundaryId]),
 							documentId,
 							bridge,
-							authority.publisherBuildId,
+							getNativeHotOwnerDriver()?.getComponentBuild(options.component),
 						);
 					} catch (error) {
 						bridge?.dispose();
