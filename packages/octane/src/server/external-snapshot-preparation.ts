@@ -2,6 +2,7 @@ import { decodeSignalValue } from '../data-encoding.js';
 import { isContext } from '../context-identity.js';
 import { formatServerError } from '../error-codes.server.generated.js';
 import {
+	EXTERNAL_SNAPSHOT_MAX_TIMEOUT_MS,
 	decodeExternalSnapshotRequest,
 	snapshotExternalSnapshotContextDecoders,
 	validateExternalSnapshotAuthority,
@@ -171,9 +172,11 @@ export async function prepareExternalSnapshotRequest(
 	validateExternalSnapshotAuthority(captured.authority);
 	if (
 		captured.timeoutMs !== undefined &&
-		(!Number.isFinite(captured.timeoutMs) || captured.timeoutMs < 0)
+		(!Number.isFinite(captured.timeoutMs) ||
+			captured.timeoutMs < 0 ||
+			captured.timeoutMs > EXTERNAL_SNAPSHOT_MAX_TIMEOUT_MS)
 	)
-		throw new TypeError(formatServerError(347));
+		throw new TypeError(formatServerError(358));
 	const request = decodeExternalSnapshotRequest(wire, captured.authority);
 	// Every registration is selected before decoder code can mutate the registry.
 	const decoders = snapshotExternalSnapshotContextDecoders(request);

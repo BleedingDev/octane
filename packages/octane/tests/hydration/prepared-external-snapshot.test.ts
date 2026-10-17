@@ -45,6 +45,55 @@ function request(keys: string[] = [], props: unknown = { label: 'owned props' })
 }
 
 describe('prepared external publisher requests', () => {
+	it.each([NaN, Infinity, -1, 2147483648, Number.MAX_SAFE_INTEGER])(
+		'rejects unsupported timeout %s before context reconstruction or publisher execution',
+		async (timeoutMs) => {
+			const decode = vi.fn(String);
+			const initializeContexts = vi.fn();
+			const component = vi.fn(() => Server.createElement('p', { children: 'must not render' }));
+			register(First, 'timeout-context', decode);
+			const options = { authority, timeoutMs, initializeContexts };
+			const preparing = Server.prepareExternalSnapshotRequest(
+				request(['timeout-context']),
+				options,
+			);
+			await expect(
+				preparing.then(async (prepared) => {
+					await Server.releasePreparedExternalSnapshotRequest(prepared);
+					return prepared;
+				}),
+			).rejects.toThrow(/External snapshot timeout|Minified Octane error #358/);
+			await expect(
+				Server.renderExternalSnapshot(component, request(['timeout-context']), options),
+			).rejects.toThrow(/External snapshot timeout|Minified Octane error #358/);
+			expect(decode).not.toHaveBeenCalled();
+			expect(initializeContexts).not.toHaveBeenCalled();
+			expect(component).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([0, 2147483647])('keeps supported timeout %s active until release', async (timeoutMs) => {
+		const prepared = await Server.prepareExternalSnapshotRequest(request(), {
+			authority,
+			timeoutMs,
+		});
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			expect(prepared.signal.aborted).toBe(false);
+			expect(
+				(
+					await Server.renderExternalSnapshot(
+						(props) => Server.createElement('p', { children: props.label }),
+						prepared,
+					)
+				).html,
+			).toContain('owned props');
+		} finally {
+			await Server.releasePreparedExternalSnapshotRequest(prepared);
+		}
+		expect(prepared.signal.aborted).toBe(true);
+	});
+
 	it('validates only after all selected contexts decode and exposes their physical presence', async () => {
 		const pending = deferred<string>();
 		const validate = vi.fn((value, readContext) => {

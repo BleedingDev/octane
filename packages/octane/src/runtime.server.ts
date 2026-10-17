@@ -30,6 +30,7 @@ export { readNativeDomStyle, readNativeDomProps } from './signals/read-protocol.
 
 import {
 	EXTERNAL_SNAPSHOT_ATTR,
+	EXTERNAL_SNAPSHOT_MAX_TIMEOUT_MS,
 	assertExternalSnapshotRequest,
 	captureExternalSnapshotContexts,
 	createExternalSnapshotRequest,
@@ -10548,9 +10549,13 @@ export function externalSnapshotBoundary<P, C>(options: ExternalSnapshotBoundary
 	const contextKeys = options.contextKeys === undefined ? undefined : [...options.contextKeys];
 	const timeoutMs = options.timeoutMs;
 	if (
+		timeoutMs !== undefined &&
+		(!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > EXTERNAL_SNAPSHOT_MAX_TIMEOUT_MS)
+	)
+		throw new TypeError(formatServerError(358));
+	if (
 		typeof options.component !== 'function' ||
 		typeof snapshotTransport !== 'function' ||
-		(timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) ||
 		(contextKeys !== undefined &&
 			(contextKeys.some(
 				(key) => typeof key !== 'string' || key.length === 0 || key.length > 1024,

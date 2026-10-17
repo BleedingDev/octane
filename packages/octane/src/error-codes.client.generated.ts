@@ -323,6 +323,7 @@ type ClientErrorArguments = {
 	354: [];
 	355: [];
 	356: [];
+	358: [];
 };
 
 export function formatClientError<Code extends keyof ClientErrorArguments>(
@@ -1419,6 +1420,11 @@ export function formatClientError<Code extends keyof ClientErrorArguments>(
 			case 356:
 				return formatDevErrorMessage(
 					'External snapshot boundary options must specify a native component, a snapshot transport, a finite positive timeout, and unique valid context keys.',
+					args,
+				);
+			case 358:
+				return formatDevErrorMessage(
+					'External snapshot timeout must be finite and between 0 and 2147483647 milliseconds. Boundary timeouts must be greater than 0.',
 					args,
 				);
 			default:

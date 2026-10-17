@@ -260,6 +260,7 @@ type ServerErrorArguments = {
 	354: [];
 	356: [];
 	357: [];
+	358: [];
 };
 
 export function formatServerError<Code extends keyof ServerErrorArguments>(
@@ -1071,6 +1072,11 @@ export function formatServerError<Code extends keyof ServerErrorArguments>(
 			case 357:
 				return formatDevErrorMessage(
 					'External snapshot and streamed signal document identities must match.',
+					args,
+				);
+			case 358:
+				return formatDevErrorMessage(
+					'External snapshot timeout must be finite and between 0 and 2147483647 milliseconds. Boundary timeouts must be greater than 0.',
 					args,
 				);
 			default:

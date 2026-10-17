@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "nextCode": 358,
+  "nextCode": 359,
   "codes": {
     "1": {
       "message": "Maximum update depth exceeded. Octane limits the number of nested updates to prevent infinite loops.",
@@ -2145,6 +2145,12 @@
       "message": "External snapshot and streamed signal document identities must match.",
       "argumentCount": 0,
       "runtime": ["server"],
+      "status": "active"
+    },
+    "358": {
+      "message": "External snapshot timeout must be finite and between 0 and 2147483647 milliseconds. Boundary timeouts must be greater than 0.",
+      "argumentCount": 0,
+      "runtime": ["client", "server"],
       "status": "active"
     }
   }

@@ -90,13 +90,7 @@ function installSelectionLease(
 	)
 		throw new Error(formatClientError(124));
 	if (router === undefined) {
-		const history = readStreamedMailboxAuthorities(
-			early,
-			early.identities,
-			false,
-			256,
-			formatClientError(268),
-		);
+		const history = readStreamedMailboxAuthorities(early, early.identities, false, 256);
 		const { admitted, refused } = history;
 		let initialBytes = history.bytes;
 		for (const identity of early.identities)

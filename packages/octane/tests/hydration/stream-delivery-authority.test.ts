@@ -38,6 +38,41 @@ function ingress(realm: Record<string, unknown>) {
 }
 
 describe('streamed renderer authority leases', () => {
+	it('reports the renderer mailbox diagnostic for malformed pre-client authority history', () => {
+		const first = receiver();
+		const realm = {
+			__octaneStreamedRenderer: {
+				version: 1,
+				frames: [],
+				authorities: ['not an authority tuple'],
+				receive() {},
+			},
+		};
+		expect(() =>
+			installStreamedRendererGlobal(first, realm, { authority: identity('host') }),
+		).toThrow(/pre-module streamed renderer mailbox overflowed|Minified Octane error #228/);
+		expect(first.receive).not.toHaveBeenCalled();
+	});
+
+	it('reports the signal mailbox diagnostic for malformed pre-client authority history', () => {
+		const realm = {
+			__octaneStreamedSignalSelections: {
+				version: 1,
+				identities: [],
+				authorities: ['not an authority tuple'],
+				register() {},
+			},
+		};
+		expect(() =>
+			bootstrapStreamedSignalResults({
+				buildId: 'publisher',
+				documentId: 'host-document',
+				signalOwner: { scopeKey: 'host' },
+				target: realm,
+			}),
+		).toThrow(/pre-module streamed signal selection mailbox overflowed|Minified Octane error #268/);
+	});
+
 	it('routes publisher/document/owner frames to independent receivers in one realm', async () => {
 		const realm = {};
 		const first = receiver(),

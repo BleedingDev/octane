@@ -58,6 +58,38 @@ function transport(
 }
 
 describe('external snapshot admission and selected context codecs', () => {
+	it.each([NaN, Infinity, -1, 0, 2147483648, Number.MAX_SAFE_INTEGER])(
+		'rejects unsupported boundary timeout %s in both public runtimes',
+		(timeoutMs) => {
+			const component = vi.fn();
+			const snapshot = vi.fn();
+			for (const runtime of [Client, Server]) {
+				expect(() =>
+					runtime.externalSnapshotBoundary({ authority, component, snapshot, timeoutMs }),
+				).toThrow(/External snapshot timeout|Minified Octane error #358/);
+			}
+			expect(component).not.toHaveBeenCalled();
+			expect(snapshot).not.toHaveBeenCalled();
+		},
+	);
+
+	it('accepts the maximum supported boundary deadline without starting publisher work', () => {
+		const component = vi.fn();
+		const snapshot = vi.fn();
+		for (const runtime of [Client, Server]) {
+			expect(
+				typeof runtime.externalSnapshotBoundary({
+					authority,
+					component,
+					snapshot,
+					timeoutMs: 2147483647,
+				}),
+			).toBe('function');
+		}
+		expect(component).not.toHaveBeenCalled();
+		expect(snapshot).not.toHaveBeenCalled();
+	});
+
 	it('transfers only the publisher keys and owns codec registration until disposal', async () => {
 		const decode = vi.fn((value) => ({ title: String(value) }));
 		const codec = { key: 'theme', encode: (value: { title: string }) => value.title, decode };

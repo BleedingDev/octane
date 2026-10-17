@@ -9,6 +9,8 @@ import {
 
 export const EXTERNAL_SNAPSHOT_ATTR = 'data-octane-external-snapshot';
 export const EXTERNAL_SNAPSHOT_ABI = 1;
+// Native timers clamp larger delays to an immediate timeout.
+export const EXTERNAL_SNAPSHOT_MAX_TIMEOUT_MS = 0x7fffffff;
 
 export interface ExternalSnapshotAuthority {
 	readonly publisherBuildId: string;

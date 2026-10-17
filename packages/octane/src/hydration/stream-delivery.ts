@@ -58,10 +58,9 @@ export function readStreamedMailboxAuthorities(
 	values: readonly unknown[],
 	frames: boolean,
 	limit: number,
-	errorMessage: string,
 ) {
 	function fail(): never {
-		throw new Error(errorMessage);
+		throw new Error(frames ? formatClientError(228) : formatClientError(268));
 	}
 	const admitted = new Set<string>();
 	const refused = new Set<string>();
@@ -391,13 +390,7 @@ export function installStreamedRendererGlobal(
 		const leases = new Map<string, ReturnType<typeof createGlobalDelivery>>();
 		const retired = new Set<string>();
 		const buffered = early?.frames ?? [];
-		const history = readStreamedMailboxAuthorities(
-			early,
-			buffered,
-			true,
-			512,
-			formatClientError(228),
-		);
+		const history = readStreamedMailboxAuthorities(early, buffered, true, 512);
 		const { admitted, refused } = history;
 		let initialBytes = history.bytes;
 		for (const frame of buffered) {

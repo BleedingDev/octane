@@ -3595,6 +3595,11 @@
       "message": "External snapshot and streamed signal document identities must match.",
       "runtime": ["server"],
       "status": "active"
+    },
+    "358": {
+      "message": "External snapshot timeout must be finite and between 0 and 2147483647 milliseconds. Boundary timeouts must be greater than 0.",
+      "runtime": ["client", "server"],
+      "status": "active"
     }
   },
   "strongDiagnostics": {

@@ -21,6 +21,7 @@ declare const process: { env: { NODE_ENV?: string } };
 
 import {
 	EXTERNAL_SNAPSHOT_ATTR,
+	EXTERNAL_SNAPSHOT_MAX_TIMEOUT_MS,
 	decodeExternalSnapshotRequest,
 	externalSnapshotOwnerKey,
 	validateExternalSnapshotAuthority,
@@ -18922,11 +18923,15 @@ export const __HydrateCompiled: ComponentBody<HydrateProps> =
 export function externalSnapshotBoundary<P>(
 	options: ExternalSnapshotBoundaryOptions<P, ComponentBody<P>>,
 ): ComponentBody<P> {
+	const timeoutMs = options.timeoutMs;
+	if (
+		timeoutMs !== undefined &&
+		(!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > EXTERNAL_SNAPSHOT_MAX_TIMEOUT_MS)
+	)
+		throw new TypeError(formatClientError(358));
 	if (
 		typeof options.component !== 'function' ||
 		typeof options.snapshot !== 'function' ||
-		(options.timeoutMs !== undefined &&
-			(!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) ||
 		(options.contextKeys !== undefined &&
 			(!Array.isArray(options.contextKeys) ||
 				options.contextKeys.some(
