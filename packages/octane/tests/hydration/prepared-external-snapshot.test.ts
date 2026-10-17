@@ -6,6 +6,7 @@ import {
 	captureExternalSnapshotContexts,
 } from '../../src/external-snapshot-protocol.js';
 import { deferred } from '../_server-stream.js';
+import { loadCompiledFixtureSource } from '../_server-fixture.js';
 
 const authority = { publisherBuildId: 'prepared-publisher', runtimeABI: 1 as const };
 const First = createContext('first default');
@@ -486,6 +487,52 @@ describe('prepared external publisher requests', () => {
 		await Server.releasePreparedExternalSnapshotRequest(prepared);
 		expect(Server.useContext(Second)).toBe('second default');
 	});
+
+	it.each([true, false])(
+		'initializes a public server context before a compiled expose imports with dev=%s',
+		async (dev) => {
+			const WorkerContext = Server.createContext({ requestId: 'default request' });
+			const initialized = { requestId: 'worker request' };
+			const forged = Object.assign(() => {}, WorkerContext);
+			let lateProvide: (() => void) | undefined;
+			const prepared = await Server.prepareExternalSnapshotRequest(request(), {
+				authority,
+				initializeContexts(provide) {
+					provide(WorkerContext, initialized);
+					expect(Server.useContext(WorkerContext)).toBe(initialized);
+					expect(() => provide(WorkerContext, { requestId: 'duplicate' })).toThrow();
+					expect(() => provide(forged, initialized)).toThrow();
+					lateProvide = () => provide(WorkerContext, { requestId: 'late' });
+				},
+			});
+			try {
+				expect(() => lateProvide!()).toThrow();
+				// An endpoint imports the expose only after preparing its request contexts.
+				const { Expose } = loadCompiledFixtureSource(
+					`
+import { useContext } from 'octane';
+import { WorkerContext } from './worker-context.js';
+export function Expose() @{
+  const value = useContext(WorkerContext);
+  <output data-worker-context>{value.requestId as string}</output>
+}
+`,
+					{
+						id: '/fixtures/prepared-worker-context.tsrx',
+						mode: 'server',
+						compileOptions: { dev, hmr: false },
+						runtimeModules: { './worker-context.js': { WorkerContext } },
+					},
+				);
+				const result = await Server.renderExternalSnapshot(Expose, prepared);
+				expect(result.html).toContain('worker request');
+				expect(result.html).not.toContain('default request');
+			} finally {
+				await Server.releasePreparedExternalSnapshotRequest(prepared);
+			}
+			expect(Server.useContext(WorkerContext)).toEqual({ requestId: 'default request' });
+		},
+	);
 
 	it('preserves render and cleanup failures on the original producer API', async () => {
 		register(First, 'first', String, () => {

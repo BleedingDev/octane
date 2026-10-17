@@ -214,7 +214,7 @@ import {
 import { formatServerError } from './error-codes.server.generated.js';
 import { formAuthoringDiagnostics } from './form-diagnostics.js';
 import { isRendererContext, registerServerRendererContextProvider } from './renderer-bridge.js';
-import { defineRemovedContextMembers, registerContext } from './context-identity.js';
+import { defineRemovedContextMembers, isContext, registerContext } from './context-identity.js';
 import {
 	validateNativeReadWitness,
 	type NativeReadWitness,
@@ -10462,7 +10462,7 @@ export function prepareExternalSnapshotRequest(
 			let active = true;
 			try {
 				const initialized: unknown = initialize((context, value) => {
-					if (!active || !isRendererContext(context) || contexts.has(context))
+					if (!active || !isContext(context) || contexts.has(context))
 						throw new TypeError(formatServerError(348));
 					contexts.set(context, value);
 				});
