@@ -29433,7 +29433,12 @@ export function setClassName(el: Element, value: unknown, foreign?: boolean): vo
 	// compare below sees the value we actually write).
 	const cls = normalizeClass(value);
 	const hydration = hydrating ? activeHydration() : null;
-	if (hydration !== null && hydration.keepsClass(el, cls, true)) return;
+	if (hydration !== null) {
+		// Live publisher adoption preserves removal intent; ordinary hydration
+		// still compares the normalized class without changing server attributes.
+		const next = hydration.reconcileValues && (value == null || value === false) ? null : cls;
+		if (hydration.keepsClass(el, next, true)) return;
+	}
 	// Fast path on HTMLElement. For SVG/MathML hosts the compiler emits
 	// setAttribute(el, 'class', normalizeClass(...)) directly — never routes here —
 	// because SVGElement.className is a read-only SVGAnimatedString and assignment

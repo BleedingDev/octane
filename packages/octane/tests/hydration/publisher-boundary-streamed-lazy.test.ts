@@ -63,6 +63,90 @@ export function App(props) {
  return <Theme value={props.theme}><main><header data-host="before">host before</header><Suspense fallback={<aside data-fallback="remote">waiting</aside>}><Remote label={props.label} initial={props.initial} resourceUrl={props.resourceUrl} activityMode={props.activityMode}/></Suspense><footer data-host="after">host after</footer></main></Theme>;
 }`;
 
+it.each([null, false] as const)(
+	'removes an empty server class for live publisher context %s',
+	async (theme) => {
+		const source = `import {useContext,useId} from 'octane';
+import {useSignal$} from 'octane/signals/client';
+import {Theme} from './context';
+export function Remote() {
+ const count$ = useSignal$(7);
+ const id = useId();
+ const theme = useContext(Theme);
+ return <section data-publisher="nullable-class" className={theme}><input id={id} defaultValue="server draft"/><button onClick={()=>count$.set(value=>value+1)}>{String(count$.get())}</button></section>;
+}`;
+		const ServerTheme = Server.createContext<string | null | false>('');
+		const ClientTheme = Client.createContext<string | null | false>('');
+		const compile = (mode: 'server' | 'client') =>
+			loadCompiledFixtureSource(source, {
+				id: '/publisher/NullableClass.tsx',
+				mode,
+				compileOptions: { dev: process.env.OCTANE_TEST_COMPILE_MODE !== 'prod', hmr: false },
+				runtimeModules: {
+					'./context': { Theme: mode === 'server' ? ServerTheme : ClientTheme },
+					'octane/signals/client': ClientSignals,
+					'octane/signals/server': ServerSignals,
+				},
+			});
+		const server = Server.publisherBoundary(compile('server').Remote, {
+			publisherKey: 'remote/NullableClass',
+		});
+		const client = Client.publisherBoundary(compile('client').Remote, {
+			publisherKey: 'remote/NullableClass',
+		});
+		const serverApp = () =>
+			Server.createElement(ServerTheme, { value: '', children: Server.createElement(server, {}) });
+		const clientApp = (props: { theme: string | null | false }) =>
+			Client.createElement(ClientTheme, {
+				value: props.theme,
+				children: Client.createElement(client, {}),
+			});
+		const container = document.createElement('div');
+		document.body.append(container);
+		const errors: unknown[] = [];
+		let root: ReturnType<typeof Client.hydrateRoot> | undefined;
+		try {
+			container.innerHTML = Server.renderToString(serverApp).html;
+			activateStreamedMarkup(container);
+			const publisher = container.querySelector('section')!;
+			const input = publisher.querySelector('input')!;
+			const button = publisher.querySelector('button')!;
+			const id = input.id;
+			expect(publisher.getAttribute('class')).toBe('');
+			input.value = 'typed before hydration';
+			await Client.act(() => {
+				root = Client.hydrateRoot(
+					container,
+					clientApp,
+					{ theme },
+					{
+						onRecoverableError: (error) => errors.push(error),
+						onUncaughtError: (error) => errors.push(error),
+					},
+				);
+			});
+			expect(container.querySelector('section')).toBe(publisher);
+			expect(publisher.hasAttribute('class')).toBe(false);
+			await Client.act(() => button.click());
+			expect(button.textContent).toBe('8');
+			await Client.act(() => root!.render(clientApp, { theme: 'live class' }));
+			expect(publisher.getAttribute('class')).toBe('live class');
+			await Client.act(() => root!.render(clientApp, { theme }));
+			expect(publisher.hasAttribute('class')).toBe(false);
+			expect(container.querySelector('section')).toBe(publisher);
+			expect(publisher.querySelector('input')).toBe(input);
+			expect(input.id).toBe(id);
+			expect(input.value).toBe('typed before hydration');
+			expect(button.textContent).toBe('8');
+			expect(errors).toEqual([]);
+		} finally {
+			root?.unmount();
+			container.remove();
+			resetStreamRuntimeGlobals();
+		}
+	},
+);
+
 it.each(
 	(['direct', 'settled lazy', 'pending lazy'] as const)
 		.flatMap((mode) =>
