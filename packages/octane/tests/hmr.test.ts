@@ -68,10 +68,11 @@ async function compileHmrModule(
 	modules: Record<string, Record<string, unknown>> = {},
 	options: HmrTestOptions = {},
 ): Promise<Record<string, any>> {
-	const [{ compile }, runtime, internalRuntime] = await Promise.all([
+	const [{ compile }, runtime, internalRuntime, signals] = await Promise.all([
 		import('octane/compiler'),
 		import('../src/index.js'),
 		import('octane/internal/client'),
+		import('octane/signals'),
 	]);
 	const code = compile(source, filename, { hmr: options.hmr ?? 'webpack' }).code;
 	// Export clauses name the module binding behind a renamed export, including
@@ -129,7 +130,7 @@ async function compileHmrModule(
 		'hot',
 		'modules',
 		transformed,
-	)(runtime, internalRuntime, hot, modules);
+	)(runtime, internalRuntime, hot, { 'octane/signals': signals, ...modules });
 }
 
 /**
@@ -1229,6 +1230,7 @@ describe('hmr — runtime wrapper', () => {
 
 	it('webpack HMR preserves named and default wrapper identity across repeated updates', async () => {
 		const { compile } = await import('octane/compiler');
+		const signals = await import('octane/signals');
 		const runtime = new Proxy(
 			{ hmr, HMR },
 			{
@@ -1247,14 +1249,21 @@ describe('hmr — runtime wrapper', () => {
 		const evaluate = (code: string, data: Record<string, any> | undefined) => {
 			const transformed =
 				code
+					.replace(/^import\s*\{([^}]*)\}\s*from\s*(['"])octane\2;/m, (_match, imports: string) => {
+						const properties = imports
+							.split(',')
+							.map((specifier) => specifier.trim().replace(/\s+as\s+/, ': '))
+							.join(', ');
+						return `const { ${properties} } = runtime;`;
+					})
 					.replace(
-						/^import\s*\{([\s\S]*?)\}\s*from\s*(['"])octane\2;/m,
+						/^import\s*\{([^}]*)\}\s*from\s*(['"])octane\/signals\2;/gm,
 						(_match, imports: string) => {
 							const properties = imports
 								.split(',')
 								.map((specifier) => specifier.trim().replace(/\s+as\s+/, ': '))
 								.join(', ');
-							return `const { ${properties} } = runtime;`;
+							return `const { ${properties} } = signals;`;
 						},
 					)
 					.replace(/\bexport let /g, 'let ')
@@ -1275,7 +1284,7 @@ describe('hmr — runtime wrapper', () => {
 					invalidated = true;
 				},
 			};
-			const exports = Function('runtime', 'hot', transformed)(runtime, hot) as {
+			const exports = Function('runtime', 'signals', 'hot', transformed)(runtime, signals, hot) as {
 				Named: any;
 				default: any;
 			};

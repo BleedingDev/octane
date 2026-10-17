@@ -30,6 +30,7 @@ import {
 } from './external-snapshot-protocol.js';
 import { bootstrapStreamedSignalHydration } from './hydration/streamed-signals.js';
 import { getNativeHotOwnerDriver } from './native-hot-owner.js';
+import type { HotSignalOwnerProof } from './signals/hot-declarations.js';
 import {
 	getNativeStreamedAuthority,
 	type NativeStreamedAuthority,
@@ -17172,8 +17173,13 @@ const externalHydrateDescriptors = /* @__PURE__ */ new WeakSet<ExternalHydrateDe
 interface PublisherHydrateDescriptor {
 	readonly publisherKey: string;
 	readonly component: ComponentBody;
+	readonly leases: Set<NativePublisherHydration>;
 }
 const publisherHydrateDescriptors = /* @__PURE__ */ new WeakSet<PublisherHydrateDescriptor>();
+const publisherReplacementBoundaries = /* @__PURE__ */ new WeakMap<
+	ComponentBody,
+	PublisherHydrateDescriptor
+>();
 const publisherSlotDescriptors = /* @__PURE__ */ new WeakMap<
 	HydrateSlot,
 	PublisherBoundaryDescriptor
@@ -17189,7 +17195,12 @@ interface NativePublisherHydration {
 	readonly expectedCompilerBuild: string | undefined;
 	readonly releases: Map<
 		object,
-		{ readonly release: () => void; readonly blocks: Set<Block>; buildId: string }
+		{
+			readonly release: () => void;
+			readonly proof: HotSignalOwnerProof;
+			readonly blocks: Set<Block>;
+			buildId: string;
+		}
 	>;
 	readonly admittedBuilds: Set<string>;
 	owner: SignalOwnerIdentity;
@@ -17314,7 +17325,12 @@ function admitNativePublisherComponent(component: HmrWrapper, scope: Scope): voi
 	if (membership !== undefined && membership.buildId !== buildId)
 		throw new TypeError(formatClientError(349));
 	if (membership === undefined) {
-		if (lease.expectedCompilerBuild !== undefined && !lease.admittedBuilds.has(buildId))
+		const signalBuildId = driver.getComponentBuild(component, true);
+		if (
+			signalBuildId !== undefined &&
+			lease.expectedCompilerBuild !== undefined &&
+			!lease.admittedBuilds.has(signalBuildId)
+		)
 			throw new TypeError(formatClientError(349));
 		const proof = driver.createProof({
 			publisherKey: lease.publisherKey,
@@ -17334,14 +17350,15 @@ function admitNativePublisherComponent(component: HmrWrapper, scope: Scope): voi
 			rotateIngress: (build) => {
 				const admitted = lease.releases.get(component);
 				if (admitted !== undefined) admitted.buildId = build;
-				lease.admittedBuilds.add(build);
+				if (driver.getComponentBuild(component, true) !== undefined)
+					lease.admittedBuilds.add(build);
 				lease.ingress?.suspend();
 				lease.ingress = undefined;
 			},
 			remount: () => remountPublisherHydration(lease),
 		});
-		membership = { release: driver.admit(component, proof), blocks: new Set(), buildId };
-		lease.admittedBuilds.add(buildId);
+		membership = { release: driver.admit(component, proof), proof, blocks: new Set(), buildId };
+		if (signalBuildId !== undefined) lease.admittedBuilds.add(signalBuildId);
 		lease.releases.set(component, membership);
 	}
 	if (membership.blocks.has(scope.block)) return;
@@ -19233,6 +19250,7 @@ function joinNativePublisher(
 	documentId: string | undefined,
 	bridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined,
 	expectedCompilerBuild?: string,
+	publisher?: PublisherHydrateDescriptor,
 ): (() => void) | undefined {
 	const document = state.wrapper.ownerDocument;
 	const parentAuthority = parentStreamedAuthority(state.parentBlock, document);
@@ -19269,6 +19287,7 @@ function joinNativePublisher(
 			leaveLifecycle: undefined,
 		};
 		(nativePublisherHydrations ??= new WeakMap()).set(owner, lease);
+		publisher?.leases.add(lease);
 	}
 	let leave: (() => void) | undefined;
 	try {
@@ -19276,11 +19295,13 @@ function joinNativePublisher(
 		if (lease !== undefined) lease.leaveLifecycle = leave;
 	} catch (error) {
 		nativePublisherHydrations?.delete(owner);
+		if (lease !== undefined) publisher?.leases.delete(lease);
 		throw error;
 	}
 
 	return () => {
 		if (lease !== undefined) {
+			publisher?.leases.delete(lease);
 			lease.leaveLifecycle?.();
 			lease.closed = true;
 			for (const membership of lease.releases.values()) membership.release();
@@ -19301,9 +19322,13 @@ export function publisherBoundary<P>(
 	if (typeof component !== 'function') throw new TypeError(formatClientError(356));
 	const streamSlot = Symbol('octane.publisher.stream');
 	const joinedSlot = Symbol('octane.publisher.joined');
-	const descriptor: PublisherHydrateDescriptor = Object.freeze({ publisherKey, component });
+	const descriptor: PublisherHydrateDescriptor = Object.freeze({
+		publisherKey,
+		component,
+		leases: new Set<NativePublisherHydration>(),
+	});
 	publisherHydrateDescriptors.add(descriptor);
-	return markComponentFlags(
+	const boundary = markComponentFlags<ComponentBody<P>>(
 		function PublisherBoundary(props, scope, extra) {
 			Hydrate(
 				{
@@ -19337,7 +19362,14 @@ export function publisherBoundary<P>(
 							: undefined;
 					let release: (() => void) | undefined;
 					try {
-						release = joinNativePublisher(state, publisherKey, parentAuthority?.documentId, bridge);
+						release = joinNativePublisher(
+							state,
+							publisherKey,
+							parentAuthority?.documentId,
+							bridge,
+							undefined,
+							descriptor,
+						);
 					} catch (error) {
 						bridge?.dispose();
 						throw error;
@@ -19356,6 +19388,69 @@ export function publisherBoundary<P>(
 		COMPONENT_FLAG_BOUNDARY,
 		'PublisherBoundary',
 	);
+	publisherReplacementBoundaries.set(boundary, descriptor);
+	return boundary;
+}
+
+/** One synchronous, native-authorized replacement of an exposed publisher graph. */
+export interface PublisherBoundaryReplacement {
+	/** If execute throws after this becomes true, retain its runtime for native recovery. */
+	readonly commitStarted: boolean;
+	execute<T>(factory: () => T): T;
+}
+
+/** Prepare before fetching the new graph; recheck its native owners at execution. */
+export function preparePublisherBoundaryReplacement(
+	boundary: ComponentBody,
+): PublisherBoundaryReplacement {
+	const descriptor = publisherReplacementBoundaries.get(boundary);
+	const driver = getNativeHotOwnerDriver();
+	if (CURRENT_SCOPE !== null || descriptor === undefined || driver === undefined)
+		throw new TypeError(formatClientError(363));
+	let component = descriptor.component;
+	while ((component as any)[MEMO_OWNER] === component) component = (component as any).type;
+	for (const lease of descriptor.leases) {
+		const membership = lease.releases.get(component);
+		if (membership === undefined || !publisherContainsComponent(lease, component)) continue;
+		return driver.prepareReplacement(
+			component,
+			membership.proof,
+			(candidate, body) => {
+				const meta = (candidate as HmrWrapper)[HMR];
+				if (meta === undefined) return false;
+				const previousABI = (meta.fn as any).__octaneReturnedOutput;
+				const nextABI = (body as any).__octaneReturnedOutput;
+				let compatible =
+					(previousABI === undefined || previousABI === true) &&
+					(nextABI === undefined || nextABI === true) &&
+					(previousABI === nextABI || meta.liveBlocks.size === 0);
+				for (const block of meta.liveBlocks)
+					if (!block.disposed && !hasResettableHmrRange(block)) compatible = false;
+				if (!compatible)
+					for (const block of meta.liveBlocks) {
+						if (block.disposed) continue;
+						const owner = block.idState.dataOwner;
+						const ownerLease =
+							owner === undefined ? undefined : nativePublisherHydrations?.get(owner);
+						// Only this publisher's captured owners may be remounted. A
+						// shared wrapper must not retire them before an outside owner
+						// makes the incompatible body update impossible.
+						if (
+							ownerLease === undefined ||
+							ownerLease.publisherKey !== lease.publisherKey ||
+							ownerLease.documentAuthority !== lease.documentAuthority ||
+							!blockIsAncestor(ownerLease.state.block, block)
+						)
+							throw new TypeError(formatClientError(363));
+					}
+				return compatible;
+			},
+			() => {
+				if (CURRENT_SCOPE !== null) throw new TypeError(formatClientError(363));
+			},
+		);
+	}
+	throw new TypeError(formatClientError(363));
 }
 
 /** Adopt external native output inside the existing parent scope and render owner. */
@@ -19448,7 +19543,7 @@ export function externalSnapshotBoundary<P>(
 							JSON.stringify(['octane:external', authority.publisherBuildId, state.boundaryId]),
 							documentId,
 							bridge,
-							getNativeHotOwnerDriver()?.getComponentBuild(options.component),
+							getNativeHotOwnerDriver()?.getComponentBuild(options.component, true),
 						);
 					} catch (error) {
 						bridge?.dispose();

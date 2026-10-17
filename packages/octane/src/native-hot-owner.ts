@@ -2,6 +2,7 @@ import type {
 	getNativeHotSignalComponentBuild,
 	createNativeHotSignalOwnerProof,
 	admitHotSignalPublisher,
+	prepareNativePublisherReplacement,
 } from './signals/hot-declarations.js';
 import { formatClientError } from './error-codes.client.generated.js';
 
@@ -10,6 +11,7 @@ export interface NativeHotOwnerDriver {
 	readonly getComponentBuild: typeof getNativeHotSignalComponentBuild;
 	readonly createProof: typeof createNativeHotSignalOwnerProof;
 	readonly admit: typeof admitHotSignalPublisher;
+	readonly prepareReplacement: typeof prepareNativePublisherReplacement;
 }
 
 let nativeHotOwnerDriver: NativeHotOwnerDriver | undefined;

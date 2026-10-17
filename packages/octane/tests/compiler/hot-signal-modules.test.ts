@@ -37,6 +37,48 @@ function callArguments(code: string, helper: string) {
 
 describe('native hot signal compiler recipe', () => {
 	it.each([
+		{ source: `export function Counter() @{ <p>counter</p> }`, key: 'Counter' },
+		{
+			source: `const Initial = Counter; export function Counter() @{ <p>counter</p> }`,
+			key: 'Counter',
+		},
+		{ source: `export function Counter() { return <p>counter</p>; }`, key: 'Counter' },
+		{ source: `export default function() @{ <p>counter</p> }`, key: 'default' },
+		{
+			source: `import { memo } from 'octane'; function Counter() @{ <p>counter</p> } const Alias = Counter; export default memo(Alias);`,
+			key: 'Counter',
+		},
+	])(
+		'canonicalizes native wrappers with the same stable registration key: $source',
+		({ source, key }) => {
+			const result = hot(source);
+			const canonical = callArguments(result.code, '_$__canonicalHotSignalComponent');
+			const registered = callArguments(result.code, '_$__registerHotSignalComponent');
+			expect(canonical).toHaveLength(1);
+			expect(registered).toHaveLength(1);
+			expect(canonical[0][1]).toMatchObject({ type: 'Literal', value: key });
+			expect(canonical[0][2]).toMatchObject({ type: 'CallExpression', callee: { name: '_$hmr' } });
+			expect(registered[0][0]).toMatchObject({ type: 'Identifier', name: canonical[0][0].name });
+			expect(registered[0][2]).toMatchObject({ type: 'Literal', value: key });
+		},
+	);
+
+	it('canonicalizes a private native component before immutable aliases capture it', () => {
+		const result = hot(
+			`import { memo } from 'octane'; function Counter() @{ <p>counter</p> } const Alias = Counter; export default memo(Alias);`,
+		);
+		const ast = parseModule(result.code, filename);
+		const alias = ast.body
+			.flatMap((node: any) => node.declarations ?? [])
+			.find((node: any) => node.id?.name === 'Alias');
+		const canonical = callArguments(result.code, '_$__canonicalHotSignalComponent')[0];
+		const registered = callArguments(result.code, '_$__registerHotSignalComponent')[0];
+		expect(alias.init).toMatchObject({ type: 'Identifier', name: 'Counter' });
+		expect(canonical[0].start).toBeLessThan(alias.start);
+		expect(registered[0].start).toBeGreaterThan(alias.end);
+	});
+
+	it.each([
 		`import { memo } from 'foreign'; export default memo(Counter);`,
 		`import { memo } from 'octane'; let Memo = memo(Counter); export default Memo;`,
 		`export let Public = Counter; Public = other;`,
@@ -80,7 +122,10 @@ ${expose}`;
 		const result = hot(`function Counter() @{ <p>memo</p> } ${expose}`);
 		expect(result.hotSignalModule).toBeDefined();
 		expect(callArguments(result.code, '_$__registerHotSignalComponent')).toHaveLength(1);
-		expect(result.code).toContain('let Counter = _$hmr(');
+		expect(callArguments(result.code, '_$__canonicalHotSignalComponent')[0][1]).toMatchObject({
+			type: 'Literal',
+			value: 'Counter',
+		});
 	});
 
 	it.each([
@@ -148,7 +193,7 @@ Counter = other;`);
 			hookSlots: ['octane:/src/Counter.tsrx:Counter.useSignal$#0'],
 		});
 		expect(
-			result.code.indexOf('_$__registerHotSignalComponent(_$hotSignalModule, Counter)'),
+			result.code.indexOf('_$__registerHotSignalComponent(_$hotSignalModule, Counter,'),
 		).toBeGreaterThan(result.code.indexOf('_$webpackHot.accept()'));
 		expect(result.code).toContain('_$__remountHotSignalComponent');
 		expect(result.code).toContain('_$webpackHot.invalidate()');
@@ -343,6 +388,7 @@ export function Counter() @{ <p>{count$.get() as string}</p> }`);
 		expect(result.hotSignalModule).toBeUndefined();
 		expect(result.code).not.toContain('__hotSignalModule');
 		expect(result.code).not.toContain('__registerHotSignalComponent');
+		expect(result.code).not.toContain('__canonicalHotSignalComponent');
 	});
 
 	it('forwards full-compiler recipes through the public bundler and fences plain helpers', () => {

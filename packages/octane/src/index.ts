@@ -47,6 +47,8 @@ export {
 	// ── 1. Public API (React parity) ──────────────────────────────────────────
 	externalSnapshotBoundary,
 	publisherBoundary,
+	preparePublisherBoundaryReplacement,
+	type PublisherBoundaryReplacement,
 	createRoot,
 	hydrateRoot,
 	flushSync,

@@ -128,6 +128,23 @@ const claims = new WeakMap<ScopedNode, Set<ModuleState>>();
 const activeModules = new WeakSet<ModuleState>();
 // A fully retired native publisher leaves no work requiring a live lease.
 const admittedModules = new WeakSet<ModuleState>();
+const componentBindings = new WeakMap<ModuleState, Map<string, object>>();
+
+interface PublisherReplacement {
+	readonly previous: Set<ModuleState>;
+	readonly owners: Map<ProofState, SignalOwnerIdentity>;
+	readonly transactions: Transaction[];
+	readonly bodies: Map<object, object>;
+	readonly canUpdate: (component: object, body: object) => boolean;
+	runtime: HotSignalRuntime | undefined;
+	committing: boolean;
+	failed: boolean;
+}
+
+// This scope exists only around one explicitly authorized synchronous factory.
+// It never spans container/chunk loading or a promise continuation.
+let publisherReplacement: PublisherReplacement | undefined;
+const replacementTransactions = new WeakMap<Transaction, PublisherReplacement>();
 
 interface HotDeclarationBarrier {
 	readonly generation: string;
@@ -384,9 +401,19 @@ export function createNativeHotSignalOwnerProof(native: NativeHotSignalOwner): H
 }
 
 /** @internal Derive compiler identity from the registered native factory, never caller data. */
-export function getNativeHotSignalComponentBuild(component: object): string | undefined {
+export function getNativeHotSignalComponentBuild(
+	component: object,
+	signalsOnly = false,
+): string | undefined {
 	const state = components.get(component);
-	return state && !state.retired && state.runtime ? state.buildId : undefined;
+	return state &&
+		!state.retired &&
+		state.runtime &&
+		(!signalsOnly ||
+			state.runtime.features.has(state.executableId!) ||
+			state.runtime.executed.has(state.executableId!))
+		? state.buildId
+		: undefined;
 }
 
 /** Admit a compiled component only with authority minted by its native boundary. */
@@ -442,8 +469,8 @@ export function __hotSignalModule(manifest: HotSignalModuleManifest): HotSignalM
 		// An unsupported concatenated factory may contain a compiled neighbour.
 		// Its initial execution remains ordinary; no partial table can admit it.
 		if (frame.hot && frame.requiresAdmission && !recorded) fail();
-		admittedFrame = recorded && frame.requiresAdmission;
-		if (frame.hot && frame.requiresAdmission) {
+		admittedFrame = recorded;
+		if ((frame.hot && frame.requiresAdmission) || transaction) {
 			if (!transaction || transaction.done || frame.transaction !== transaction.token) fail();
 			previous = transaction.previous.find(
 				(state) => state.manifest.moduleId === snapshot.moduleId,
@@ -468,15 +495,28 @@ export function __hotSignalModule(manifest: HotSignalModuleManifest): HotSignalM
 	if (previous && admittedModules.has(previous)) admittedModules.add(state);
 	if (transaction) {
 		transaction.fresh.set(snapshot.moduleId, state);
-		if (sameShape(previous!.manifest, snapshot)) {
+		if (!replacementTransactions.has(transaction) && sameShape(previous!.manifest, snapshot)) {
 			for (const [scope, materialized] of previous!.cells) state.cells.set(scope, materialized);
 		}
 	} else if (state.runtime) {
 		let runtimeModules = modules.get(state.runtime);
 		if (!runtimeModules) modules.set(state.runtime, (runtimeModules = new Map()));
 		const existing = runtimeModules.get(frame!.executableId) ?? [];
-		if (existing.some((entry) => entry.manifest.moduleId === snapshot.moduleId)) fail();
-		runtimeModules.set(frame!.executableId, [...existing, state]);
+		const duplicate = existing.find((entry) => entry.manifest.moduleId === snapshot.moduleId);
+		if (
+			duplicate &&
+			(!frame!.hot ||
+				frame!.requiresAdmission ||
+				snapshot.declarations.length !== 0 ||
+				duplicate.manifest.declarations.length !== 0 ||
+				duplicate.admissions.size !== 0 ||
+				duplicate.cells.size !== 0)
+		)
+			fail();
+		runtimeModules.set(frame!.executableId, [
+			...existing.filter((entry) => entry !== duplicate),
+			state,
+		]);
 	}
 	const stamp = Object.freeze({}) as HotSignalModuleStamp;
 	stamps.set(stamp, state);
@@ -518,6 +558,12 @@ export function registerHotSignalDeclaration(
 export function assertHotSignalDeclarationUsable(stamp: HotSignalModuleStamp): void {
 	const state = stamps.get(stamp);
 	if (!state || state.aborted) fail();
+	if (
+		publisherReplacement !== undefined &&
+		!publisherReplacement.committing &&
+		state.previous !== undefined
+	)
+		fail();
 }
 
 /** @internal Called only after the shared facade resolved the actual native scope. */
@@ -558,7 +604,31 @@ export function resolveHotSignalDeclaration<H extends SignalHandle<unknown>>(
 	return cell;
 }
 
-export function __registerHotSignalComponent(stamp: HotSignalModuleStamp, component: object): void {
+/** Select canonical wrappers before authored memo and module-local captures. */
+export function __canonicalHotSignalComponent<T extends object>(
+	stamp: HotSignalModuleStamp,
+	bindingKey: string,
+	fresh: T,
+): T {
+	const state = stamps.get(stamp);
+	if (!state || state.retired || !bindingKey) fail();
+	const frame = currentFrame();
+	const transaction = frame && transactions.get(frame);
+	const replacement = transaction && replacementTransactions.get(transaction);
+	if (!replacement) return fresh;
+	const canonical = state.previous && componentBindings.get(state.previous)?.get(bindingKey);
+	if (!canonical) fail();
+	const body = (fresh as Record<symbol, { fn?: object }>)[hmrKey]?.fn;
+	if (typeof body !== 'function' || replacement.bodies.has(canonical)) fail();
+	replacement.bodies.set(canonical, body);
+	return canonical as T;
+}
+
+export function __registerHotSignalComponent(
+	stamp: HotSignalModuleStamp,
+	component: object,
+	bindingKey?: string,
+): void {
 	const state = stamps.get(stamp);
 	if (
 		!state ||
@@ -574,11 +644,23 @@ export function __registerHotSignalComponent(stamp: HotSignalModuleStamp, compon
 			(!previous.manifest.declarations.length &&
 				!previous.runtime.features.has(previous.executableId!) &&
 				!previous.runtime.executed.has(previous.executableId!));
-		if (state.runtime || !ordinary) fail();
+		if (
+			!ordinary ||
+			(state.runtime !== undefined &&
+				(state.runtime !== previous.runtime || state.executableId !== previous.executableId))
+		)
+			fail();
 		previous.retired = true;
 	}
 	state.components.add(component);
 	components.set(component, state);
+	if (bindingKey !== undefined) {
+		if (!bindingKey) fail();
+		let bindings = componentBindings.get(state);
+		if (!bindings) componentBindings.set(state, (bindings = new Map()));
+		if (bindings.has(bindingKey) && bindings.get(bindingKey) !== component) fail();
+		bindings.set(bindingKey, component);
+	}
 }
 
 function remountProof(transaction: Transaction, proof: ProofState): void {
@@ -639,11 +721,348 @@ function allowStatus(runtime: HotSignalRuntime): boolean {
 	}
 }
 
+function replacementFactory(frame: HotSignalExecutionFrame): boolean {
+	return (
+		publisherReplacement !== undefined &&
+		!publisherReplacement.committing &&
+		frame.manifests.some((manifest) =>
+			[...publisherReplacement!.previous].some(
+				(state) => state.manifest.moduleId === manifest.moduleId,
+			),
+		)
+	);
+}
+
+function beginReplacementFactory(frame: HotSignalExecutionFrame): object {
+	const replacement = publisherReplacement!;
+	if (
+		replacement.failed ||
+		currentFrame() !== frame ||
+		frame.hot ||
+		frame.runtime.executed.has(frame.executableId) ||
+		frame.buildId !== frame.runtime.buildId ||
+		transactions.has(frame) ||
+		(replacement.runtime !== undefined && replacement.runtime !== frame.runtime)
+	)
+		fail();
+	const previous = frame.manifests.map((manifest) => {
+		const found = [...replacement.previous].find(
+			(state) => state.manifest.moduleId === manifest.moduleId,
+		);
+		if (
+			!found ||
+			found.runtime === frame.runtime ||
+			replacement.transactions.some((transaction) => transaction.previous.includes(found))
+		)
+			fail();
+		return found;
+	});
+	if (!previous.length || new Set(previous).size !== previous.length) fail();
+	replacement.runtime = frame.runtime;
+	const transaction: Transaction = {
+		token: Object.freeze({}),
+		frame,
+		previous,
+		fresh: new Map(),
+		proofs: new Set(previous.flatMap((state) => [...state.admissions])),
+		cold: new Set(),
+		owners: new Map(),
+		remountedOwners: new Set(),
+		bodies: new Map(),
+		builds: new Map(),
+		generation: `${frame.buildId}:${frame.executableId}`,
+		done: false,
+	};
+	for (const proof of transaction.proofs) {
+		const owner = replacement.owners.get(proof);
+		if (!owner || admittedOwner(proof) !== owner) fail();
+		transaction.owners.set(proof, owner);
+		transaction.builds.set(proof, proof.buildId);
+	}
+	for (const state of previous)
+		for (const component of state.components) {
+			const body = (component as Record<symbol, { fn?: object }>)[hmrKey]?.fn;
+			if (typeof body !== 'function') fail();
+			transaction.bodies.set(component, body);
+		}
+	transactions.set(frame, transaction);
+	replacementTransactions.set(transaction, replacement);
+	replacement.transactions.push(transaction);
+	return transaction.token;
+}
+
+function discardPublisherReplacement(replacement: PublisherReplacement): void {
+	replacement.failed = true;
+	if (replacement.committing) {
+		for (const transaction of replacement.transactions) {
+			if (transaction.done) continue;
+			try {
+				abortFactory(transaction.frame);
+			} catch {
+				// Preserve the original native commit failure after attempting every owner.
+			}
+		}
+	}
+	for (const transaction of replacement.transactions) {
+		if (transaction.done) continue;
+		transactions.delete(transaction.frame);
+		for (const state of transaction.fresh.values()) {
+			state.retired = state.aborted = true;
+			for (const component of state.components) {
+				if (components.get(component) !== state) continue;
+				if (state.previous?.components.has(component)) components.set(component, state.previous);
+				else components.delete(component);
+			}
+			for (const proof of state.admissions) proof.memberships.delete(state);
+			state.admissions.clear();
+			state.previous = undefined;
+		}
+		const { runtime, executableId } = transaction.frame;
+		if (
+			!modules
+				.get(runtime)
+				?.get(executableId)
+				?.some((state) => !state.retired)
+		)
+			runtime.executed.delete(executableId);
+	}
+}
+
+/** Native boundary authority, never caller-supplied module IDs or build hashes. */
+export function prepareNativePublisherReplacement(
+	component: object,
+	token: HotSignalOwnerProof,
+	canUpdate: (component: object, body: object) => boolean,
+	assertCanExecute: () => void,
+): { readonly commitStarted: boolean; execute<T>(factory: () => T): T } {
+	const root = components.get(component);
+	const authority = proofs.get(token);
+	if (!root?.runtime || !authority || !root.admissions.has(authority)) fail();
+	validateModule(root);
+	const owners = new Set<SignalOwnerIdentity>();
+	for (const proof of root.admissions) {
+		if (
+			proof.native.publisherKey !== authority.native.publisherKey ||
+			proof.native.documentId !== authority.native.documentId ||
+			!proof.native.acceptsComponent(component)
+		)
+			fail();
+		const owner = admittedOwner(proof);
+		if (!owner) fail();
+		owners.add(owner);
+	}
+	const previous = new Set<ModuleState>();
+	const captured = new Map<ProofState, SignalOwnerIdentity>();
+	for (const states of modules.get(root.runtime)?.values() ?? [])
+		for (const state of states) {
+			if (![...state.admissions].some((proof) => owners.has(admittedOwner(proof)!))) continue;
+			validateModule(state);
+			for (const proof of state.admissions) {
+				const owner = admittedOwner(proof);
+				if (!owner || !owners.has(owner)) fail();
+				captured.set(proof, owner);
+			}
+			if (componentBindings.get(state)?.size !== state.components.size) fail();
+			previous.add(state);
+		}
+	if (!previous.has(root)) fail();
+	let consumed = false;
+	let attempted: PublisherReplacement | undefined;
+	return Object.freeze({
+		get commitStarted(): boolean {
+			return attempted?.committing === true;
+		},
+		execute<T>(factory: () => T): T {
+			if (consumed) fail();
+			consumed = true;
+			assertCanExecute();
+			if (publisherReplacement !== undefined || typeof factory !== 'function') fail();
+			for (const [proof, owner] of captured) if (admittedOwner(proof) !== owner) fail();
+			for (const state of previous) validateModule(state);
+			// Loading the next container may admit or remove conditional modules.
+			// The factory grant covers only the complete graph captured at prepare.
+			let currentModules = 0;
+			for (const states of modules.get(root.runtime!)?.values() ?? [])
+				for (const state of states) {
+					if (![...state.admissions].some((proof) => owners.has(admittedOwner(proof)!))) continue;
+					if (!previous.has(state)) fail();
+					for (const proof of state.admissions)
+						if (captured.get(proof) !== admittedOwner(proof)) fail();
+					currentModules++;
+				}
+			if (currentModules !== previous.size) fail();
+			const replacement: PublisherReplacement = {
+				previous,
+				owners: captured,
+				transactions: [],
+				bodies: new Map(),
+				canUpdate,
+				runtime: undefined,
+				committing: false,
+				failed: false,
+			};
+			attempted = replacement;
+			publisherReplacement = replacement;
+			try {
+				const result = factory();
+				if (
+					result !== null &&
+					(typeof result === 'object' || typeof result === 'function') &&
+					'then' in result &&
+					typeof result.then === 'function'
+				) {
+					Promise.resolve(result).catch(() => {});
+					fail();
+				}
+				if (
+					replacement.failed ||
+					!replacement.transactions.length ||
+					[...previous].some(
+						(state) =>
+							!replacement.transactions.some((transaction) => transaction.previous.includes(state)),
+					)
+				)
+					fail();
+				commitPublisherReplacement(replacement);
+				return result;
+			} catch (error) {
+				discardPublisherReplacement(replacement);
+				throw error;
+			} finally {
+				publisherReplacement = undefined;
+			}
+		},
+	});
+}
+
+function commitPublisherReplacement(replacement: PublisherReplacement): void {
+	const all = replacement.transactions;
+	for (const [proof, owner] of replacement.owners) if (admittedOwner(proof) !== owner) fail();
+	for (const transaction of all) {
+		if (transaction.fresh.size !== transaction.previous.length) fail();
+		for (const previous of transaction.previous) {
+			const fresh = transaction.fresh.get(previous.manifest.moduleId);
+			if (
+				!fresh ||
+				fresh.cells.size ||
+				previous.components.size !== fresh.components.size ||
+				[...previous.components].some(
+					(component) => !fresh.components.has(component) || !replacement.bodies.has(component),
+				)
+			)
+				fail();
+		}
+	}
+	// Factory evaluation and its captures are complete. Only now cancel old
+	// producers, rotate native ownership, or install a candidate component body.
+	const coldOwners = new Set<SignalOwnerIdentity>();
+	for (const transaction of all)
+		for (const previous of transaction.previous) {
+			const fresh = transaction.fresh.get(previous.manifest.moduleId)!;
+			let compatible = sameShape(previous.manifest, fresh.manifest);
+			for (const component of previous.components)
+				if (!replacement.canUpdate(component, replacement.bodies.get(component)!))
+					compatible = false;
+			if (!compatible)
+				for (const proof of previous.admissions) coldOwners.add(replacement.owners.get(proof)!);
+		}
+	replacement.committing = true;
+	for (const [proof, owner] of replacement.owners) {
+		proof.native.suspendIngress();
+		if (!coldOwners.has(owner)) continue;
+		proof.native.remount();
+		coldOwners.delete(owner);
+		for (const transaction of all)
+			for (const sibling of transaction.proofs)
+				if (replacement.owners.get(sibling) === owner) transaction.cold.add(sibling);
+	}
+	try {
+		signalBatch(() => {
+			const finishes: (() => void)[] = [];
+			try {
+				for (const transaction of all)
+					for (const previous of transaction.previous) {
+						const fresh = transaction.fresh.get(previous.manifest.moduleId)!;
+						for (const [scope, materialized] of previous.cells) {
+							if (scope.retired) continue;
+							fresh.cells.set(scope, materialized);
+							finishes.push(
+								prepareHotDeclarations(
+									scope,
+									[...materialized.nodes.values()],
+									`${transaction.generation}:${previous.manifest.moduleId}`,
+								),
+							);
+						}
+					}
+			} finally {
+				const errors: unknown[] = [];
+				for (const finish of finishes) {
+					try {
+						finish();
+					} catch (error) {
+						errors.push(error);
+					}
+				}
+				if (errors.length) throw new AggregateError(errors, formatClientError(363));
+			}
+			for (const [component, body] of replacement.bodies) {
+				const meta = (component as Record<symbol, { update?: (body: object) => boolean }>)[hmrKey];
+				if (meta?.update?.(body) !== true) fail();
+			}
+			const globals = globalThis as Record<symbol, unknown>;
+			const previousFrame = globals[executionKey];
+			try {
+				for (const transaction of all) {
+					globals[executionKey] = transaction.frame;
+					afterFactory(transaction.frame);
+				}
+				// All owner callbacks and declaration rebindings must succeed before
+				// retiring any old module. A commit error can then use native abort
+				// recovery against the complete previous graph.
+				for (const transaction of all) finishFactory(transaction);
+			} finally {
+				if (previousFrame === undefined) delete globals[executionKey];
+				else globals[executionKey] = previousFrame;
+			}
+		});
+	} finally {
+		// Observer delivery can throw after every transaction has committed.
+		// Retired runtimes must still release their fence, without revoking the
+		// fresh graph whose canonical wrappers now own the mounted publishers.
+		for (const previous of replacement.previous) {
+			if (!previous.retired) continue;
+			const runtime = previous.runtime!;
+			const id = previous.executableId!;
+			const surviving =
+				modules
+					.get(runtime)
+					?.get(id)
+					?.filter((state) => !state.retired) ?? [];
+			if (surviving.length) modules.get(runtime)!.set(id, surviving);
+			else {
+				modules.get(runtime)?.delete(id);
+				runtime.executed.delete(id);
+			}
+		}
+	}
+}
+
+function requiresFactoryAdmission(frame: HotSignalExecutionFrame): boolean {
+	return (
+		modules
+			.get(frame.runtime)
+			?.get(frame.executableId)
+			?.some((state) => admittedModules.has(state)) === true
+	);
+}
+
 function beforeFactory(frame: HotSignalExecutionFrame): object | undefined {
+	if (replacementFactory(frame)) return beginReplacementFactory(frame);
 	if (
 		currentFrame() !== frame ||
 		!frame.hot ||
-		!frame.requiresAdmission ||
+		(!frame.requiresAdmission && !requiresFactoryAdmission(frame)) ||
 		frame.buildId !== frame.runtime.buildId ||
 		transactions.has(frame)
 	)
@@ -758,6 +1177,8 @@ function afterFactory(frame: HotSignalExecutionFrame): void {
 		transaction.fresh.size !== frame.manifests.length
 	)
 		fail();
+	const replacement = replacementTransactions.get(transaction);
+	if (replacement !== undefined && !replacement.committing) return;
 	for (const state of transaction.fresh.values()) {
 		const previous = state.previous!;
 		for (const component of previous.components) if (!state.components.has(component)) fail();
@@ -790,6 +1211,12 @@ function afterFactory(frame: HotSignalExecutionFrame): void {
 		if (!transaction.cold.has(proof) && !admittedOwner(proof)) fail();
 		proof.buildId = frame.buildId;
 	}
+	if (replacement !== undefined) return;
+	finishFactory(transaction);
+}
+
+function finishFactory(transaction: Transaction): void {
+	const frame = transaction.frame;
 	for (const state of transaction.previous) {
 		state.retired = true;
 		activeModules.delete(state);
@@ -807,7 +1234,9 @@ function afterFactory(frame: HotSignalExecutionFrame): void {
 			for (const node of materialized.nodes.values()) claims.get(node)?.add(state);
 		state.previous = undefined;
 	}
-	modules.get(frame.runtime)!.set(frame.executableId, [...transaction.fresh.values()]);
+	let runtimeModules = modules.get(frame.runtime);
+	if (!runtimeModules) modules.set(frame.runtime, (runtimeModules = new Map()));
+	runtimeModules.set(frame.executableId, [...transaction.fresh.values()]);
 	transaction.done = true;
 	transactions.delete(frame);
 	if (!frame.runtime.features.has(frame.executableId))
@@ -820,6 +1249,11 @@ const moduleStamps = new WeakMap<ModuleState, HotSignalModuleStamp>();
 function abortFactory(frame: HotSignalExecutionFrame): boolean {
 	const transaction = transactions.get(frame);
 	if (!transaction || transaction.done) return abortResults.get(frame) ?? true;
+	const replacement = replacementTransactions.get(transaction);
+	if (replacement !== undefined && !replacement.committing) {
+		discardPublisherReplacement(replacement);
+		return true;
+	}
 	transaction.done = true;
 	transactions.delete(frame);
 	abortResults.set(frame, false);
@@ -898,9 +1332,17 @@ function installBridge(): void {
 	installNativeHotOwnerDriver(nativeOwnerDriver);
 }
 
-const bridge = { allowStatus, beforeFactory, afterFactory, abortFactory };
+const bridge = {
+	allowStatus,
+	replacementFactory,
+	requiresFactoryAdmission,
+	beforeFactory,
+	afterFactory,
+	abortFactory,
+};
 const nativeOwnerDriver = {
 	getComponentBuild: getNativeHotSignalComponentBuild,
 	createProof: createNativeHotSignalOwnerProof,
 	admit: admitHotSignalPublisher,
+	prepareReplacement: prepareNativePublisherReplacement,
 };

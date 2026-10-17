@@ -108,11 +108,13 @@ if (!octaneSignalRuntime.interceptorInstalled) {
     var admitted = false;
     ${RuntimeGlobals.global}[octaneSignalExecutionKey] = frame;
     try {
-      if (frame.hot) {
+      var replacing = bridge && bridge.replacementFactory && bridge.replacementFactory(frame) === true;
+      if (frame.hot || replacing) {
         if (frame.buildId !== ${RuntimeGlobals.getFullHash}()) {
           throw new Error('Octane hot signal factory has stale compiler metadata.');
         }
-        if (frame.requiresAdmission) {
+        if (frame.requiresAdmission || replacing ||
+            (bridge && bridge.requiresFactoryAdmission && bridge.requiresFactoryAdmission(frame))) {
           frame.transaction = bridge && bridge.beforeFactory(frame);
           if (frame.transaction === null || typeof frame.transaction !== 'object') {
             throw new Error('Octane hot signal factory has no native admission.');
@@ -131,7 +133,7 @@ if (!octaneSignalRuntime.interceptorInstalled) {
       bridge = ${RuntimeGlobals.global}[octaneSignalBridgeKey];
       var aborted = false;
       try { aborted = bridge && bridge.abortFactory(frame) === true; } catch (_) {}
-      if (phase !== 'factory' || (admitted && !aborted)) octaneReloadSignalDocument();
+      if (!replacing && (phase !== 'factory' || (admitted && !aborted))) octaneReloadSignalDocument();
       throw error;
     } finally {
       if (previousFrame === undefined) delete ${RuntimeGlobals.global}[octaneSignalExecutionKey];

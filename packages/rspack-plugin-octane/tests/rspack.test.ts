@@ -841,12 +841,24 @@ export function App() @{ const live = Scene as unknown; <Canvas><Scene /></Canva
 	}, 30_000);
 
 	it('emits parseable webpack HMR wiring when Rspack marks the loader context hot', async () => {
+		rmSync(join(root, 'node_modules/octane'), { recursive: true, force: true });
+		symlinkSync(join(repositoryRoot, 'packages/octane'), join(root, 'node_modules/octane'), 'dir');
+		rmSync(join(root, 'node_modules/@fixture/raw/node_modules/octane'), {
+			recursive: true,
+			force: true,
+		});
+		symlinkSync(
+			join(repositoryRoot, 'packages/octane'),
+			join(root, 'node_modules/@fixture/raw/node_modules/octane'),
+			'dir',
+		);
 		const outputPath = join(root, 'dist-hmr');
 		await compile({
 			context: root,
 			mode: 'development',
 			target: 'web',
 			entry: './src/index.js',
+			resolve: { extensionAlias: { '.js': ['.ts', '.js'] } },
 			optimization: { minimize: false },
 			output: { path: outputPath, filename: 'bundle.js' },
 			plugins: [new rspack.HotModuleReplacementPlugin(), new OctaneRspackPlugin()],

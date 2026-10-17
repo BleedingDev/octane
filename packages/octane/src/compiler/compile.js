@@ -9638,7 +9638,7 @@ function bindDefaultComponent(ast) {
 // declaration. Follow only immutable module aliases and actual Octane memo
 // imports; arbitrary HOCs or mutable/conditional exports retain the hot fence.
 function collectHotComponentExportFlows(input) {
-	const ast = normalizeArrowComponents(input);
+	const ast = bindDefaultComponent(normalizeArrowComponents(input));
 	const lexical = createLexicalAnalysis(ast);
 	const immutable = collectImmutableModuleFunctions(ast.body);
 	const opaqueDeclarations = new Map();
@@ -13417,6 +13417,7 @@ function compileInternal(
 								ctx.hotSignalModule.registerHelper,
 								b.id(ctx.hotSignalModule.stampName),
 								b.id(component.name),
+								b.literal(component.exportKind === 'default' ? 'default' : component.name),
 							),
 						),
 						moduleOrigin,
@@ -13535,6 +13536,7 @@ function compileInternal(
 		const {
 			stampName,
 			stampHelper,
+			canonicalHelper,
 			registerHelper,
 			remountHelper,
 			moduleId,
@@ -13553,6 +13555,7 @@ function compileInternal(
 				b.imports(
 					[
 						['__hotSignalModule', stampHelper],
+						['__canonicalHotSignalComponent', canonicalHelper],
 						['__registerHotSignalComponent', registerHelper],
 						['__remountHotSignalComponent', remountHelper],
 					],
@@ -17714,6 +17717,19 @@ function isCompilerMemoImport(ctx, name) {
 	);
 }
 
+function canonicalHotSignalComponent(ctx, bindingKey, wrapper, origin) {
+	if (ctx.hotSignalModule === undefined) return wrapper;
+	return inheritOriginLoc(
+		b.call(
+			ctx.hotSignalModule.canonicalHelper,
+			b.id(ctx.hotSignalModule.stampName),
+			b.literal(bindingKey),
+			wrapper,
+		),
+		origin,
+	);
+}
+
 function compileComponent(node, ctx, options) {
 	const name = node.id.name;
 	rejectAsyncOrGenerator(node, name);
@@ -17912,7 +17928,20 @@ function compileComponent(node, ctx, options) {
 			// keeps later references hot-updatable while the pre-declaration capture
 			// deliberately holds the raw function (edits to such a component fall
 			// back to a full reload — the capture predates the wrapper).
-			statements.push(guarded(b.assignment('=', b.id(name), b.call('_$hmr', b.id(name)))));
+			statements.push(
+				guarded(
+					b.assignment(
+						'=',
+						b.id(name),
+						canonicalHotSignalComponent(
+							ctx,
+							isDefault ? 'default' : name,
+							b.call('_$hmr', b.id(name)),
+							node,
+						),
+					),
+				),
+			);
 		}
 		if (node._octaneBindingView) {
 			statements.push(
@@ -17953,7 +17982,14 @@ function compileComponent(node, ctx, options) {
 	// HMR exports use mutable, live bindings so a re-evaluated module can hand
 	// its fresh body to the previous canonical wrapper and re-export that same
 	// identity. Production components retain their tree-shakeable const binding.
-	let valueExpr = hmrWrapped ? inheritOriginLoc(b.call('_$hmr', abiFn), node) : abiFn;
+	let valueExpr = hmrWrapped
+		? canonicalHotSignalComponent(
+				ctx,
+				isDefault ? 'default' : name,
+				inheritOriginLoc(b.call('_$hmr', abiFn), node),
+				node,
+			)
+		: abiFn;
 	if (node._octaneBindingView) {
 		valueExpr = markPure(
 			inheritOriginLoc(
@@ -22756,7 +22792,21 @@ function compileReturnJsxFunction(node, ctx, options) {
 	if (options && options.hmrWrap) {
 		const nodes = [
 			fn,
-			inheritOriginLoc(b.stmt(b.assignment('=', b.id(name), b.call('_$hmr', b.id(name)))), node),
+			inheritOriginLoc(
+				b.stmt(
+					b.assignment(
+						'=',
+						b.id(name),
+						canonicalHotSignalComponent(
+							ctx,
+							options.default ? 'default' : name,
+							b.call('_$hmr', b.id(name)),
+							node,
+						),
+					),
+				),
+				node,
+			),
 			...bindingStamp,
 		];
 		if (options.default) {

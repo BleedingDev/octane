@@ -84,6 +84,7 @@ export type {
 
 export {
 	__hotSignalModule,
+	__canonicalHotSignalComponent,
 	__registerHotSignalComponent,
 	__remountHotSignalComponent,
 } from './hot-declarations.js';

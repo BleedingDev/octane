@@ -1123,8 +1123,8 @@ export function lowerSignalDeclarations(ast, filename, options, hot = undefined)
 			if (shape === undefined) return null;
 			const args = [...node.arguments];
 			const count = shape.factory === '__queryAt' ? 5 : 4;
-			while (args.length < count) args.push(b.unary('void', b.literal(0)));
-			args.push(b.id(stampName));
+			while (args.length < count) args.push(inheritHookMemoOrigin(b.void0, node));
+			args.push(inheritHookMemoOrigin(b.id(stampName), node));
 			return { ...node, arguments: args };
 		});
 		lowered = {
@@ -1132,6 +1132,7 @@ export function lowerSignalDeclarations(ast, filename, options, hot = undefined)
 			_octaneHotSignalModule: Object.freeze({
 				stampName,
 				stampHelper: allocateName(usedNames, '_$__hotSignalModule'),
+				canonicalHelper: allocateName(usedNames, '_$__canonicalHotSignalComponent'),
 				registerHelper: allocateName(usedNames, '_$__registerHotSignalComponent'),
 				remountHelper: allocateName(usedNames, '_$__remountHotSignalComponent'),
 				moduleId: cleanFilename,
