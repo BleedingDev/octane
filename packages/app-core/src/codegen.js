@@ -263,6 +263,7 @@ async function bootstrapIndependentIslands(target) {
   ) return;
   await bootstrapDocumentLifecycle();
   if (documentLifecycle && !await documentLifecycle.whenActive()) return;
+  signalOwner ??= documentLifecycle?.signalOwner;
   if (independentBootstrap) return independentBootstrap;
   independentBootstrap = ${hydrationModule}.then(async ({ bootstrapIndependentHydration }) => {
     if (incompatibleBuild) return;
@@ -294,7 +295,6 @@ async function bootstrapDocumentLifecycle() {
       get independentHydration() { return disposeIndependentHydration; },
       onMismatch() { incompatibleBuild = true; globalThis.location.reload(); },
     });
-    signalOwner = documentLifecycle.signalOwner;
   })();
   return lifecycleBootstrap;
 }

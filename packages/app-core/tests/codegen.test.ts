@@ -376,7 +376,7 @@ describe('bundler-neutral app codegen', () => {
 	});
 
 	it.each(['host', 'islands'] as const)(
-		'installs document authority without streamed selections or independent islands (%s entry)',
+		'keeps production identity-only documents on the owner-free renderer path (%s entry)',
 		async (entryMode) => {
 			const app = await runClientEntry('none', {
 				entryMode,
@@ -399,17 +399,47 @@ describe('bundler-neutral app codegen', () => {
 					entryMode === 'host'
 						? [
 								{
-									signalOwner: app.lifecycles[0]!.signalOwner,
 									externalSnapshots: { documentId: 'ordinary-document' },
 								},
 							]
 						: [],
 				);
-				expect(app.lifecycles[0]!.signalOwner).toBeDefined();
+				expect(app.owners).toEqual(entryMode === 'host' ? [undefined] : []);
 				app.transition('pagehide', true);
 				app.target.ownerDocument.getElementById('__octane_data')!.textContent = '{}';
 				app.transition('pageshow', true);
 				expect(app.reloads).toEqual(['reload']);
+				expect(app.errors).toEqual([]);
+			} finally {
+				await app.dispose();
+			}
+		},
+	);
+
+	it.each(['host', 'islands'] as const)(
+		'adopts the document owner when independent hydration is enabled (%s entry)',
+		async (entryMode) => {
+			const app = await runClientEntry('capability', {
+				entryMode,
+				clientBuildId: 'build',
+				documentId: 'independent-document',
+				clientBuild: {
+					version: 1,
+					buildId: 'build',
+					mode: 'production',
+					capabilities: { independentHydration: true },
+				},
+			});
+			try {
+				expect(app.lifecycles).toHaveLength(1);
+				const signalOwner = app.lifecycles[0]!.signalOwner;
+				expect(signalOwner).toBeDefined();
+				const button = app.appendWidget();
+				button.click();
+				await vi.waitFor(() => expect(button.textContent).toBe('Clicks: 1'));
+				expect(app.owners).toEqual(
+					entryMode === 'host' ? [signalOwner, signalOwner] : [signalOwner],
+				);
 				expect(app.errors).toEqual([]);
 			} finally {
 				await app.dispose();

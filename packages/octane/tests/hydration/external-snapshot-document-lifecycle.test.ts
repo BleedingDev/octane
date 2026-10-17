@@ -27,13 +27,22 @@ function transition(type: 'pagehide' | 'pageshow', persisted = true) {
 	window.dispatchEvent(new PageTransitionEvent(type, { persisted }));
 }
 
-function mount(first: ReturnType<typeof reader>, second?: ReturnType<typeof reader>) {
+function mount$(
+	first: ReturnType<typeof reader>,
+	second?: ReturnType<typeof reader>,
+	withHostSignalOwner = true,
+) {
+	const retiredPublishers: { label: string; status: string; hostDraft: string }[] = [];
 	const remote = loadCompiledFixtureSource(
 		`
+		import { useLayoutEffect } from 'octane';
 		import { query$ } from 'octane/signals';
-		export function Remote({ load, label }) @{
+		export function Remote({ load, label, onRetire, readHostDraft$ }) @{
 			const value$ = query$(() => label, load);
 			const value = value$.snapshot();
+			useLayoutEffect(() => () => {
+				onRetire({ label, status: value$.snapshot().status, hostDraft: readHostDraft$() });
+			}, []);
 			<section data-reader={label}>
 				<input defaultValue="draft" />
 				<output>{value.status === 'ready' ? value.value : value.status}</output>
@@ -58,10 +67,10 @@ function mount(first: ReturnType<typeof reader>, second?: ReturnType<typeof read
 	const host = loadCompiledFixtureSource(
 		`
 		import { Boundary } from 'publisher-boundary';
-		export function Host({ loadA, loadB, showA }) @{
+		export function Host({ loadA, loadB, showA, onRetire, readHostDraft$ }) @{
 			<main>
-				@if (showA) { <Boundary load={loadA} label="A" /> }
-				@if (loadB) { <Boundary load={loadB} label="B" /> }
+				@if (showA) { <Boundary load={loadA} label="A" onRetire={onRetire} readHostDraft$={readHostDraft$} /> }
+				@if (loadB) { <Boundary load={loadB} label="B" onRetire={onRetire} readHostDraft$={readHostDraft$} /> }
 			</main>
 		}
 	`,
@@ -73,6 +82,10 @@ function mount(first: ReturnType<typeof reader>, second?: ReturnType<typeof read
 		},
 	);
 	const signalOwner = Signals.createScope({ scopeKey: 'external-lifecycle-host' });
+	const hostDraft$ = signalOwner.signal$('host-draft', 'host remains live');
+	const readHostDraft$ = () => hostDraft$.get();
+	const onRetire = (publisher: (typeof retiredPublishers)[number]) =>
+		retiredPublishers.push(publisher);
 	let identity = { buildId: 'host', documentId: 'host-document' };
 	const onMismatch = vi.fn();
 	const lifecycle = installSignalDocumentLifecycle({
@@ -86,7 +99,7 @@ function mount(first: ReturnType<typeof reader>, second?: ReturnType<typeof read
 	const container = document.createElement('div');
 	document.body.append(container);
 	const root = Client.createRoot(container, {
-		signalOwner,
+		...(withHostSignalOwner ? { signalOwner } : {}),
 		externalSnapshots: { documentId: 'host-document' },
 	});
 	const render = (showA: boolean) =>
@@ -94,6 +107,8 @@ function mount(first: ReturnType<typeof reader>, second?: ReturnType<typeof read
 			loadA: first.load,
 			loadB: second?.load,
 			showA,
+			onRetire,
+			readHostDraft$,
 		});
 	cleanups.push(() => {
 		root.unmount();
@@ -107,6 +122,8 @@ function mount(first: ReturnType<typeof reader>, second?: ReturnType<typeof read
 		render,
 		onMismatch,
 		signalOwner,
+		hostDraft$,
+		retiredPublishers,
 		mountForeignPublisher(pending: ReturnType<typeof reader>) {
 			const errors: unknown[] = [];
 			const siblingContainer = document.createElement('div');
@@ -117,7 +134,7 @@ function mount(first: ReturnType<typeof reader>, second?: ReturnType<typeof read
 				onUncaughtError: (error) => errors.push(error),
 			});
 			cleanups.push(() => sibling.unmount());
-			sibling.render(Boundary, { load: pending.load, label: 'foreign' });
+			sibling.render(Boundary, { load: pending.load, label: 'foreign', onRetire, readHostDraft$ });
 			return errors;
 		},
 		changeHost() {
@@ -126,31 +143,34 @@ function mount(first: ReturnType<typeof reader>, second?: ReturnType<typeof read
 	};
 }
 
-it('restarts an isolated client publisher read after the host accepts the restored document', async () => {
-	const pending = reader();
-	const { container, onMismatch } = mount(pending);
-	await Client.act(async () => {});
-	expect(pending.attempts).toHaveLength(1);
-	const input = container.querySelector('input')!;
-	input.value = 'retained draft';
-	transition('pagehide');
-	expect(pending.attempts[0].signal.aborted).toBe(true);
-	transition('pageshow');
-	await Client.act(async () => {});
-	expect(pending.attempts).toHaveLength(2);
-	pending.attempts[1].result.resolve('fresh');
-	await Client.act(async () => {});
-	pending.attempts[0].result.resolve('stale');
-	await Client.act(async () => {});
-	expect(container.querySelector('output')!.textContent).toBe('fresh');
-	expect(container.querySelector('input')).toBe(input);
-	expect(input.value).toBe('retained draft');
-	expect(onMismatch).not.toHaveBeenCalled();
-});
+it.each([true, false])(
+	'restarts an isolated client publisher read after restore with explicit host owner %s',
+	async (withHostSignalOwner) => {
+		const pending = reader();
+		const { container, onMismatch } = mount$(pending, undefined, withHostSignalOwner);
+		await Client.act(async () => {});
+		expect(pending.attempts).toHaveLength(1);
+		const input = container.querySelector('input')!;
+		input.value = 'retained draft';
+		transition('pagehide');
+		expect(pending.attempts[0].signal.aborted).toBe(true);
+		transition('pageshow');
+		await Client.act(async () => {});
+		expect(pending.attempts).toHaveLength(2);
+		pending.attempts[1].result.resolve('fresh');
+		await Client.act(async () => {});
+		pending.attempts[0].result.resolve('stale');
+		await Client.act(async () => {});
+		expect(container.querySelector('output')!.textContent).toBe('fresh');
+		expect(container.querySelector('input')).toBe(input);
+		expect(input.value).toBe('retained draft');
+		expect(onMismatch).not.toHaveBeenCalled();
+	},
+);
 
 it('retires a publisher when the host identity changes even though its publisher build is unchanged', async () => {
 	const pending = reader();
-	const { container, changeHost, onMismatch } = mount(pending);
+	const { container, changeHost, onMismatch, retiredPublishers } = mount$(pending);
 	await Client.act(async () => {});
 	expect(pending.attempts).toHaveLength(1);
 	transition('pagehide');
@@ -158,6 +178,9 @@ it('retires a publisher when the host identity changes even though its publisher
 	transition('pageshow');
 	await Client.act(async () => {});
 	expect(onMismatch).toHaveBeenCalledOnce();
+	expect(retiredPublishers).toEqual([
+		{ label: 'A', status: 'pending', hostDraft: 'host remains live' },
+	]);
 	expect(pending.attempts[0].signal.aborted).toBe(true);
 	expect(pending.attempts).toHaveLength(1);
 	pending.attempts[0].result.resolve('obsolete result');
@@ -168,13 +191,16 @@ it('retires a publisher when the host identity changes even though its publisher
 it('does not restart a removed publisher while a retained sibling resumes', async () => {
 	const removed = reader();
 	const retained = reader();
-	const { container, render, onMismatch } = mount(removed, retained);
+	const { container, render, onMismatch, retiredPublishers } = mount$(removed, retained);
 	await Client.act(async () => {});
 	expect(removed.attempts).toHaveLength(1);
 	expect(retained.attempts).toHaveLength(1);
 	transition('pagehide');
 	await Client.act(() => render(false));
 	expect(container.querySelector('[data-reader="A"]')).toBeNull();
+	expect(retiredPublishers).toEqual([
+		{ label: 'A', status: 'pending', hostDraft: 'host remains live' },
+	]);
 	transition('pageshow');
 	await Client.act(async () => {});
 	expect(removed.attempts).toHaveLength(1);
@@ -190,7 +216,7 @@ it('does not restart a removed publisher while a retained sibling resumes', asyn
 
 it('holds a newly mounted publisher read until its frozen host resumes', async () => {
 	const pending = reader();
-	const { container, render, onMismatch } = mount(pending);
+	const { container, render, onMismatch } = mount$(pending);
 	await Client.act(async () => {});
 	expect(pending.attempts).toHaveLength(1);
 	await Client.act(() => render(false));
@@ -212,8 +238,7 @@ it('rejects a foreign publisher document without retiring the host or healthy si
 	const first = reader();
 	const sibling = reader();
 	const refused = reader();
-	const { container, signalOwner, mountForeignPublisher, onMismatch } = mount(first, sibling);
-	const hostDraft$ = signalOwner.signal$('host-draft', 'host remains live');
+	const { container, hostDraft$, mountForeignPublisher, onMismatch } = mount$(first, sibling);
 	await Client.act(async () => {});
 	const errors = mountForeignPublisher(refused);
 	await Client.act(async () => {});

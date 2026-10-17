@@ -24,7 +24,6 @@ interface DocumentLifecycleParticipant {
 }
 
 interface DocumentLifecycleRegistration {
-	readonly document: Document;
 	readonly documentId: string;
 	join(
 		owner: SignalOwner,
@@ -34,7 +33,7 @@ interface DocumentLifecycleRegistration {
 }
 
 const documentLifecycles = /* @__PURE__ */ new WeakMap<
-	SignalOwner,
+	Document,
 	Set<DocumentLifecycleRegistration>
 >();
 
@@ -42,20 +41,15 @@ const documentLifecycles = /* @__PURE__ */ new WeakMap<
 export function joinSignalDocumentLifecycle(options: {
 	readonly document: Document;
 	readonly documentId: string;
-	readonly hostSignalOwner: SignalOwner | undefined;
 	readonly signalOwner: SignalOwner;
 	readonly streamedHydration: Pick<StreamedSignalResults, 'suspend'> | undefined;
 	readonly onRetire: () => void;
 }): (() => void) | undefined {
 	// A manual renderer may opt out of document lifecycle handling entirely.
-	if (options.hostSignalOwner === undefined) return;
-	const registrations = documentLifecycles.get(options.hostSignalOwner);
+	const registrations = documentLifecycles.get(options.document);
 	if (registrations === undefined) return;
 	for (const registration of registrations) {
-		if (
-			registration.document === options.document &&
-			registration.documentId === options.documentId
-		)
+		if (registration.documentId === options.documentId)
 			return registration.join(options.signalOwner, options.streamedHydration, options.onRetire);
 	}
 	throw new TypeError(formatClientError(357));
@@ -76,7 +70,6 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 	let wake: ((active: boolean) => void) | undefined;
 	let participants: Set<DocumentLifecycleParticipant> | undefined;
 	const registration: DocumentLifecycleRegistration = {
-		document,
 		documentId: options.documentId,
 		join(signalOwner, streamedHydration, onRetire) {
 			const participant = {
@@ -126,9 +119,9 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 		disposed = true;
 		view.removeEventListener('pagehide', hide);
 		view.removeEventListener('pageshow', show);
-		const registrations = documentLifecycles.get(signalOwner)!;
+		const registrations = documentLifecycles.get(document)!;
 		registrations.delete(registration);
-		if (registrations.size === 0) documentLifecycles.delete(signalOwner);
+		if (registrations.size === 0) documentLifecycles.delete(document);
 		try {
 			// Unmount islands while their document data is still live. Retiring first
 			// would notify each island of the retirement and break its cleanups.
@@ -215,8 +208,8 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 	};
 	view.addEventListener('pagehide', hide);
 	view.addEventListener('pageshow', show);
-	let registrations = documentLifecycles.get(signalOwner);
-	if (registrations === undefined) documentLifecycles.set(signalOwner, (registrations = new Set()));
+	let registrations = documentLifecycles.get(document);
+	if (registrations === undefined) documentLifecycles.set(document, (registrations = new Set()));
 	registrations.add(registration);
 	return {
 		signalOwner,

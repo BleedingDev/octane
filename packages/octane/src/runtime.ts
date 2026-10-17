@@ -14036,7 +14036,20 @@ function unmountBlockInner(block: Block, detachDom: boolean): void {
 				block.endMarker !== null &&
 				domNode(block.startMarker).parentNode !== null));
 	// Depth-first cleanup of all scopes reachable from this block.
-	unmountScope(block, detachDom && !removesOwnDom);
+	try {
+		unmountScope(block, detachDom && !removesOwnDom);
+	} finally {
+		const dataOwner = block.idState.dataOwner;
+		if (dataOwner !== undefined && dataOwner !== block.parentBlock?.idState.dataOwner) {
+			// An isolated publisher owns its document data across the whole subtree.
+			// Descendant cleanups must still be able to read that data before retirement.
+			if (
+				!DEFERRED_LAYOUT_DRIVER ||
+				!DEFERRED_LAYOUT_DRIVER.stageAction(() => retireRendererSignalOwner(dataOwner), true)
+			)
+				retireRendererSignalOwner(dataOwner);
+		}
+	}
 	if (NATIVE_READ_DRIVER && owner?.current === block) NATIVE_READ_DRIVER.clearDeferredRefs(owner);
 	if (!detachDom) return;
 	// Remove DOM range.
@@ -18329,10 +18342,6 @@ function createHydrateSlot(
 	block.idState = idState;
 	if (externalOwner !== undefined) {
 		stampSignalInstanceKey(block, rootSignalInstanceKey(idState));
-		const owner = externalOwner;
-		registerHookCleanup(block, () => {
-			retireRendererSignalOwner(owner);
-		});
 	}
 	let state!: HydrateSlot;
 	const intentBoundary: HydrationIntentBoundary = (eventType, intent) =>
@@ -19008,7 +19017,6 @@ export function externalSnapshotBoundary<P>(
 						leaveDocumentLifecycle = joinSignalDocumentLifecycle({
 							document,
 							documentId,
-							hostSignalOwner: host.signalOwner,
 							signalOwner: state.idState.dataOwner!,
 							streamedHydration: bridge,
 							onRetire() {

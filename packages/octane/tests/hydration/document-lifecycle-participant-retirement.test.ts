@@ -32,7 +32,6 @@ it('retires every publisher before reporting the first teardown failure', () => 
 		joinSignalDocumentLifecycle({
 			document,
 			documentId: 'document',
-			hostSignalOwner: host,
 			signalOwner,
 			streamedHydration: { suspend },
 			onRetire,
@@ -40,6 +39,8 @@ it('retires every publisher before reporting the first teardown failure', () => 
 	join(
 		first,
 		() => {
+			expect(first.retired).toBe(false);
+			expect(host.retired).toBe(false);
 			throw failure;
 		},
 		firstSuspend,
