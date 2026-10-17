@@ -403,3 +403,25 @@ test('keeps published codes append-only while allowing retirement and additions'
 		/new code 2 cannot reuse a number below the published nextCode 3/,
 	);
 });
+
+test('validates external wire and request lease error surfaces', () => {
+	for (const filename of ['external-snapshot-protocol.ts', 'external-snapshot-budget.ts']) {
+		const input = catalog({
+			codes: { 1: { ...catalog().codes[1], runtime: ['client', 'server'] } },
+		});
+		validateRuntimeUsages(input, [
+			[filename, "throw new TypeError(formatClientError(1, 'wire'));"],
+		]);
+		assert.throws(
+			() => validateRuntimeUsages(input, [[filename, "throw new TypeError('untracked error');"]]),
+			/message/,
+		);
+	}
+	const input = catalog({ codes: { 1: { ...catalog().codes[1], runtime: ['server'] } } });
+	validateRuntimeUsages(input, [
+		[
+			'server/external-snapshot-preparation.ts',
+			"throw new TypeError(formatServerError(1, 'lease'));",
+		],
+	]);
+});

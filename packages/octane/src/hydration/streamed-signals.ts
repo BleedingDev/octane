@@ -25,6 +25,8 @@ import {
 } from '../streamed-signals-protocol.js';
 import {
 	installStreamedRendererGlobal,
+	streamedRendererAuthorityKey,
+	type StreamedRendererAuthority,
 	type StreamedRendererDeliveryOptions,
 } from './stream-delivery.js';
 import { createStreamedRegionReceiver, type StreamedRegionReceiver } from './stream-receiver.js';
@@ -43,7 +45,7 @@ const STREAMED_SIGNAL_SELECTIONS = '__octaneStreamedSignalSelections';
 interface EarlyStreamedSignalSelections {
 	readonly version: 1;
 	readonly identities: unknown[];
-	readonly overflow?: boolean;
+	overflow?: boolean;
 	register(identity: unknown): void;
 }
 
@@ -51,6 +53,162 @@ interface EarlyStreamedRenderer {
 	readonly version: 1;
 	readonly frames: unknown[];
 	receive(frame: unknown): void;
+}
+
+interface StreamedSelectionRouter {
+	readonly early: EarlyStreamedSignalSelections;
+	readonly leases: Map<string, (identity: StreamFrameIdentity) => void>;
+	readonly retired: Set<string>;
+	readonly refused: Set<string>;
+	exhausted: boolean;
+	removed: boolean;
+	pendingBytes: number;
+	restore(): void;
+}
+
+const streamedSelectionRouters = /* @__PURE__ */ new WeakMap<
+	Record<string, unknown>,
+	StreamedSelectionRouter
+>();
+
+function installSelectionLease(
+	target: Record<string, unknown>,
+	early: EarlyStreamedSignalSelections,
+	authority: StreamedRendererAuthority,
+	register: (identity: StreamFrameIdentity) => void,
+) {
+	const key = streamedRendererAuthorityKey(authority);
+	let router = streamedSelectionRouters.get(target);
+	if (
+		router !== undefined &&
+		(router.early !== early || router.leases.has(key) || router.retired.has(key))
+	)
+		throw new Error(formatClientError(124));
+	if (router === undefined) {
+		let initialBytes = 0;
+		for (const identity of early.identities)
+			initialBytes += new TextEncoder().encode(JSON.stringify(identity)).byteLength;
+		if (early.identities.length > 256 || initialBytes > 4 * 1024 * 1024)
+			throw new Error(formatClientError(268));
+		const leases = new Map<string, (identity: StreamFrameIdentity) => void>();
+		const retired = new Set<string>();
+		const refused = new Set<string>();
+		const originalRegister = early.register;
+		const created: StreamedSelectionRouter = {
+			early,
+			leases,
+			retired,
+			refused,
+			exhausted: false,
+			removed: false,
+			pendingBytes: initialBytes,
+			restore() {
+				created.removed = true;
+				if (early.register === route) early.register = originalRegister;
+			},
+		};
+		const route = (candidate: unknown) => {
+			if (created.removed) return;
+			if (!isStreamFrameIdentity(candidate)) throw new Error(formatClientError(269));
+			const candidateKey = streamedRendererAuthorityKey(candidate);
+			const lease = leases.get(candidateKey);
+			if (lease !== undefined) {
+				lease(candidate);
+				return;
+			}
+			if (retired.has(candidateKey)) return;
+			if (refused.has(candidateKey) || created.exhausted) throw new Error(formatClientError(268));
+			const bytes = new TextEncoder().encode(JSON.stringify(candidate)).byteLength;
+			if (
+				early.identities.length + refused.size + retired.size >= 256 ||
+				created.pendingBytes + bytes > 4 * 1024 * 1024
+			) {
+				// Keep one refusal instead of this authority's incomplete selections.
+				let retained = 0;
+				for (const queued of early.identities) {
+					if (
+						isStreamFrameIdentity(queued) &&
+						streamedRendererAuthorityKey(queued) === candidateKey
+					)
+						created.pendingBytes -= new TextEncoder().encode(JSON.stringify(queued)).byteLength;
+					else early.identities[retained++] = queued;
+				}
+				early.identities.length = retained;
+				const refusalBytes = new TextEncoder().encode(candidateKey).byteLength;
+				if (
+					early.identities.length + refused.size + retired.size >= 256 ||
+					created.pendingBytes + refusalBytes > 4 * 1024 * 1024
+				) {
+					// Exhaustion cannot forget the rejected key and admit it later.
+					// Existing leases still deliver directly, before this cold mailbox.
+					created.exhausted = true;
+				} else {
+					refused.add(candidateKey);
+					created.pendingBytes += refusalBytes;
+				}
+				throw new Error(formatClientError(268));
+			}
+			early.identities.push(candidate);
+			created.pendingBytes += bytes;
+		};
+		early.register = route;
+		router = created;
+		streamedSelectionRouters.set(target, router);
+	}
+	if (router.exhausted || router.refused.has(key)) throw new Error(formatClientError(268));
+	router.leases.set(key, register);
+	const installed = router;
+	let removed = false;
+	return {
+		drain() {
+			const matching: StreamFrameIdentity[] = [];
+			let retained = 0;
+			let pendingBytes = 0;
+			for (const retiredKey of installed.retired)
+				pendingBytes += new TextEncoder().encode(retiredKey).byteLength;
+			for (const refusedKey of installed.refused)
+				pendingBytes += new TextEncoder().encode(refusedKey).byteLength;
+			for (const candidate of early.identities) {
+				if (!isStreamFrameIdentity(candidate)) throw new Error(formatClientError(269));
+				if (streamedRendererAuthorityKey(candidate) === key) matching.push(candidate);
+				else {
+					early.identities[retained++] = candidate;
+					pendingBytes += new TextEncoder().encode(JSON.stringify(candidate)).byteLength;
+				}
+			}
+			early.identities.length = retained;
+			installed.pendingBytes = pendingBytes;
+			for (const identity of matching) register(identity);
+		},
+		dispose() {
+			if (removed) return;
+			removed = true;
+			installed.leases.delete(key);
+			const retirementBytes = new TextEncoder().encode(key).byteLength;
+			if (
+				early.identities.length + installed.refused.size + installed.retired.size >= 256 ||
+				installed.pendingBytes + retirementBytes > 4 * 1024 * 1024
+			)
+				installed.exhausted = true;
+			else {
+				installed.retired.add(key);
+				installed.pendingBytes += retirementBytes;
+			}
+			// The retired mailbox still fences late calls through its own closure.
+			// Keep failed authority markers for this mailbox lifetime too; dropping
+			// them would let a later join mistake incomplete history for no history.
+			if (
+				installed.leases.size === 0 &&
+				early.identities.length === 0 &&
+				installed.refused.size === 0 &&
+				!installed.exhausted &&
+				streamedSelectionRouters.get(target) === installed
+			) {
+				streamedSelectionRouters.delete(target);
+				installed.restore();
+			}
+		},
+	};
 }
 
 export interface StreamedSignalHydrationOptions extends StreamedRendererDeliveryOptions {
@@ -183,18 +341,23 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 			});
 		}
 	};
-	const originalRegister = early.register;
+	const authority = {
+		buildId: options.buildId,
+		documentId: options.documentId,
+		ownerKey: signalOwner.scopeKey,
+	};
+	let selectionLease: ReturnType<typeof installSelectionLease> | undefined;
 	let uninstallOwnerActivator: (() => void) | undefined;
 	let initialized = false;
 	try {
-		// Reserve the single document bridge before initializing state or touching
-		// mailboxes. A duplicate bootstrap must leave the active document alone.
+		// Reserve the exact authority before initializing state or touching mailboxes.
+		selectionLease = installSelectionLease(target, early, authority, register);
 		uninstallOwnerActivator = installStreamedSignalOwnerActivator((owner) => {
 			if (disposed || !('documentOwner' in owner) || documentOwner(owner) !== signalOwner) return;
 			if (owners.has(owner.instanceKey)) return;
 			owners.set(owner.instanceKey, owner);
 			for (const selection of selections.values()) attach(selection, owner);
-		});
+		}, signalOwner);
 		if (options.initialSignals !== undefined) {
 			const manifest = validateNativeSignalManifest(options.initialSignals);
 			if (manifest.version !== 1) throw new TypeError(formatClientError(270));
@@ -210,12 +373,10 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 		}
 		registerSignalOwnerDocument(signalOwner, document);
 		enableSignalDocument();
-		early.register = register;
-		for (const identity of early.identities) register(identity);
-		early.identities.length = 0;
+		selectionLease.drain();
 	} catch (error) {
 		uninstallOwnerActivator?.();
-		if (early.register === register) early.register = originalRegister;
+		selectionLease?.dispose();
 		for (const selection of selections.values()) selection.detach?.();
 		receiver.dispose();
 		// Never retain partially initialized document state after a failed join.
@@ -254,29 +415,25 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 	}
 	let uninstallDelivery: () => void;
 	try {
-		uninstallDelivery = installStreamedRendererGlobal(receiver, target, options);
+		uninstallDelivery = installStreamedRendererGlobal(receiver, target, { ...options, authority });
 	} catch (error) {
 		uninstallOwnerActivator();
-		early.register = originalRegister;
+		selectionLease.dispose();
 		for (const selection of selections.values()) selection.detach?.();
 		receiver.dispose();
 		if (initialized) retireSignalOwnerIdentity(signalOwner);
 		throw error;
 	}
-	const installedRenderer = target['__octaneStreamedRenderer'];
 	const close = (restore: boolean): void => {
 		if (disposed) return;
 		disposed = true;
-		if (early.register === register) early.register = restore ? originalRegister : () => {};
+		selectionLease.dispose();
 		uninstallOwnerActivator();
 		for (const selection of selections.values()) selection.detach?.();
-		const ownsIngress = target['__octaneStreamedRenderer'] === installedRenderer;
 		uninstallDelivery();
-		if (!restore && ownsIngress) {
-			// Uninstall restores the pre-module descriptor. Do not allow late
-			// parser calls to refill that mailbox after a BFCache freeze.
+		if (!restore && target['__octaneStreamedRenderer'] === undefined) {
+			// Only the final lease fences ingress; sibling publishers stay live.
 			target['__octaneStreamedRenderer'] = { receive() {} };
-			if (earlyRenderer) earlyRenderer.frames.length = 0;
 		}
 		selections.clear();
 		owners.clear();

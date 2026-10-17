@@ -250,6 +250,16 @@ type ServerErrorArguments = {
 	344: [];
 	345: [];
 	346: [];
+	347: [];
+	348: [];
+	349: [];
+	350: [];
+	351: [];
+	352: [];
+	353: [];
+	354: [];
+	356: [];
+	357: [];
 };
 
 export function formatServerError<Code extends keyof ServerErrorArguments>(
@@ -1011,6 +1021,56 @@ export function formatServerError<Code extends keyof ServerErrorArguments>(
 			case 346:
 				return formatDevErrorMessage(
 					'CompiledOutlet requires a compiled component function with no returned renderable.',
+					args,
+				);
+			case 347:
+				return formatDevErrorMessage(
+					'Invalid native external snapshot payload or runtime ABI.',
+					args,
+				);
+			case 348:
+				return formatDevErrorMessage(
+					'External snapshot contexts require unique registered codecs and every required ancestor provider.',
+					args,
+				);
+			case 349:
+				return formatDevErrorMessage(
+					'External snapshot authority does not match its publisher, document, boundary, or request.',
+					args,
+				);
+			case 350:
+				return formatDevErrorMessage(
+					'External snapshot rendering requires a genuine, open request prepared for one render.',
+					args,
+				);
+			case 351:
+				return formatDevErrorMessage(
+					'External snapshot context cleanup exceeded its deadline.',
+					args,
+				);
+			case 352:
+				return formatDevErrorMessage(
+					'External snapshot load exceeded its boundary deadline.',
+					args,
+				);
+			case 353:
+				return formatDevErrorMessage(
+					'External snapshot request or cleanup produced multiple failures.',
+					args,
+				);
+			case 354:
+				return formatDevErrorMessage(
+					'External snapshots require a trusted document ID configured on the host renderer.',
+					args,
+				);
+			case 356:
+				return formatDevErrorMessage(
+					'External snapshot boundary options must specify a native component, a snapshot transport, a finite positive timeout, and unique valid context keys.',
+					args,
+				);
+			case 357:
+				return formatDevErrorMessage(
+					'External snapshot and streamed signal document identities must match.',
 					args,
 				);
 			default:

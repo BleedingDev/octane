@@ -3540,6 +3540,61 @@
       "message": "CompiledOutlet requires a compiled component function with no returned renderable.",
       "runtime": ["client", "server"],
       "status": "active"
+    },
+    "347": {
+      "message": "Invalid native external snapshot payload or runtime ABI.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "348": {
+      "message": "External snapshot contexts require unique registered codecs and every required ancestor provider.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "349": {
+      "message": "External snapshot authority does not match its publisher, document, boundary, or request.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "350": {
+      "message": "External snapshot rendering requires a genuine, open request prepared for one render.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "351": {
+      "message": "External snapshot context cleanup exceeded its deadline.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "352": {
+      "message": "External snapshot load exceeded its boundary deadline.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "353": {
+      "message": "External snapshot request or cleanup produced multiple failures.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "354": {
+      "message": "External snapshots require a trusted document ID configured on the host renderer.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "355": {
+      "message": "An external snapshot boundary cannot change publisher authority during its mounted lifetime.",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "356": {
+      "message": "External snapshot boundary options must specify a native component, a snapshot transport, a finite positive timeout, and unique valid context keys.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "357": {
+      "message": "External snapshot and streamed signal document identities must match.",
+      "runtime": ["server"],
+      "status": "active"
     }
   },
   "strongDiagnostics": {

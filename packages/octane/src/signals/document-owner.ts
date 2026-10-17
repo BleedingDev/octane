@@ -11,6 +11,7 @@ const documentOwners = /* @__PURE__ */ new WeakMap<Document, SignalOwnerIdentity
 let defaultInstalled = false;
 /** @internal Actual document capability, shared with an optional renderer. */
 export let signalDocumentEnabled = false;
+let streamedOwnerActivators: Map<SignalOwnerIdentity, (owner: SignalOwner) => void> | undefined;
 export let streamedSignalOwnerActivator: ((owner: SignalOwner) => void) | undefined;
 /**
  * @internal Lets a renderer enter each Block's owner in place rather than
@@ -50,12 +51,20 @@ export function enableSignalDocument(abi = 1): void {
 /** @internal Instance activation is optional; global results need no component root. */
 export function installStreamedSignalOwnerActivator(
 	activate: (owner: SignalOwner) => void,
+	documentOwner: SignalOwnerIdentity,
 ): () => void {
-	if (streamedSignalOwnerActivator !== undefined) {
+	const activators = (streamedOwnerActivators ??= new Map());
+	if (activators.has(documentOwner)) {
 		throw new Error(formatClientError(124));
 	}
-	streamedSignalOwnerActivator = activate;
+	activators.set(documentOwner, activate);
+	streamedSignalOwnerActivator ??= (owner) => {
+		const identity = 'documentOwner' in owner ? owner.documentOwner : owner;
+		activators.get(identity)?.(owner);
+	};
 	return () => {
-		if (streamedSignalOwnerActivator === activate) streamedSignalOwnerActivator = undefined;
+		if (activators.get(documentOwner) !== activate) return;
+		activators.delete(documentOwner);
+		if (activators.size === 0) streamedSignalOwnerActivator = undefined;
 	};
 }

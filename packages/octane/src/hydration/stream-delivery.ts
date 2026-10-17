@@ -2,6 +2,7 @@ import { yieldForHostBudget } from '../host-budget.js';
 import { formatClientError } from '../error-codes.client.generated.js';
 import {
 	isStreamedRendererFrame,
+	isStreamFrameIdentity,
 	streamFrameIdentityKey,
 	type StreamedRendererFrame,
 	type StreamFrameIdentity,
@@ -34,6 +35,16 @@ export interface StreamedRendererDeliveryOptions {
 	readonly maxPendingBytes?: number;
 	/** Maximum queue/placement wait and result inactivity; readers also bound each pending read. */
 	readonly timeoutMs?: number;
+}
+
+export type StreamedRendererAuthority = Pick<
+	StreamFrameIdentity,
+	'buildId' | 'documentId' | 'ownerKey'
+>;
+
+/** @internal The publisher, document and data owner jointly authorize a stream. */
+export function streamedRendererAuthorityKey(authority: StreamedRendererAuthority): string {
+	return JSON.stringify([authority.buildId, authority.documentId, authority.ownerKey]);
 }
 
 export interface StreamedRendererReadOptions extends StreamedRendererDeliveryOptions {
@@ -171,31 +182,10 @@ function createDelivery(
 	};
 }
 
-/**
- * Install the pre-module frame entrypoint. A host calls this before any
- * renderer-owned frame script; replacing a receiver already owned by another
- * document is an error rather than a silent authority transfer.
- */
-export function installStreamedRendererGlobal(
+function createGlobalDelivery(
 	receiver: StreamedDeliveryReceiver,
-	target: Record<string, unknown> = globalThis as Record<string, unknown>,
-	options: StreamedRendererDeliveryOptions = {},
-): () => void {
-	const previous = Object.getOwnPropertyDescriptor(target, STREAMED_RENDERER_RECEIVER);
-	const early = previous?.value as EarlyStreamedRendererGlobal | undefined;
-	if (
-		previous !== undefined &&
-		(early === null ||
-			typeof early !== 'object' ||
-			early.version !== 1 ||
-			!Array.isArray(early.frames) ||
-			typeof early.receive !== 'function')
-	) {
-		throw new Error(formatClientError(227));
-	}
-	if (early?.overflow === true) {
-		throw new Error(formatClientError(228));
-	}
+	options: StreamedRendererDeliveryOptions,
+) {
 	const maxOpenResults = positiveLimit(options.maxPendingFrames, DEFAULT_PENDING_FRAMES);
 	const resultTimeoutMs = positiveLimit(options.timeoutMs, DEFAULT_TIMEOUT_MS);
 	const openResults = new Map<
@@ -234,7 +224,7 @@ export function installStreamedRendererGlobal(
 		}
 	});
 	let removed = false;
-	const entrypoint: StreamedRendererGlobal = Object.freeze({
+	return {
 		receive(frame: unknown): void {
 			if (removed) return;
 			if (!isStreamedRendererFrame(frame)) {
@@ -251,30 +241,239 @@ export function installStreamedRendererGlobal(
 				// Inline callers cannot await backpressure or retry accepted work.
 			}
 		},
-	});
-	Object.defineProperty(target, STREAMED_RENDERER_RECEIVER, {
-		value: entrypoint,
-		configurable: true,
-	});
-	if (early !== undefined) {
-		for (const frame of early.frames) entrypoint.receive(frame);
-		early.frames.length = 0;
-	}
-	return () => {
-		removed = true;
-		const error = new StreamedReceiverError('terminal', formatClientError(231));
-		delivery.close(error);
-		for (const { identity, timer } of openResults.values()) {
-			clearTimeout(timer);
-			try {
-				receiver.failSelection(identity, error);
-			} catch {
-				/* Keep retiring this transport. */
+		close() {
+			removed = true;
+			const error = new StreamedReceiverError('terminal', formatClientError(231));
+			delivery.close(error);
+			for (const { identity, timer } of openResults.values()) {
+				clearTimeout(timer);
+				try {
+					receiver.failSelection(identity, error);
+				} catch {
+					/* Keep retiring this transport. */
+				}
 			}
+			openResults.clear();
+		},
+	};
+}
+
+interface StreamedRendererRouter {
+	readonly ingress: EarlyStreamedRendererGlobal & { overflow?: boolean };
+	readonly leases: Map<string, ReturnType<typeof createGlobalDelivery>>;
+	readonly retired: Set<string>;
+	readonly refused: Set<string>;
+	exhausted: boolean;
+	pendingBytes: number;
+	removed: boolean;
+}
+
+const streamedRendererRouters = /* @__PURE__ */ new WeakMap<
+	Record<string, unknown>,
+	StreamedRendererRouter
+>();
+const EXCLUSIVE_AUTHORITY = '*';
+
+/**
+ * Join the realm's frame ingress with an explicit publisher/document/owner lease.
+ * Without an authority, the receiver owns the ingress exclusively. Independent
+ * leases cannot replace one another, and their queues and cancellation stay local.
+ */
+export function installStreamedRendererGlobal(
+	receiver: StreamedDeliveryReceiver,
+	target: Record<string, unknown> = globalThis as Record<string, unknown>,
+	options: StreamedRendererDeliveryOptions & {
+		readonly authority?: StreamedRendererAuthority;
+	} = {},
+): () => void {
+	const authority = options.authority;
+	if (
+		authority !== undefined &&
+		(!authority.buildId ||
+			!authority.documentId ||
+			!authority.ownerKey ||
+			typeof authority.buildId !== 'string' ||
+			typeof authority.documentId !== 'string' ||
+			typeof authority.ownerKey !== 'string')
+	) {
+		throw new TypeError(formatClientError(269));
+	}
+	const key =
+		authority === undefined ? EXCLUSIVE_AUTHORITY : streamedRendererAuthorityKey(authority);
+	let router = streamedRendererRouters.get(target);
+	if (router !== undefined && target[STREAMED_RENDERER_RECEIVER] !== router.ingress)
+		throw new Error(formatClientError(227));
+	if (
+		router !== undefined &&
+		(router.leases.has(key) ||
+			router.retired.has(key) ||
+			router.leases.has(EXCLUSIVE_AUTHORITY) ||
+			(key === EXCLUSIVE_AUTHORITY && (router.leases.size !== 0 || router.retired.size !== 0)))
+	)
+		throw new Error(formatClientError(227));
+	if (router?.ingress.overflow === true) throw new Error(formatClientError(228));
+	const delivery = createGlobalDelivery(receiver, options);
+	if (router === undefined) {
+		const previous = Object.getOwnPropertyDescriptor(target, STREAMED_RENDERER_RECEIVER);
+		const early = previous?.value as EarlyStreamedRendererGlobal | undefined;
+		if (
+			previous !== undefined &&
+			(early === null ||
+				typeof early !== 'object' ||
+				early.version !== 1 ||
+				!Array.isArray(early.frames) ||
+				typeof early.receive !== 'function')
+		)
+			throw new Error(formatClientError(227));
+		if (early?.overflow === true) throw new Error(formatClientError(228));
+		const leases = new Map<string, ReturnType<typeof createGlobalDelivery>>();
+		const retired = new Set<string>();
+		const refused = new Set<string>();
+		const buffered = early?.frames ?? [];
+		let initialBytes = 0;
+		for (const frame of buffered) {
+			const bytes = new TextEncoder().encode(JSON.stringify(frame)).byteLength;
+			if (bytes > DEFAULT_MAX_FRAME_BYTES) throw new Error(formatClientError(228));
+			initialBytes += bytes;
 		}
-		openResults.clear();
-		if (target[STREAMED_RENDERER_RECEIVER] !== entrypoint) return;
-		delete target[STREAMED_RENDERER_RECEIVER];
+		if (buffered.length > 512 || initialBytes > DEFAULT_PENDING_BYTES)
+			throw new Error(formatClientError(228));
+		const created: StreamedRendererRouter = {
+			ingress: {
+				version: 1,
+				frames: buffered,
+				receive(frame: unknown) {
+					if (created.removed) return;
+					const exclusive = leases.get(EXCLUSIVE_AUTHORITY);
+					if (exclusive !== undefined) {
+						exclusive.receive(frame);
+						return;
+					}
+					const identity =
+						frame !== null && typeof frame === 'object'
+							? (frame as { identity?: unknown }).identity
+							: undefined;
+					if (!isStreamFrameIdentity(identity)) return;
+					const frameKey = streamedRendererAuthorityKey(identity);
+					const lease = leases.get(frameKey);
+					if (lease !== undefined) {
+						lease.receive(frame);
+						return;
+					}
+					if (
+						retired.has(frameKey) ||
+						refused.has(frameKey) ||
+						created.exhausted ||
+						!isStreamedRendererFrame(frame)
+					)
+						return;
+					// Claimed authorities go directly to their delivery queue. Only
+					// unclaimed frames count against this separate early mailbox.
+					const bytes = new TextEncoder().encode(JSON.stringify(frame)).byteLength;
+					if (
+						buffered.length + refused.size + retired.size >= 512 ||
+						bytes > DEFAULT_MAX_FRAME_BYTES ||
+						created.pendingBytes + bytes > DEFAULT_PENDING_BYTES
+					) {
+						// Replace this authority's incomplete history with a bounded refusal.
+						// The marker shares the mailbox budget; it must survive later joins.
+						let retained = 0;
+						for (const queued of buffered) {
+							if (
+								isStreamedRendererFrame(queued) &&
+								streamedRendererAuthorityKey(queued.identity) === frameKey
+							)
+								created.pendingBytes -= new TextEncoder().encode(JSON.stringify(queued)).byteLength;
+							else buffered[retained++] = queued;
+						}
+						buffered.length = retained;
+						const refusalBytes = new TextEncoder().encode(frameKey).byteLength;
+						if (
+							buffered.length + refused.size + retired.size >= 512 ||
+							created.pendingBytes + refusalBytes > DEFAULT_PENDING_BYTES
+						) {
+							// No slot remains to remember another failed key. Refuse future
+							// joins explicitly instead of hydrating a silently truncated stream.
+							created.exhausted = true;
+						} else {
+							refused.add(frameKey);
+							created.pendingBytes += refusalBytes;
+						}
+						return;
+					}
+					buffered.push(frame);
+					created.pendingBytes += bytes;
+				},
+			},
+			leases,
+			retired,
+			refused,
+			exhausted: false,
+			pendingBytes: initialBytes,
+			removed: false,
+		};
+		router = created;
+		Object.defineProperty(target, STREAMED_RENDERER_RECEIVER, {
+			value: router.ingress,
+			configurable: true,
+		});
+		streamedRendererRouters.set(target, router);
+	}
+	if (
+		router.ingress.overflow === true ||
+		router.exhausted ||
+		router.refused.has(key) ||
+		(key === EXCLUSIVE_AUTHORITY && router.refused.size !== 0)
+	)
+		throw new Error(formatClientError(228));
+	router.leases.set(key, delivery);
+	let retained = 0;
+	let pendingBytes = 0;
+	for (const retiredKey of router.retired)
+		pendingBytes += new TextEncoder().encode(retiredKey).byteLength;
+	for (const refusedKey of router.refused)
+		pendingBytes += new TextEncoder().encode(refusedKey).byteLength;
+	for (const frame of router.ingress.frames) {
+		if (
+			key === EXCLUSIVE_AUTHORITY ||
+			(isStreamedRendererFrame(frame) && streamedRendererAuthorityKey(frame.identity) === key)
+		)
+			delivery.receive(frame);
+		else {
+			router.ingress.frames[retained++] = frame;
+			pendingBytes += new TextEncoder().encode(JSON.stringify(frame)).byteLength;
+		}
+	}
+	router.ingress.frames.length = retained;
+	router.pendingBytes = pendingBytes;
+	const installed = router;
+	let removed = false;
+	return () => {
+		if (removed) return;
+		removed = true;
+		installed.leases.delete(key);
+		const retirementBytes = new TextEncoder().encode(key).byteLength;
+		if (
+			installed.ingress.frames.length + installed.refused.size + installed.retired.size >= 512 ||
+			installed.pendingBytes + retirementBytes > DEFAULT_PENDING_BYTES
+		)
+			installed.exhausted = true;
+		else {
+			installed.retired.add(key);
+			installed.pendingBytes += retirementBytes;
+		}
+		delivery.close();
+		if (
+			installed.leases.size !== 0 ||
+			installed.ingress.frames.length !== 0 ||
+			installed.refused.size !== 0 ||
+			installed.exhausted
+		)
+			return;
+		installed.removed = true;
+		streamedRendererRouters.delete(target);
+		if (target[STREAMED_RENDERER_RECEIVER] === installed.ingress)
+			delete target[STREAMED_RENDERER_RECEIVER];
 	};
 }
 

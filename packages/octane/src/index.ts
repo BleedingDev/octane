@@ -1,3 +1,12 @@
+export {
+	registerExternalSnapshotContext,
+	decodeExternalSnapshot,
+	serializeExternalSnapshotRequest,
+	type ExternalSnapshotContextCodec,
+	type ExternalSnapshotRequest,
+	type ExternalSnapshot,
+	type ExternalSnapshotBoundaryOptions,
+} from './external-snapshot-protocol.js';
 export { trustHTML, type TrustedHTML } from './trusted-html.js';
 export { createResizeObserver } from './resize-observer.js';
 // Keep package metadata behind an isolated re-export: applications that do not
@@ -36,6 +45,7 @@ export {
 //  3. TEST-ONLY — used by this repo's test infrastructure. Not API at all.
 export {
 	// ── 1. Public API (React parity) ──────────────────────────────────────────
+	externalSnapshotBoundary,
 	createRoot,
 	hydrateRoot,
 	flushSync,

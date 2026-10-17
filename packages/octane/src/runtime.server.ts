@@ -28,6 +28,30 @@ export { readNativeDomStyle, readNativeDomProps } from './signals/read-protocol.
 // module-global "current scope" (mirroring the client's CURRENT_SCOPE) is safe.
 // ---------------------------------------------------------------------------
 
+import {
+	EXTERNAL_SNAPSHOT_ATTR,
+	assertExternalSnapshotRequest,
+	captureExternalSnapshotContexts,
+	createExternalSnapshotRequest,
+	validateExternalSnapshotAuthority,
+	type ExternalSnapshotBoundaryOptions,
+	decodeExternalSnapshot,
+	serializeExternalSnapshotRequest,
+	type ExternalSnapshot,
+	type ExternalSnapshotRequest,
+} from './external-snapshot-protocol.js';
+import {
+	prepareExternalSnapshotRequest as prepareSnapshotRequest,
+	claimPreparedExternalSnapshotRequest,
+	preserveExternalSnapshotCleanup,
+	type ExternalSnapshotRenderOptions,
+	type PreparedExternalSnapshotRequest,
+} from './server/external-snapshot-preparation.js';
+export { releasePreparedExternalSnapshotRequest } from './server/external-snapshot-preparation.js';
+export type {
+	ExternalSnapshotRenderOptions,
+	PreparedExternalSnapshotRequest,
+} from './server/external-snapshot-preparation.js';
 import { resolveHookPath } from './hook-slot-cache.js';
 import type {
 	useEffect as ClientUseEffect,
@@ -779,6 +803,8 @@ let DEFERRED: Job[] | null = null;
 // it as a discovery job. Set by renderComponentFramed (and by render() for the
 // root, whose bare use() has no enclosing sub-component).
 let CURRENT_COMP: ServerComponent | null = null;
+// External transport leases are assigned only by canonical output passes.
+let EXTERNAL_SNAPSHOT_DISCOVERY: WeakSet<ResolvedMap> | null = null;
 let CURRENT_PROPS: any = null;
 let CURRENT_PARENT_SCOPE: SSRScope | null = null;
 // Stable identity of the active async control-flow arm. Component frame paths
@@ -5764,6 +5790,7 @@ function streamTokenForPendingHtml(html: string): string | null {
 }
 
 type InternalHydrateProps = HydrateProps & {
+	readonly __external?: ExternalSnapshotRequest;
 	readonly __independent?: {
 		readonly manifestTemplate: IndependentHydrateManifestTemplate;
 		readonly captures: readonly unknown[];
@@ -5969,7 +5996,7 @@ const PermanentStaticHydrate = /* @__PURE__ */ markComponentFlags(
 const hydrate = /* @__PURE__ */ markComponentFlags(
 	function Hydrate(rawProps: HydrateProps, scope: SSRScope): string {
 		const props = rawProps as InternalHydrateProps;
-		const id = useId();
+		const id = props.__external?.boundaryId ?? useId();
 		// The client always creates an HTMLDivElement. Force the same namespace for
 		// SSR children and attribute semantics instead of inheriting SVG/MathML from
 		// the call site. Direct placement in foreign content remains unsupported: an
@@ -6018,7 +6045,7 @@ const hydrate = /* @__PURE__ */ markComponentFlags(
 						} finally {
 							nativeReads = finishNativeSeedCapture(nativeCapture, previousNativeReads, false);
 						}
-						const idCount = ID_COUNTER - childIdStart;
+						const idCount = props.__external === undefined ? ID_COUNTER - childIdStart : 0;
 						const childSeeds = isolateSerial(serialStart);
 						const permanentStaticAncestor = PERMANENT_STATIC_HYDRATE_DEPTH !== 0;
 						const attrs = ssrHydrateAttrs(
@@ -6047,6 +6074,15 @@ const hydrate = /* @__PURE__ */ markComponentFlags(
 							: NATIVE_READ_COLLECTOR?.serialize(nativeReads, RESOLVED?.initialDocumentSignals);
 						const nativeSidecar =
 							nativeSeeds === undefined ? '' : serializeNativeSignalSeeds(nativeSeeds, NONCE_ATTR);
+						const externalSidecar =
+							props.__external === undefined
+								? ''
+								: '<script type="application/json" ' +
+									EXTERNAL_SNAPSHOT_ATTR +
+									NONCE_ATTR +
+									'>' +
+									serializeExternalSnapshotRequest(props.__external) +
+									'</script>';
 						const independentSidecar = permanentStaticAncestor
 							? ''
 							: ssrIndependentHydrateSidecar(props, id);
@@ -6059,6 +6095,7 @@ const hydrate = /* @__PURE__ */ markComponentFlags(
 							children +
 							seedSidecar +
 							nativeSidecar +
+							externalSidecar +
 							independentSidecar +
 							'</div>'
 						);
@@ -8770,6 +8807,8 @@ export interface RenderResult {
 
 /** Options accepted by the buffered render entry points (React-shaped subset). */
 export interface RenderOptions {
+	/** Trusted document authority for parent-owned external snapshot boundaries. */
+	externalSnapshots?: { readonly documentId: string };
 	/** The host already emitted earlySignalBootstrapScript before interactive HTML. */
 	earlySignalBootstrap?: 'external';
 	/** Shared request/account data owner borrowed across sibling SSR regions. */
@@ -9607,6 +9646,7 @@ function runDiscoveryRound(
 	CURRENT_COMP = null;
 	CURRENT_PROPS = null;
 	CURRENT_PARENT_SCOPE = null;
+	if (EXTERNAL_SNAPSHOT_DISCOVERY) EXTERNAL_SNAPSHOT_DISCOVERY.add(resolved);
 	try {
 		for (let i = 0; i < jobs.length; i++) {
 			const job = jobs[i];
@@ -9648,6 +9688,7 @@ function runDiscoveryRound(
 			}
 		}
 	} finally {
+		if (EXTERNAL_SNAPSHOT_DISCOVERY) EXTERNAL_SNAPSHOT_DISCOVERY.delete(resolved);
 		restoreAmbient(saved);
 	}
 	return { suspended, deferred };
@@ -10315,6 +10356,15 @@ export async function prerender(
 	props?: any,
 	options?: RenderOptions,
 ): Promise<RenderResult> {
+	return prerenderInternal(entryComponent, props, options);
+}
+
+async function prerenderInternal(
+	entryComponent: ServerRenderNode,
+	props?: any,
+	options?: RenderOptions,
+	captureStyles?: (styles: Map<string, InjectedStyle>) => void,
+): Promise<RenderResult> {
 	let component: ServerComponent;
 	[component, props, options] = renderEntry(entryComponent, props, options);
 	const preparedOptions = needsAutomaticSignalInjection(options)
@@ -10351,6 +10401,7 @@ export async function prerender(
 				throw error;
 			}
 		}
+		captureStyles?.(pass.cssEntries);
 		return passToResult(
 			pass,
 			nonceAttr,
@@ -10368,6 +10419,254 @@ export async function prerender(
 	} finally {
 		if (resolved !== undefined) releaseServerRenderResources(resolved);
 	}
+}
+
+/** Restore selected request contexts before an endpoint imports exposed code. */
+export function prepareExternalSnapshotRequest(
+	wireRequest: unknown,
+	options: ExternalSnapshotRenderOptions,
+): Promise<PreparedExternalSnapshotRequest> {
+	return prepareSnapshotRequest(
+		wireRequest,
+		options,
+		(contexts, initialize) => {
+			const previous = CURRENT_SCOPE;
+			const scope = ssrScope(null);
+			scope.$$ctxValues = contexts;
+			CURRENT_SCOPE = scope;
+			let active = true;
+			try {
+				const initialized: unknown = initialize((context, value) => {
+					if (!active || !isRendererContext(context) || contexts.has(context))
+						throw new TypeError(formatServerError(348));
+					contexts.set(context, value);
+				});
+				if (
+					initialized !== null &&
+					(typeof initialized === 'object' || typeof initialized === 'function') &&
+					'then' in initialized &&
+					typeof initialized.then === 'function'
+				) {
+					Promise.resolve(initialized).catch(NOOP);
+					throw new TypeError(formatServerError(348));
+				}
+			} finally {
+				active = false;
+				CURRENT_SCOPE = previous;
+			}
+		},
+		SUSPENSE_TIMEOUT_MS,
+	);
+}
+
+/** Render one externally transported native boundary without executing a host renderer. */
+export function renderExternalSnapshot(
+	component: ServerRenderNode,
+	prepared: PreparedExternalSnapshotRequest,
+): Promise<ExternalSnapshot>;
+export function renderExternalSnapshot(
+	component: ServerRenderNode,
+	wireRequest: ExternalSnapshotRequest,
+	options: ExternalSnapshotRenderOptions,
+): Promise<ExternalSnapshot>;
+export async function renderExternalSnapshot(
+	component: ServerRenderNode,
+	input: ExternalSnapshotRequest | PreparedExternalSnapshotRequest,
+	options?: ExternalSnapshotRenderOptions,
+): Promise<ExternalSnapshot> {
+	if (options !== undefined) {
+		const prepared = await prepareExternalSnapshotRequest(input, options);
+		return preserveExternalSnapshotCleanup(prepared, () =>
+			renderExternalSnapshot(component, prepared),
+		);
+	}
+	const {
+		request,
+		props,
+		owner,
+		signal,
+		contexts,
+		options: admitted,
+	} = claimPreparedExternalSnapshotRequest(input as PreparedExternalSnapshotRequest);
+	signal.throwIfAborted();
+	const entry: ServerComponent = (_props, scope) => {
+		scope.$$ctxValues = contexts.size === 0 ? null : contexts;
+		return hydrate(
+			{
+				when: { _t: 'load' },
+				children: createElement(component as any, props as any),
+				__external: request,
+			} as InternalHydrateProps,
+			scope,
+		);
+	};
+	let styles: ExternalSnapshot['styles'] = [];
+	const result = await prerenderInternal(
+		entry,
+		undefined,
+		{
+			identifierPrefix: request.identifierPrefix,
+			externalSnapshots: { documentId: request.documentId },
+			signalOwner: owner,
+			nonce: request.nonce,
+			signal,
+			// The preparation deadline remains active throughout import and render.
+			timeoutMs: 0,
+			...(admitted.onError === undefined ? {} : { onError: admitted.onError }),
+			headChannel: 'separate',
+			earlySignalBootstrap: 'external',
+			streamedSignals: {
+				buildId: request.authority.publisherBuildId,
+				documentId: request.documentId,
+			},
+		},
+		(entries) => {
+			styles = [...entries].map(([id, sheet]) => ({ id, ...sheet }));
+		},
+	);
+	signal.throwIfAborted();
+	return decodeExternalSnapshot({
+		version: 1,
+		request,
+		html: result.html,
+		styles,
+		head: result.head ?? '',
+	});
+}
+
+const EXTERNAL_SNAPSHOT_LOADS = /* @__PURE__ */ new WeakMap<
+	ResolvedMap,
+	Map<string, { fingerprint: string; body: ServerComponent; cancel: () => void }>
+>();
+
+/** The native loader suspends without putting transported HTML into application use() seeds. */
+export function externalSnapshotBoundary<P, C>(options: ExternalSnapshotBoundaryOptions<P, C>): C {
+	validateExternalSnapshotAuthority(options.authority);
+	EXTERNAL_SNAPSHOT_DISCOVERY ??= new WeakSet();
+	const snapshotTransport = options.snapshot;
+	const contextKeys = options.contextKeys === undefined ? undefined : [...options.contextKeys];
+	const timeoutMs = options.timeoutMs;
+	if (
+		typeof options.component !== 'function' ||
+		typeof snapshotTransport !== 'function' ||
+		(timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) ||
+		(contextKeys !== undefined &&
+			(contextKeys.some(
+				(key) => typeof key !== 'string' || key.length === 0 || key.length > 1024,
+			) ||
+				new Set(contextKeys).size !== contextKeys.length))
+	)
+		throw new TypeError(formatServerError(356));
+	const authority = Object.freeze({ ...options.authority });
+	const boundary = markComponentFlags(
+		function ExternalSnapshotBoundary(props: P, scope: SSRScope): string {
+			const resolved = RESOLVED;
+			const resources = getServerRenderResourceContext();
+			const documentId = resolved?.resourceOptions?.externalSnapshots?.documentId;
+			if (
+				resolved === null ||
+				resources === null ||
+				typeof documentId !== 'string' ||
+				documentId.length === 0
+			)
+				throw new TypeError(formatServerError(354));
+			if (
+				resolved.resourceOptions?.streamedSignals !== undefined &&
+				resolved.resourceOptions.streamedSignals.documentId !== documentId
+			)
+				throw new TypeError(formatServerError(357));
+			const boundaryId = useId();
+			const base = '@external-snapshot:' + asyncIdentityKey(boundary, false);
+			const occurrence = FRAME === null ? 0 : nextFrameOccurrence(FRAME, base);
+			const loadKey = asyncFramePath(FRAME) + '|' + base + '#' + occurrence;
+			let loads = EXTERNAL_SNAPSHOT_LOADS.get(resolved);
+			if (EXTERNAL_SNAPSHOT_DISCOVERY && EXTERNAL_SNAPSHOT_DISCOVERY.has(resolved)) {
+				const load = loads?.get(loadKey);
+				if (load === undefined) throw SSR_SUSPENSE;
+				return load.body(props, scope);
+			}
+			let values: Map<Function, unknown> | null = null;
+			for (let ancestor: SSRScope | null = scope; ancestor !== null; ancestor = ancestor.parent) {
+				for (const [context, value] of ancestor.$$ctxValues ?? []) {
+					values ??= new Map();
+					if (!values.has(context as Function)) values.set(context as Function, value);
+				}
+			}
+			const request = createExternalSnapshotRequest(
+				authority,
+				documentId,
+				boundaryId,
+				props,
+				captureExternalSnapshotContexts(values, contextKeys),
+				resources.nonce,
+			);
+			const fingerprint = serializeExternalSnapshotRequest(request);
+			// A suspended control arm establishes its ID namespace on the next pass.
+			// Own the waiter by its native component position so that transition cancels
+			// the provisional request instead of retaining a second transport lease.
+			if (loads === undefined) {
+				loads = new Map();
+				EXTERNAL_SNAPSHOT_LOADS.set(resolved, loads);
+				const ownLoads = loads;
+				resources.registerCleanup(() => {
+					ownLoads.clear();
+					EXTERNAL_SNAPSHOT_LOADS.delete(resolved);
+				});
+			}
+			let load = loads.get(loadKey);
+			if (load === undefined || load.fingerprint !== fingerprint) {
+				load?.cancel();
+				const controller = new AbortController();
+				const timer =
+					timeoutMs === undefined
+						? undefined
+						: setTimeout(() => controller.abort(new Error(formatServerError(352))), timeoutMs);
+				const abort = () => controller.abort(resources.signal?.reason);
+				if (resources.signal?.aborted) abort();
+				else resources.signal?.addEventListener('abort', abort, { once: true });
+				resources.registerCleanup(() => {
+					clearTimeout(timer);
+					resources.signal?.removeEventListener('abort', abort);
+					controller.abort();
+				});
+				const body = lazy<ServerComponent>(async () => {
+					const snapshot = decodeExternalSnapshot(
+						await new Promise<ExternalSnapshot>((resolve, reject) => {
+							const cancel = () => reject(controller.signal.reason);
+							if (controller.signal.aborted) {
+								cancel();
+								return;
+							}
+							controller.signal.addEventListener('abort', cancel, { once: true });
+							try {
+								Promise.resolve(snapshotTransport(request, controller.signal))
+									.then(resolve, reject)
+									.finally(() => controller.signal.removeEventListener('abort', cancel));
+							} catch (error) {
+								controller.signal.removeEventListener('abort', cancel);
+								reject(error);
+							}
+						}).finally(() => clearTimeout(timer)),
+					);
+					assertExternalSnapshotRequest(snapshot.request, request);
+					return (_props, _scope) => {
+						// Use the native resource channel so late external styles/head precede content.
+						for (const style of snapshot.styles) injectStyle(style.id, style.css, style.nonce);
+						if (snapshot.head !== '') emitHeadHint('external:' + request.ownerKey, snapshot.head);
+						return ssrHtml(snapshot.html);
+					};
+				});
+				load = { fingerprint, body, cancel: () => controller.abort() };
+				loads.set(loadKey, load);
+			}
+			// The host owns the pre-module mailbox, even when its own tree has no signals.
+			resolved.hasSignalControls = true;
+			return load.body(props, scope);
+		},
+		COMPONENT_FLAG_BOUNDARY,
+		'ExternalSnapshotBoundary',
+	);
+	return boundary as unknown as C;
 }
 
 /**

@@ -1,0 +1,446 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+	installStreamedRendererGlobal,
+	type StreamedRendererGlobal,
+} from '../../src/hydration/stream-delivery.js';
+import { bootstrapStreamedSignalResults } from '../../src/hydration/streamed-signals.js';
+import type {
+	StreamFrameIdentity,
+	StreamedRendererFrame,
+} from '../../src/streamed-signals-protocol.js';
+
+function identity(ownerKey: string, buildId = 'publisher'): StreamFrameIdentity {
+	return {
+		protocol: 1,
+		buildId,
+		documentId: 'host-document',
+		ownerKey,
+		instanceKey: 'view',
+		nodeKey: 'data',
+		selectionKey: 'selected',
+		selectionGeneration: 0,
+		attempt: 0,
+	};
+}
+function frame(owner: StreamFrameIdentity): StreamedRendererFrame {
+	return { identity: owner, channel: 'result', kind: 'complete', sequence: 0 };
+}
+function receiver() {
+	return { receive: vi.fn(async () => 'accepted' as const), failSelection: vi.fn(() => true) };
+}
+function ingress(realm: Record<string, unknown>) {
+	return realm.__octaneStreamedRenderer as StreamedRendererGlobal;
+}
+
+describe('streamed renderer authority leases', () => {
+	it('routes publisher/document/owner frames to independent receivers in one realm', async () => {
+		const realm = {};
+		const first = receiver(),
+			second = receiver();
+		const firstIdentity = identity('one'),
+			secondIdentity = identity('two', 'another-publisher');
+		const removeFirst = installStreamedRendererGlobal(first, realm, { authority: firstIdentity });
+		const removeSecond = installStreamedRendererGlobal(second, realm, {
+			authority: secondIdentity,
+		});
+		try {
+			ingress(realm).receive(frame(firstIdentity));
+			ingress(realm).receive(frame(secondIdentity));
+			await vi.waitFor(() => expect(second.receive).toHaveBeenCalledWith(frame(secondIdentity)));
+			expect(first.receive).toHaveBeenCalledExactlyOnceWith(frame(firstIdentity));
+			expect(second.receive).toHaveBeenCalledTimes(1);
+		} finally {
+			removeFirst();
+			removeSecond();
+		}
+		expect(realm).not.toHaveProperty('__octaneStreamedRenderer');
+	});
+
+	it('rejects duplicate authority and exclusive ownership in either installation order', () => {
+		const realm = {};
+		const owner = identity('one');
+		const remove = installStreamedRendererGlobal(receiver(), realm, { authority: owner });
+		try {
+			expect(() => installStreamedRendererGlobal(receiver(), realm, { authority: owner })).toThrow(
+				/already installed/,
+			);
+			expect(() => installStreamedRendererGlobal(receiver(), realm)).toThrow(/already installed/);
+		} finally {
+			remove();
+		}
+		const exclusive = installStreamedRendererGlobal(receiver(), realm);
+		try {
+			expect(() => installStreamedRendererGlobal(receiver(), realm, { authority: owner })).toThrow(
+				/already installed/,
+			);
+		} finally {
+			exclusive();
+		}
+	});
+
+	it('retains early frames for their unclaimed authority and drains only the matching lease', async () => {
+		const firstIdentity = identity('one'),
+			secondIdentity = identity('two');
+		const realm = {
+			__octaneStreamedRenderer: {
+				version: 1,
+				frames: [frame(firstIdentity), frame(secondIdentity)],
+				receive() {},
+			},
+		};
+		const first = receiver(),
+			second = receiver();
+		const removeFirst = installStreamedRendererGlobal(first, realm, { authority: firstIdentity });
+		try {
+			await vi.waitFor(() => expect(first.receive).toHaveBeenCalledTimes(1));
+			expect(second.receive).not.toHaveBeenCalled();
+			const removeSecond = installStreamedRendererGlobal(second, realm, {
+				authority: secondIdentity,
+			});
+			try {
+				await vi.waitFor(() =>
+					expect(second.receive).toHaveBeenCalledExactlyOnceWith(frame(secondIdentity)),
+				);
+			} finally {
+				removeSecond();
+			}
+		} finally {
+			removeFirst();
+		}
+	});
+
+	it('retires one lease without fencing its sibling and discards stale late frames', async () => {
+		const realm = {};
+		const firstIdentity = identity('one'),
+			secondIdentity = identity('two');
+		const first = receiver(),
+			second = receiver();
+		const removeFirst = installStreamedRendererGlobal(first, realm, { authority: firstIdentity });
+		const removeSecond = installStreamedRendererGlobal(second, realm, {
+			authority: secondIdentity,
+		});
+		try {
+			removeFirst();
+			removeFirst();
+			ingress(realm).receive(frame(firstIdentity));
+			ingress(realm).receive(frame(secondIdentity));
+			await vi.waitFor(() => expect(second.receive).toHaveBeenCalledTimes(1));
+			expect(first.receive).not.toHaveBeenCalled();
+			expect(() =>
+				installStreamedRendererGlobal(first, realm, { authority: firstIdentity }),
+			).toThrow(/already installed/);
+			expect(() => installStreamedRendererGlobal(receiver(), realm)).toThrow(/already installed/);
+			ingress(realm).receive(frame(firstIdentity));
+			await Promise.resolve();
+			expect(first.receive).not.toHaveBeenCalled();
+		} finally {
+			removeSecond();
+		}
+	});
+
+	it('retains bounded unclaimed publisher frames when the first lease is disposed before the next mounts', async () => {
+		const realm = {};
+		const remove = installStreamedRendererGlobal(receiver(), realm, { authority: identity('one') });
+		const saved = ingress(realm);
+		saved.receive(frame(identity('future')));
+		remove();
+		expect(ingress(realm)).toBe(saved);
+		expect(() => installStreamedRendererGlobal(receiver(), realm)).toThrow(/already installed/);
+		const next = receiver();
+		const removeNext = installStreamedRendererGlobal(next, realm, {
+			authority: identity('future'),
+		});
+		try {
+			await vi.waitFor(() =>
+				expect(next.receive).toHaveBeenCalledExactlyOnceWith(frame(identity('future'))),
+			);
+		} finally {
+			removeNext();
+		}
+		expect(realm).not.toHaveProperty('__octaneStreamedRenderer');
+		saved.receive(frame(identity('future')));
+		expect(next.receive).toHaveBeenCalledTimes(1);
+	});
+	it('keeps queue overflow and disposal local to one authority', async () => {
+		const realm = {};
+		const firstIdentity = identity('one'),
+			secondIdentity = identity('two');
+		let finish!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		const first = {
+			receive: vi.fn(async () => {
+				await blocked;
+				return 'accepted' as const;
+			}),
+			failSelection: vi.fn(() => true),
+		};
+		const second = receiver();
+		const removeFirst = installStreamedRendererGlobal(first, realm, {
+			authority: firstIdentity,
+			maxPendingFrames: 1,
+		});
+		const removeSecond = installStreamedRendererGlobal(second, realm, {
+			authority: secondIdentity,
+			maxPendingFrames: 1,
+		});
+		try {
+			ingress(realm).receive(frame(firstIdentity));
+			ingress(realm).receive(frame(firstIdentity));
+			ingress(realm).receive(frame(secondIdentity));
+			await vi.waitFor(() => expect(second.receive).toHaveBeenCalledTimes(1));
+			expect(first.failSelection).toHaveBeenCalledWith(
+				firstIdentity,
+				expect.objectContaining({ code: 'overflow' }),
+			);
+			removeFirst();
+			expect(second.failSelection).not.toHaveBeenCalled();
+			finish();
+		} finally {
+			finish();
+			removeFirst();
+			removeSecond();
+		}
+	});
+
+	it('fails closed when unclaimed valid frames exceed the bounded early mailbox', () => {
+		const realm = {};
+		const remove = installStreamedRendererGlobal(receiver(), realm, { authority: identity('one') });
+		try {
+			for (let count = 0; count < 513; count++) ingress(realm).receive(frame(identity('future')));
+			expect(() =>
+				installStreamedRendererGlobal(receiver(), realm, { authority: identity('future') }),
+			).toThrow(/mailbox overflowed/);
+		} finally {
+			remove();
+		}
+	});
+
+	it('refuses only the overflowing unclaimed renderer authority and preserves later joins', async () => {
+		const realm = {};
+		const first = receiver(),
+			third = receiver();
+		const removeFirst = installStreamedRendererGlobal(first, realm, { authority: identity('one') });
+		let removeThird: (() => void) | undefined;
+		try {
+			for (let count = 0; count < 513; count++) ingress(realm).receive(frame(identity('overflow')));
+			expect(() =>
+				installStreamedRendererGlobal(receiver(), realm, { authority: identity('overflow') }),
+			).toThrow(/mailbox overflowed/);
+			removeThird = installStreamedRendererGlobal(third, realm, { authority: identity('three') });
+			ingress(realm).receive(frame(identity('one')));
+			ingress(realm).receive(frame(identity('three')));
+			await vi.waitFor(() =>
+				expect(third.receive).toHaveBeenCalledExactlyOnceWith(frame(identity('three'))),
+			);
+			expect(first.receive).toHaveBeenCalledExactlyOnceWith(frame(identity('one')));
+			expect(() =>
+				installStreamedRendererGlobal(receiver(), realm, { authority: identity('overflow') }),
+			).toThrow(/mailbox overflowed/);
+		} finally {
+			removeThird?.();
+			removeFirst();
+		}
+		// The failed authority stays refused even after every live lease is gone.
+		expect(() =>
+			installStreamedRendererGlobal(receiver(), realm, { authority: identity('overflow') }),
+		).toThrow(/mailbox overflowed/);
+	});
+
+	it('keeps installed renderer delivery live when the bounded authority namespace is exhausted', async () => {
+		const realm = {};
+		const first = receiver();
+		const remove = installStreamedRendererGlobal(first, realm, { authority: identity('one') });
+		try {
+			for (let count = 0; count < 513; count++)
+				ingress(realm).receive(frame(identity(`unclaimed-${count}`)));
+			expect(() =>
+				installStreamedRendererGlobal(receiver(), realm, { authority: identity('unclaimed-512') }),
+			).toThrow(/mailbox overflowed/);
+			ingress(realm).receive(frame(identity('one')));
+			await vi.waitFor(() =>
+				expect(first.receive).toHaveBeenCalledExactlyOnceWith(frame(identity('one'))),
+			);
+		} finally {
+			remove();
+		}
+	});
+
+	it('refuses only the overflowing signal authority and preserves later result bootstraps', async () => {
+		const early = { version: 1, identities: [] as unknown[], register(_candidate: unknown) {} };
+		const realm = { __octaneStreamedSignalSelections: early };
+		const bootstrap = (ownerKey: string) =>
+			bootstrapStreamedSignalResults({
+				buildId: 'publisher',
+				documentId: 'host-document',
+				signalOwner: { scopeKey: ownerKey },
+				target: realm,
+			});
+		const first = bootstrap('one');
+		let third: ReturnType<typeof bootstrap> | undefined;
+		try {
+			for (let count = 0; count < 256; count++) early.register(identity('overflow'));
+			expect(() => early.register(identity('overflow'))).toThrow(/mailbox overflowed/);
+			expect(() => bootstrap('overflow')).toThrow(/mailbox overflowed/);
+			third = bootstrap('three');
+			early.register(identity('one'));
+			early.register(identity('three'));
+			expect(
+				await first.receiver.receive({
+					identity: identity('one'),
+					channel: 'result',
+					kind: 'open',
+					resource: 'stream',
+					sequence: 0,
+				}),
+			).toBe('accepted');
+			expect(
+				await third.receiver.receive({
+					identity: identity('three'),
+					channel: 'result',
+					kind: 'open',
+					resource: 'stream',
+					sequence: 0,
+				}),
+			).toBe('accepted');
+			expect(() => bootstrap('overflow')).toThrow(/mailbox overflowed/);
+		} finally {
+			third?.dispose();
+			first.dispose();
+		}
+		expect(() => bootstrap('overflow')).toThrow(/mailbox overflowed/);
+	});
+
+	it('keeps installed signal delivery live when the bounded authority namespace is exhausted', async () => {
+		const early = { version: 1, identities: [] as unknown[], register(_candidate: unknown) {} };
+		const realm = { __octaneStreamedSignalSelections: early };
+		const bootstrap = (ownerKey: string) =>
+			bootstrapStreamedSignalResults({
+				buildId: 'publisher',
+				documentId: 'host-document',
+				signalOwner: { scopeKey: ownerKey },
+				target: realm,
+			});
+		const first = bootstrap('one');
+		try {
+			for (let count = 0; count < 256; count++) early.register(identity(`unclaimed-${count}`));
+			expect(() => early.register(identity('unclaimed-256'))).toThrow(/mailbox overflowed/);
+			expect(() => bootstrap('unclaimed-256')).toThrow(/mailbox overflowed/);
+			early.register(identity('one'));
+			expect(
+				await first.receiver.receive({
+					identity: identity('one'),
+					channel: 'result',
+					kind: 'open',
+					resource: 'stream',
+					sequence: 0,
+				}),
+			).toBe('accepted');
+		} finally {
+			first.dispose();
+		}
+	});
+
+	it('bounds retired renderer authorities and never renews an old tuple behind a live peer', async () => {
+		const realm = {};
+		const first = receiver();
+		const removeFirst = installStreamedRendererGlobal(first, realm, {
+			authority: identity('keeper'),
+		});
+		const old = receiver();
+		try {
+			for (let count = 0; count < 513; count++) {
+				const remove = installStreamedRendererGlobal(old, realm, {
+					authority: identity(`retired-${count}`),
+				});
+				remove();
+			}
+			expect(() =>
+				installStreamedRendererGlobal(old, realm, { authority: identity('retired-0') }),
+			).toThrow();
+			expect(() =>
+				installStreamedRendererGlobal(receiver(), realm, {
+					authority: identity('after-exhaustion'),
+				}),
+			).toThrow(/mailbox overflowed/);
+			ingress(realm).receive(frame(identity('retired-0')));
+			ingress(realm).receive(frame(identity('retired-512')));
+			ingress(realm).receive(frame(identity('keeper')));
+			await vi.waitFor(() =>
+				expect(first.receive).toHaveBeenCalledExactlyOnceWith(frame(identity('keeper'))),
+			);
+			expect(old.receive).not.toHaveBeenCalled();
+		} finally {
+			removeFirst();
+		}
+	});
+
+	it('bounds retired signal authorities and refuses identical tuple renewal behind a live peer', async () => {
+		const early = { version: 1, identities: [] as unknown[], register(_candidate: unknown) {} };
+		const realm = { __octaneStreamedSignalSelections: early };
+		const bootstrap = (ownerKey: string) =>
+			bootstrapStreamedSignalResults({
+				buildId: 'publisher',
+				documentId: 'host-document',
+				signalOwner: { scopeKey: ownerKey },
+				target: realm,
+			});
+		const first = bootstrap('keeper');
+		try {
+			for (let count = 0; count < 257; count++) bootstrap(`retired-${count}`).dispose();
+			expect(() => bootstrap('retired-0')).toThrow();
+			expect(() => bootstrap('after-exhaustion')).toThrow(/mailbox overflowed/);
+			early.register(identity('retired-0'));
+			expect(() => early.register(identity('retired-256'))).toThrow(/mailbox overflowed/);
+			expect(early.identities).toHaveLength(0);
+			early.register(identity('keeper'));
+			expect(
+				await first.receiver.receive({
+					identity: identity('keeper'),
+					channel: 'result',
+					kind: 'open',
+					resource: 'stream',
+					sequence: 0,
+				}),
+			).toBe('accepted');
+		} finally {
+			first.dispose();
+		}
+	});
+
+	it('fences a saved signal ingress after final disposal before a new realm lease begins', () => {
+		const early = { version: 1, identities: [] as unknown[], register(_candidate: unknown) {} };
+		const realm = { __octaneStreamedSignalSelections: early };
+		const bootstrap = () =>
+			bootstrapStreamedSignalResults({
+				buildId: 'publisher',
+				documentId: 'host-document',
+				signalOwner: { scopeKey: 'one' },
+				target: realm,
+			});
+		const first = bootstrap();
+		const saved = early.register;
+		first.dispose();
+		const next = bootstrap();
+		try {
+			saved(identity('late-old-mailbox'));
+			expect(early.identities).toHaveLength(0);
+		} finally {
+			next.dispose();
+		}
+	});
+
+	it('removes the default exclusive ingress and fences saved entrypoints on disposal', async () => {
+		const realm = {};
+		const selected = receiver();
+		const remove = installStreamedRendererGlobal(selected, realm);
+		const saved = ingress(realm);
+		remove();
+		remove();
+		saved.receive(frame(identity('one')));
+		await Promise.resolve();
+		expect(selected.receive).not.toHaveBeenCalled();
+		expect(realm).not.toHaveProperty('__octaneStreamedRenderer');
+	});
+});
