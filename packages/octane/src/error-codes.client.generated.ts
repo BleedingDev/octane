@@ -323,6 +323,7 @@ type ClientErrorArguments = {
 	354: [];
 	355: [];
 	356: [];
+	357: [];
 	358: [];
 };
 
@@ -1420,6 +1421,11 @@ export function formatClientError<Code extends keyof ClientErrorArguments>(
 			case 356:
 				return formatDevErrorMessage(
 					'External snapshot boundary options must specify a native component, a snapshot transport, a finite positive timeout, and unique valid context keys.',
+					args,
+				);
+			case 357:
+				return formatDevErrorMessage(
+					'External snapshot and streamed signal document identities must match.',
 					args,
 				);
 			case 358:

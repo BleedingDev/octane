@@ -3593,7 +3593,7 @@
     },
     "357": {
       "message": "External snapshot and streamed signal document identities must match.",
-      "runtime": ["server"],
+      "runtime": ["client", "server"],
       "status": "active"
     },
     "358": {

@@ -29,6 +29,7 @@ import {
 	type ExternalSnapshotAuthority,
 } from './external-snapshot-protocol.js';
 import { bootstrapStreamedSignalHydration } from './hydration/streamed-signals.js';
+import { joinSignalDocumentLifecycle } from './hydration/document-lifecycle.js';
 
 import { hydrating, hydrationStarted, setHydrating, startHydration } from './hydration-flag.js';
 import { resolveHookPath } from './hook-slot-cache.js';
@@ -18366,8 +18367,8 @@ function createHydrateSlot(
 		loadedBody: null,
 		hydrationWaiters: null,
 		activationGeneration: 0,
-		activationRequested: !serverPreserved,
-		activationReady: !serverPreserved,
+		activationRequested: !serverPreserved && props.__external === undefined,
+		activationReady: !serverPreserved && props.__external === undefined,
 		serverActivationStarted: false,
 		hydrated: false,
 		didNotify: false,
@@ -18988,19 +18989,44 @@ export function externalSnapshotBoundary<P>(
 			const streamJoined = useRef(false, streamOwnerSlot);
 			useLayoutEffect(
 				() => {
-					if (!state.serverPreserved || streamJoined.current) return;
+					if (streamJoined.current) return;
 					// Only a committed host may consume publisher history. An abandoned
 					// root hydration must leave its frames available for the next attempt.
-					const bridge = bootstrapStreamedSignalHydration({
-						buildId: authority.publisherBuildId,
-						documentId: state.parentBlock.idState.renderOwner!.externalSnapshotDocumentId!,
-						signalOwner: state.idState.dataOwner!,
-						target: state.wrapper.ownerDocument.defaultView as unknown as Record<string, unknown>,
-					});
+					const host = state.parentBlock.idState.renderOwner!;
+					const document = state.wrapper.ownerDocument;
+					const documentId = host.externalSnapshotDocumentId!;
+					const bridge = state.serverPreserved
+						? bootstrapStreamedSignalHydration({
+								buildId: authority.publisherBuildId,
+								documentId,
+								signalOwner: state.idState.dataOwner!,
+								target: document.defaultView as unknown as Record<string, unknown>,
+							})
+						: undefined;
+					let leaveDocumentLifecycle: (() => void) | undefined;
+					try {
+						leaveDocumentLifecycle = joinSignalDocumentLifecycle({
+							document,
+							documentId,
+							hostSignalOwner: host.signalOwner,
+							signalOwner: state.idState.dataOwner!,
+							streamedHydration: bridge,
+							onRetire() {
+								teardownHydrateBoundary(state);
+								unmountBlock(state.block, false);
+							},
+						});
+					} catch (error) {
+						bridge?.dispose();
+						throw error;
+					}
 					streamJoined.current = true;
 					// Suspense and Activity disconnect layout effects while retaining the
 					// mounted boundary. Its publisher lease ends only at actual unmount.
-					registerHookCleanup(scope, () => bridge.dispose());
+					registerHookCleanup(scope, () => {
+						leaveDocumentLifecycle?.();
+						bridge?.dispose();
+					});
 					requestHydrateBoundary(state);
 				},
 				[state],

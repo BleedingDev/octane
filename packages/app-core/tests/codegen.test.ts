@@ -29,6 +29,7 @@ import { RenderRoute } from '../src/routes.js';
 import {
 	SERVER_ONLY_ADAPTER_IDS,
 	create_client_entry_source,
+	create_islands_entry_source,
 	create_adapter_browser_stub_source,
 	generateServerEntry,
 	generateServerManifestEntry,
@@ -44,6 +45,7 @@ afterEach(() => vi.unstubAllGlobals());
 async function runClientEntry(
 	registry: 'static' | 'global' | 'none' | 'empty-global' | 'capability',
 	options: {
+		entryMode?: 'host' | 'islands';
 		clientBuildId?: string;
 		clientBuild?: {
 			version: number;
@@ -83,6 +85,7 @@ async function runClientEntry(
 		'<main id="root"></main><script id="__octane_data" type="application/json">{"entry":"page"}</script>';
 	document.getElementById('__octane_data')!.textContent = JSON.stringify({
 		entry: 'page',
+		...(options.entryMode === 'islands' ? { preHydrate: 'pre-hydrate' } : {}),
 		clientBuild: options.clientBuild,
 		streamedSignals: options.streamed
 			? { buildId: options.clientBuildId, documentId: options.streamed.documentId }
@@ -96,6 +99,11 @@ async function runClientEntry(
 	const pages: string[] = [];
 	const pageValues: unknown[] = [];
 	const owners: (SignalOwner | undefined)[] = [];
+	const lifecycles: ReturnType<typeof installSignalDocumentLifecycle>[] = [];
+	const hydrationSettings: {
+		signalOwner?: SignalOwner;
+		externalSnapshots?: { documentId: string };
+	}[] = [];
 	const owner = { scopeKey: 'octane:document' };
 	let signalHydration: StreamedSignalHydration | undefined;
 	const mailboxes: Record<string, unknown> = options.streamed
@@ -104,7 +112,7 @@ async function runClientEntry(
 					version: 1,
 					identities: [
 						...options.streamed.html.matchAll(
-							/v\.register\((\{.*?\})\);\}\)\(globalThis\);<\/script>/g,
+							/__octaneStreamedSignalSelections\.register\((\{.*?\})\);<\/script>/g,
 						),
 					].map((match) => JSON.parse(match[1])),
 					register() {},
@@ -120,6 +128,12 @@ async function runClientEntry(
 				},
 			}
 		: {};
+	if (options.streamed) {
+		expect(
+			(mailboxes.__octaneStreamedSignalSelections as { identities: unknown[] }).identities,
+			'server HTML must register the streamed query selection',
+		).not.toHaveLength(0);
+	}
 	const globalRegistry: Record<string, () => Promise<unknown>> = {};
 	let discovery: ((data: { buildId: string; enabled: boolean }) => void) | undefined;
 	const reloads: string[] = [];
@@ -138,12 +152,17 @@ async function runClientEntry(
 			button.textContent = `Clicks: ${++clicks}`;
 		});
 	};
+	const createEntrySource =
+		options.entryMode === 'islands' ? create_islands_entry_source : create_client_entry_source;
 	const { outputFiles } = await build({
 		stdin: {
-			contents: create_client_entry_source({
+			contents: createEntrySource({
 				clientBuildId: options.clientBuildId,
 				devClientBuild: options.devCapability !== undefined,
-				staticEntries: [{ id: 'page', specifier: '@fixture/page' }],
+				staticEntries: [
+					{ id: 'page', specifier: '@fixture/page' },
+					{ id: 'pre-hydrate', specifier: '@fixture/pre-hydrate' },
+				],
 				independentEntries:
 					registry === 'static' ? [{ id: 'widget', specifier: '@fixture/widget' }] : [],
 				runtimeModuleId: '@fixture/runtime',
@@ -172,12 +191,14 @@ async function runClientEntry(
 							export const hydrateRoot = globalThis.hydrate;
 							export function Suspense() {} export function ErrorBoundary() {} export function createElement() {}`
 								: path === 'octane/hydration'
-									? `globalThis.imports.push('hydration'); export const bootstrapIndependentHydration = globalThis.bootstrap;`
+									? `globalThis.imports.push('hydration'); export const bootstrapIndependentHydration = globalThis.bootstrap; export const initializeHydrationEventCapture = globalThis.capture;`
 									: path === 'octane/hydration/streamed-signals'
 										? `globalThis.imports.push('streamed-signals'); export const bootstrapStreamedSignalHydration = globalThis.bootstrapSignals; export const installSignalDocumentLifecycle = globalThis.installLifecycle;`
 										: path === '@fixture/widget'
 											? `globalThis.imports.push('widget'); export default globalThis.activateWidget;`
-											: "globalThis.pages.push('page'); globalThis.readPage(); export default function Page() {}",
+											: path === '@fixture/pre-hydrate'
+												? 'export default globalThis.finishIslands;'
+												: "globalThis.pages.push('page'); globalThis.readPage(); export default function Page() {}",
 					}));
 				},
 			},
@@ -199,8 +220,10 @@ async function runClientEntry(
 		imports,
 		pages,
 		activateWidget,
+		finishIslands: () => target.setAttribute('data-ready', ''),
 		installLifecycle: (options: Parameters<typeof installSignalDocumentLifecycle>[0]) => {
 			const lifecycle = installSignalDocumentLifecycle(options);
+			lifecycles.push(lifecycle);
 			disposeLifecycle = lifecycle.dispose;
 			return lifecycle;
 		},
@@ -223,9 +246,10 @@ async function runClientEntry(
 			_target: unknown,
 			_body: unknown,
 			_props: unknown,
-			settings?: { signalOwner?: SignalOwner },
+			settings?: { signalOwner?: SignalOwner; externalSnapshots?: { documentId: string } },
 		) => {
 			owners.push(settings?.signalOwner);
+			hydrationSettings.push(settings ?? {});
 			target.setAttribute('data-ready', '');
 		},
 		bootstrap: (element: ParentNode, options: IndependentHydrateBootstrapOptions) => {
@@ -257,6 +281,8 @@ async function runClientEntry(
 		pages,
 		pageValues,
 		owners,
+		lifecycles,
+		hydrationSettings,
 		owner,
 		styleRequests,
 		reloads,
@@ -349,26 +375,74 @@ describe('bundler-neutral app codegen', () => {
 		}
 	});
 
-	it('keeps completed-build feature-free documents free of optional lifecycle imports', async () => {
-		const app = await runClientEntry('none', {
-			clientBuildId: 'build',
-			documentId: 'ordinary-document',
-			clientBuild: {
-				version: 1,
-				buildId: 'build',
-				mode: 'production',
-				capabilities: { independentHydration: false },
-			},
-		});
-		try {
-			app.transition('pagehide', true);
-			app.transition('pageshow', true);
-			expect(app.imports).toEqual([]);
-			expect(app.errors).toEqual([]);
-		} finally {
-			await app.dispose();
-		}
-	});
+	it.each(['host', 'islands'] as const)(
+		'installs document authority without streamed selections or independent islands (%s entry)',
+		async (entryMode) => {
+			const app = await runClientEntry('none', {
+				entryMode,
+				clientBuildId: 'build',
+				documentId: 'ordinary-document',
+				clientBuild: {
+					version: 1,
+					buildId: 'build',
+					mode: 'production',
+					capabilities: { independentHydration: false },
+				},
+			});
+			try {
+				expect(app.imports).toEqual(
+					entryMode === 'islands' ? ['hydration', 'streamed-signals'] : ['streamed-signals'],
+				);
+				expect(app.lifecycles).toHaveLength(1);
+				expect(app.pages).toEqual(entryMode === 'host' ? ['page'] : []);
+				expect(app.hydrationSettings).toEqual(
+					entryMode === 'host'
+						? [
+								{
+									signalOwner: app.lifecycles[0]!.signalOwner,
+									externalSnapshots: { documentId: 'ordinary-document' },
+								},
+							]
+						: [],
+				);
+				expect(app.lifecycles[0]!.signalOwner).toBeDefined();
+				app.transition('pagehide', true);
+				app.target.ownerDocument.getElementById('__octane_data')!.textContent = '{}';
+				app.transition('pageshow', true);
+				expect(app.reloads).toEqual(['reload']);
+				expect(app.errors).toEqual([]);
+			} finally {
+				await app.dispose();
+			}
+		},
+	);
+
+	it.each(['host', 'islands'] as const)(
+		'keeps documents without document identity free of optional lifecycle imports (%s entry)',
+		async (entryMode) => {
+			const app = await runClientEntry('none', {
+				entryMode,
+				clientBuildId: 'build',
+				clientBuild: {
+					version: 1,
+					buildId: 'build',
+					mode: 'production',
+					capabilities: { independentHydration: false },
+				},
+			});
+			try {
+				expect(app.imports).toEqual(entryMode === 'islands' ? ['hydration'] : []);
+				expect(app.lifecycles).toEqual([]);
+				expect(app.hydrationSettings).toEqual(entryMode === 'host' ? [{}] : []);
+				app.transition('pagehide', true);
+				app.transition('pageshow', true);
+				expect(app.reloads).toEqual([]);
+				expect(app.errors).toEqual([]);
+			} finally {
+				await app.dispose();
+			}
+		},
+	);
 
 	it('reloads instead of activating a cached widget under changed document metadata', async () => {
 		const app = await runClientEntry('capability', {
