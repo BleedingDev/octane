@@ -336,6 +336,30 @@ describe('hmr — runtime wrapper', () => {
 			after: 'function Helper() @{ <p>child:VERSION</p> }',
 		},
 		{
+			name: 'conditional callee evaluated only during rendering',
+			before: 'function expose() { return Helper; }',
+			local: 'const Child = (props.open ? expose : expose)();',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'logical callee evaluated only during rendering',
+			before: 'function expose() { return Helper; }',
+			local: 'const Child = (props.open && expose)();',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'nullish callee evaluated only during rendering',
+			before: 'function expose() { return Helper; }',
+			local: 'const Child = (null ?? expose)();',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'conditional alias evaluated only during rendering',
+			before: 'function expose() { return Helper; } const selected = true ? expose : expose;',
+			local: 'const Child = selected();',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
 			name: 'Reflect apply evaluated only during rendering',
 			before: 'function read() { return Helper; }',
 			local: 'const Child = Reflect.apply(read, null, []);',
@@ -1318,6 +1342,14 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 			'function expose() { return Counter; } const Initial = (0, expose)(); capture(Initial);',
 			'function read() { return Counter; } const Initial = Reflect.apply(read, null, []); capture(Initial);',
 			'function read() { return Counter; } const Initial = Reflect.construct(read, []); capture(Initial);',
+			'function expose() { return Counter; } const Initial = (true ? expose : () => null)(); capture(Initial);',
+			'function expose() { return Counter; } const Initial = (false ? () => null : expose)(); capture(Initial);',
+			'function expose() { return Counter; } const Initial = (false || expose)(); capture(Initial);',
+			'function expose() { return Counter; } const Initial = (true && expose)(); capture(Initial);',
+			'function expose() { return Counter; } const Initial = (null ?? expose)(); capture(Initial);',
+			'function expose() { return Counter; } const selected = true ? expose : expose; const Initial = (0, selected)(); capture(Initial);',
+			'function expose() { return Counter; } const Initial = new (true ? expose : expose)(); capture(Initial);',
+			'function expose() { return Counter; } const Initial = (true ? expose : expose)``; capture(Initial);',
 		]
 			.map<{ capture: string; target?: string }>((capture) => ({ capture }))
 			.concat({

@@ -9921,6 +9921,12 @@ function collectHotComponentExportFlows(input) {
 				} else break;
 			}
 			const callPosition = position ?? node.start;
+			// A selected callee can execute either reachable local closure.
+			if (
+				(callee?.type === 'ConditionalExpression' || callee?.type === 'LogicalExpression') &&
+				callPosition < aggregateStart(callee)
+			)
+				return true;
 			// Reflect invokes its target argument, which ordinary member traversal
 			// does not enter. Only the unshadowed intrinsic has this call contract.
 			const reflect = unwrapTsExpr(callee?.object);
