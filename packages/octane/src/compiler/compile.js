@@ -9791,6 +9791,37 @@ function collectHotComponentExportFlows(input) {
 	// Function bodies read the canonical binding when called, not where they
 	// are declared. Only evaluation before that binding initializes can retain
 	// a raw component; follow local calls and IIFEs at their call-site position.
+	const aggregateStarts = new Map();
+	const aggregateStart = (value) => {
+		if (aggregateStarts.has(value)) return aggregateStarts.get(value);
+		// Complete each value's reachability query independently. A partial
+		// answer from a cycle cannot safely be cached for another entry point.
+		const seen = new Set();
+		const visit = (node, parent, key) => {
+			if (node === null || typeof node !== 'object' || seen.has(node)) return -Infinity;
+			seen.add(node);
+			if (Array.isArray(node))
+				return node.reduce(
+					(latest, child) => Math.max(latest, visit(child, parent, key)),
+					-Infinity,
+				);
+			if (node.type === 'ImportDeclaration' || node.type === 'ExportSpecifier') return -Infinity;
+			let latest = -Infinity;
+			if (rootReference(node) && isIdentifierReference(node, parent, key, lexical)) {
+				const component = components.get(node.name);
+				if (component) return component.start;
+				latest = visit(bindings.get(node.name)?.item.init ?? opaqueDeclarations.get(node.name));
+			}
+			for (const childKey in node) {
+				if (!AST_WALK_SKIP_KEYS.has(childKey))
+					latest = Math.max(latest, visit(node[childKey], node, childKey));
+			}
+			return latest;
+		};
+		const latest = visit(value);
+		aggregateStarts.set(value, latest);
+		return latest;
+	};
 	const earlyCapture = (node, position, active = new Set(), parent, key, aggregate = false) => {
 		if (node === null || typeof node !== 'object') return false;
 		if (Array.isArray(node))
@@ -9813,12 +9844,7 @@ function collectHotComponentExportFlows(input) {
 			return true;
 		if (aggregate && rootReference(node) && isIdentifierReference(node, parent, key, lexical)) {
 			const value = bindings.get(node.name)?.item.init ?? opaqueDeclarations.get(node.name);
-			if (value && !active.has(value)) {
-				// Share visits for this aggregate query so diamonds cannot expand
-				// the same initializer once per path through the object graph.
-				active.add(value);
-				return earlyCapture(value, position, active, undefined, undefined, true);
-			}
+			if (value) return (position ?? node.start) < aggregateStart(value);
 		}
 		// A local aggregate may expose an executing method/getter through aliases
 		// or rewritten properties, destructuring or spread. Inspect its reachable
@@ -9833,21 +9859,18 @@ function collectHotComponentExportFlows(input) {
 					? 'argument'
 					: node.type === 'VariableDeclarator' && destructuring
 						? 'init'
-						: node.type === 'AssignmentExpression' &&
-							  (destructuring || node.left.type === 'MemberExpression')
+						: node.type === 'ForOfStatement'
 							? 'right'
-							: null;
+							: node.type === 'AssignmentPattern' && destructuring
+								? 'right'
+								: node.type === 'AssignmentExpression' &&
+									  (destructuring || node.left.type === 'MemberExpression')
+									? 'right'
+									: null;
 		if (
 			!aggregate &&
 			aggregateKey &&
-			earlyCapture(
-				node[aggregateKey],
-				position ?? node.start,
-				new Set(active),
-				node,
-				aggregateKey,
-				true,
-			)
+			earlyCapture(node[aggregateKey], position ?? node.start, new Set(), node, aggregateKey, true)
 		)
 			return true;
 		if (!aggregate && node.type === 'CallExpression') {
@@ -9869,6 +9892,8 @@ function collectHotComponentExportFlows(input) {
 				const executing = new Set([...active, callee]);
 				const callPosition = position ?? node.start;
 				if (
+					(callee.params.some((param) => param.type !== 'Identifier') &&
+						earlyCapture(node.arguments, callPosition, new Set(), node, 'arguments', true)) ||
 					earlyCapture(callee.params, callPosition, executing, callee, 'params') ||
 					earlyCapture(callee.body, callPosition, executing, callee, 'body')
 				)

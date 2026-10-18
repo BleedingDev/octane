@@ -1219,6 +1219,10 @@ export function App(props) @{ <section>@if (props.visible) { <Slot component={pr
 		'const api = { get component() { capture(Counter); return null; } }; const copy = { ...api };',
 		'const api = { nested: { read: () => Counter } }; const alias = api; const nested = alias.nested; const invoke = nested.read; const Initial = invoke(); capture(Initial);',
 		'const api = { nested: { get component() { return Counter; } } }; const alias = api.nested; const Initial = alias.component; capture(Initial);',
+		'function f(flag) { if (flag) return () => Counter; return api.c; } const api = { get c() { return f(true)(); } }; const Initial = f(false); capture(Initial);',
+		'const api = { get component() { return Counter; } }; (({ component }) => capture(component))(api);',
+		'const api = { get component() { return Counter; } }; function f({ component } = api) { return component; } capture(f());',
+		'const it = { *[Symbol.iterator]() { yield Counter; } }; for (const C of it) capture(C);',
 	])('propagates an early hoisted component capture to its importer: %s', (capture) => {
 		let captured: ComponentBody<any> | undefined;
 		const hot = webpackHotModule(
