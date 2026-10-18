@@ -330,10 +330,49 @@ interface StreamedRendererRouter {
 }
 
 const streamedRendererRouters = /* @__PURE__ */ new WeakMap<
-	Record<string, unknown>,
-	StreamedRendererRouter
+	object,
+	WeakMap<Record<string, unknown>, StreamedRendererRouter>
 >();
+// A reused plain target must not transfer an already claimed queue to another Document.
+const streamedRendererMailboxDocuments = /* @__PURE__ */ new WeakMap<object, object>();
+
+/** @internal Reject foreign-owned ingress before either hydration mailbox changes. */
+export function assertStreamedRendererDocument(
+	ownerDocument: object,
+	target: Record<string, unknown>,
+): void {
+	const mailbox = target[STREAMED_RENDERER_RECEIVER];
+	if (mailbox !== null && typeof mailbox === 'object') {
+		const claimed = streamedRendererMailboxDocuments.get(mailbox);
+		if (claimed !== undefined && claimed !== ownerDocument) throw new Error(formatClientError(227));
+	}
+}
+
 const EXCLUSIVE_AUTHORITY = '*';
+
+/** @internal Resolve the actual document behind a browser WindowProxy. */
+export function streamedRendererDocument(
+	target: Record<string, unknown>,
+	explicitDocument?: Document,
+): Document | undefined {
+	const candidate = target['document'] as Document | undefined;
+	const targetDocument =
+		candidate !== null &&
+		typeof candidate === 'object' &&
+		candidate.nodeType === 9 &&
+		Object.is(candidate.defaultView, target)
+			? candidate
+			: undefined;
+	if (explicitDocument !== undefined) {
+		if (
+			(explicitDocument.defaultView !== null && !Object.is(explicitDocument.defaultView, target)) ||
+			(targetDocument !== undefined && targetDocument !== explicitDocument)
+		)
+			throw new TypeError(formatClientError(267));
+		return explicitDocument;
+	}
+	return targetDocument ?? (typeof document === 'undefined' ? undefined : document);
+}
 
 /**
  * Join the realm's frame ingress with an explicit publisher/document/owner lease.
@@ -345,6 +384,7 @@ export function installStreamedRendererGlobal(
 	target: Record<string, unknown> = globalThis as Record<string, unknown>,
 	options: StreamedRendererDeliveryOptions & {
 		readonly authority?: StreamedRendererAuthority;
+		readonly document?: Document;
 	} = {},
 ): () => void {
 	const authority = options.authority;
@@ -361,7 +401,12 @@ export function installStreamedRendererGlobal(
 	}
 	const key =
 		authority === undefined ? EXCLUSIVE_AUTHORITY : streamedRendererAuthorityKey(authority);
-	let router = streamedRendererRouters.get(target);
+	const ownerDocument = streamedRendererDocument(target, options.document) ?? target;
+	assertStreamedRendererDocument(ownerDocument, target);
+	let documentRouters = streamedRendererRouters.get(ownerDocument);
+	if (documentRouters === undefined)
+		streamedRendererRouters.set(ownerDocument, (documentRouters = new WeakMap()));
+	let router = documentRouters.get(target);
 	if (router !== undefined && target[STREAMED_RENDERER_RECEIVER] !== router.ingress)
 		throw new Error(formatClientError(227));
 	if (
@@ -494,7 +539,9 @@ export function installStreamedRendererGlobal(
 			value: router.ingress,
 			configurable: true,
 		});
-		streamedRendererRouters.set(target, router);
+		if (early !== undefined) streamedRendererMailboxDocuments.set(early, ownerDocument);
+		streamedRendererMailboxDocuments.set(router.ingress, ownerDocument);
+		documentRouters.set(target, router);
 	}
 	if (
 		router.ingress.overflow === true ||
@@ -544,6 +591,9 @@ export function installStreamedRendererGlobal(
 			installed.pendingBytes += retirementBytes;
 		}
 		delivery.close();
+		// Tuple authorities remain fenced for this document target, including
+		// after its final lease; the unscoped exclusive receiver owns no tuple.
+		if (key !== EXCLUSIVE_AUTHORITY) return;
 		if (
 			installed.leases.size !== 0 ||
 			installed.ingress.frames.length !== 0 ||
@@ -552,7 +602,7 @@ export function installStreamedRendererGlobal(
 		)
 			return;
 		installed.removed = true;
-		streamedRendererRouters.delete(target);
+		documentRouters.delete(target);
 		if (target[STREAMED_RENDERER_RECEIVER] === installed.ingress)
 			delete target[STREAMED_RENDERER_RECEIVER];
 	};

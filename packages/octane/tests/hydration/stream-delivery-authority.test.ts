@@ -93,7 +93,7 @@ describe('streamed renderer authority leases', () => {
 			removeFirst();
 			removeSecond();
 		}
-		expect(realm).not.toHaveProperty('__octaneStreamedRenderer');
+		expect(ingress(realm).frames).toHaveLength(0);
 	});
 
 	it('rejects duplicate authority and exclusive ownership in either installation order', () => {
@@ -108,11 +108,12 @@ describe('streamed renderer authority leases', () => {
 		} finally {
 			remove();
 		}
-		const exclusive = installStreamedRendererGlobal(receiver(), realm);
+		const exclusiveRealm = {};
+		const exclusive = installStreamedRendererGlobal(receiver(), exclusiveRealm);
 		try {
-			expect(() => installStreamedRendererGlobal(receiver(), realm, { authority: owner })).toThrow(
-				/already installed/,
-			);
+			expect(() =>
+				installStreamedRendererGlobal(receiver(), exclusiveRealm, { authority: owner }),
+			).toThrow(/already installed/);
 		} finally {
 			exclusive();
 		}
@@ -197,7 +198,7 @@ describe('streamed renderer authority leases', () => {
 		} finally {
 			removeNext();
 		}
-		expect(realm).not.toHaveProperty('__octaneStreamedRenderer');
+		expect(ingress(realm).frames).toHaveLength(0);
 		saved.receive(frame(identity('future')));
 		expect(next.receive).toHaveBeenCalledTimes(1);
 	});
@@ -449,26 +450,309 @@ describe('streamed renderer authority leases', () => {
 		}
 	});
 
-	it('fences a saved signal ingress after final disposal before a new realm lease begins', () => {
-		const early = { version: 1, identities: [] as unknown[], register(_candidate: unknown) {} };
+	it('derives iframe transport ownership without an explicit document option', () => {
+		const iframe = document.createElement('iframe');
+		document.body.append(iframe);
+		const ownerDocument = iframe.contentDocument!;
+		const realm = ownerDocument.defaultView as unknown as Record<string, unknown>;
+		const authority = identity('iframe');
+		const remove = installStreamedRendererGlobal(receiver(), realm, { authority });
+		let unexpected: (() => void) | undefined;
+		try {
+			expect(() => {
+				unexpected = installStreamedRendererGlobal(receiver(), realm, {
+					authority,
+					document: ownerDocument,
+				});
+			}).toThrow(/already installed/);
+		} finally {
+			unexpected?.();
+			remove();
+			iframe.remove();
+		}
+	});
+
+	it('rejects an explicit window document paired with a plain transport target', () => {
+		const iframe = document.createElement('iframe');
+		document.body.append(iframe);
+		const realm: Record<string, unknown> = {};
+		let remove: (() => void) | undefined;
+		try {
+			expect(() => {
+				remove = installStreamedRendererGlobal(receiver(), realm, {
+					authority: identity('mismatch'),
+					document: iframe.contentDocument!,
+				});
+			}).toThrow(TypeError);
+			expect(realm.__octaneStreamedRenderer).toBeUndefined();
+		} finally {
+			remove?.();
+			iframe.remove();
+		}
+	});
+
+	it.each(['explicit', 'window-target'] as const)(
+		'starts new document ingress through %s ownership without reopening the previous document',
+		async (ownership) => {
+			const firstDocument = document.implementation.createHTMLDocument('First response');
+			const nextDocument = document.implementation.createHTMLDocument('Next response');
+			const realm: Record<string, unknown> = {};
+			if (ownership === 'window-target') {
+				for (const ownerDocument of [firstDocument, nextDocument])
+					Object.defineProperty(ownerDocument, 'defaultView', { value: realm });
+			}
+			const boot = (ownerDocument: Document) =>
+				bootstrapStreamedSignalResults({
+					buildId: 'publisher',
+					documentId: 'host-document',
+					signalOwner: { scopeKey: 'one' },
+					document: ownership === 'explicit' ? ownerDocument : undefined,
+					target: realm,
+				});
+			const initialize = (ownerDocument: Document) => {
+				realm.document = ownerDocument;
+				delete realm.__octaneStreamedSignalSelections;
+				delete realm.__octaneStreamedRenderer;
+				const script = earlySignalBootstrapScript().match(/<script[^>]*>([\s\S]*)<\/script>/)![1];
+				new Function('globalThis', 'document', script)(realm, ownerDocument);
+			};
+			initialize(firstDocument);
+			const first = boot(firstDocument);
+			const oldSelection = realm.__octaneStreamedSignalSelections as {
+				register(value: unknown): void;
+			};
+			const oldIngress = ingress(realm);
+			first.dispose();
+			initialize(firstDocument);
+			expect(() => boot(firstDocument)).toThrow(/already installed/);
+			initialize(nextDocument);
+			const next = boot(nextDocument);
+			try {
+				const currentIngress = ingress(realm);
+				oldSelection.register(identity('one'));
+				oldIngress.receive(frame(identity('one')));
+				first.dispose();
+				expect(ingress(realm)).toBe(currentIngress);
+				expect(currentIngress.frames).toHaveLength(0);
+				(realm.__octaneStreamedSignalSelections as { register(value: unknown): void }).register(
+					identity('one'),
+				);
+				expect(
+					await next.receiver.receive({
+						identity: identity('one'),
+						channel: 'result',
+						kind: 'open',
+						resource: 'stream',
+						sequence: 0,
+					}),
+				).toBe('accepted');
+				expect(() => boot(firstDocument)).toThrow(/already installed/);
+			} finally {
+				next.dispose();
+			}
+		},
+	);
+
+	it.each([
+		['tuple', 'explicit'],
+		['exclusive', 'explicit'],
+		['tuple', 'window-target'],
+		['exclusive', 'window-target'],
+	] as const)(
+		'isolates %s renderer leases across document changes with %s ownership',
+		async (lease, ownership) => {
+			const realm: Record<string, unknown> = {};
+			const firstDocument = document.implementation.createHTMLDocument('Old renderer');
+			const nextDocument = document.implementation.createHTMLDocument('New renderer');
+			if (ownership === 'window-target') {
+				for (const ownerDocument of [firstDocument, nextDocument])
+					Object.defineProperty(ownerDocument, 'defaultView', { value: realm });
+			}
+			realm.document = firstDocument;
+			const first = receiver(),
+				next = receiver();
+			const authority = lease === 'tuple' ? identity('one') : undefined;
+			const removeFirst = installStreamedRendererGlobal(first, realm, {
+				authority,
+				document: ownership === 'explicit' ? firstDocument : undefined,
+			});
+			const oldIngress = ingress(realm);
+			delete realm.__octaneStreamedRenderer;
+			realm.document = nextDocument;
+			const removeNext = installStreamedRendererGlobal(next, realm, {
+				authority,
+				document: ownership === 'explicit' ? nextDocument : undefined,
+			});
+			try {
+				const currentIngress = ingress(realm);
+				removeFirst();
+				oldIngress.receive(frame(identity('one')));
+				expect(ingress(realm)).toBe(currentIngress);
+				currentIngress.receive(frame(identity('one')));
+				await vi.waitFor(() => expect(next.receive).toHaveBeenCalledOnce());
+				expect(first.receive).not.toHaveBeenCalled();
+			} finally {
+				removeFirst();
+				removeNext();
+			}
+		},
+	);
+
+	it('rejects another document adopting live renderer globals without mutating the old ingress', async () => {
+		const firstDocument = document.implementation.createHTMLDocument('First transport');
+		const nextDocument = document.implementation.createHTMLDocument('Second transport');
+		const realm: Record<string, unknown> = {};
+		const first = receiver();
+		const remove = installStreamedRendererGlobal(first, realm, {
+			document: firstDocument,
+			authority: identity('one'),
+		});
+		try {
+			const saved = ingress(realm);
+			saved.receive(frame(identity('pending')));
+			const queued = saved.frames.slice();
+			expect(() =>
+				installStreamedRendererGlobal(receiver(), realm, {
+					document: nextDocument,
+					authority: identity('pending'),
+				}),
+			).toThrow(/already installed/);
+			expect(ingress(realm)).toBe(saved);
+			expect(saved.frames).toEqual(queued);
+			saved.receive(frame(identity('one')));
+			await vi.waitFor(() =>
+				expect(first.receive).toHaveBeenCalledExactlyOnceWith(frame(identity('one'))),
+			);
+		} finally {
+			remove();
+		}
+	});
+
+	it.each(['selections', 'renderer'] as const)(
+		'rejects another document reusing claimed %s globals before changing either mailbox',
+		async (claimed) => {
+			const firstDocument = document.implementation.createHTMLDocument('First signals');
+			const nextDocument = document.implementation.createHTMLDocument('Second signals');
+			const early = {
+				version: 1,
+				identities: [] as unknown[],
+				register(value: unknown) {
+					this.identities.push(value);
+				},
+			};
+			const realm: Record<string, unknown> = { __octaneStreamedSignalSelections: early };
+			const boot = (ownerDocument: Document, ownerKey: string) =>
+				bootstrapStreamedSignalResults({
+					buildId: 'publisher',
+					documentId: 'host-document',
+					document: ownerDocument,
+					signalOwner: { scopeKey: ownerKey },
+					target: realm,
+				});
+			const first = boot(firstDocument, 'one');
+			try {
+				const saved = ingress(realm);
+				const register = early.register;
+				if (claimed === 'renderer')
+					realm.__octaneStreamedSignalSelections = {
+						version: 1,
+						identities: [],
+						register() {},
+					};
+				const candidate = realm.__octaneStreamedSignalSelections as typeof early;
+				const candidateRegister = candidate.register;
+				expect(() => boot(nextDocument, 'two')).toThrow(/already installed/);
+				expect(candidate.register).toBe(candidateRegister);
+				expect(early.register).toBe(register);
+				expect(ingress(realm)).toBe(saved);
+				early.register(identity('one'));
+				expect(
+					await first.receiver.receive({
+						identity: identity('one'),
+						channel: 'result',
+						kind: 'open',
+						resource: 'stream',
+						sequence: 0,
+					}),
+				).toBe('accepted');
+			} finally {
+				first.dispose();
+			}
+		},
+	);
+
+	it('keeps final-lease selection and result fences until the target document ends', async () => {
+		const early = {
+			version: 1,
+			identities: [] as unknown[],
+			register(candidate: unknown) {
+				this.identities.push(candidate);
+			},
+		};
 		const realm = { __octaneStreamedSignalSelections: early };
-		const bootstrap = () =>
+		const bootstrap = (
+			ownerKey = 'one',
+			target: Record<string, unknown> = realm,
+			ownerDocument?: Document,
+		) =>
 			bootstrapStreamedSignalResults({
 				buildId: 'publisher',
 				documentId: 'host-document',
-				signalOwner: { scopeKey: 'one' },
-				target: realm,
+				document: ownerDocument,
+				signalOwner: { scopeKey: ownerKey },
+				target,
 			});
 		const first = bootstrap();
-		const saved = early.register;
 		first.dispose();
-		const next = bootstrap();
+		const injection = createStreamedSignalInjection(identity('one'), Promise.resolve('late'), {
+			announceSelection: true,
+		});
+		void injection.done.catch(() => {});
+		const announcement = injection.take().match(/<script[^>]*>([\s\S]*)<\/script>/)![1];
+		injection.cancel(new Error('announcement captured'));
+		new Function('globalThis', 'document', announcement)(realm, document);
+		const lateScript = streamedRendererFrameScript(frame(identity('one'))).match(
+			/<script[^>]*>([\s\S]*)<\/script>/,
+		)![1];
+		new Function('globalThis', 'document', lateScript)(realm, document);
+		expect.soft(early.identities).toHaveLength(0);
+		expect.soft(ingress(realm).frames).toHaveLength(0);
+		expect(() => bootstrap()).toThrow(/already installed/);
+		const next = bootstrap('two');
 		try {
-			saved(identity('late-old-mailbox'));
-			expect(early.identities).toHaveLength(0);
+			early.register(identity('two'));
+			expect(
+				await next.receiver.receive({
+					identity: identity('two'),
+					channel: 'result',
+					kind: 'open',
+					resource: 'stream',
+					sequence: 0,
+				}),
+			).toBe('accepted');
 		} finally {
 			next.dispose();
 		}
+		// Replacing the current globals cannot reopen retired wire authority.
+		const currentSelections = realm.__octaneStreamedSignalSelections;
+		realm.__octaneStreamedSignalSelections = {
+			version: 1,
+			identities: [],
+			register(candidate: unknown) {
+				this.identities.push(candidate);
+			},
+		};
+		expect(() => bootstrap()).toThrow(/already installed/);
+		realm.__octaneStreamedSignalSelections = currentSelections;
+		// A distinct document realm can legitimately use the same wire tuple.
+		const replacementEarly = { version: 1, identities: [], register() {} };
+		const replacementDocument = document.implementation.createHTMLDocument('New response');
+		const replacement = bootstrap(
+			'one',
+			{ __octaneStreamedSignalSelections: replacementEarly },
+			replacementDocument,
+		);
+		replacement.dispose();
 	});
 
 	it('removes the default exclusive ingress and fences saved entrypoints on disposal', async () => {

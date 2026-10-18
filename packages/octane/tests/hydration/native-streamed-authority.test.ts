@@ -9,7 +9,188 @@ import {
 } from '../../src/hydration/native-streamed-authority.js';
 import type { SignalOwnerIdentity } from '../../src/signals/types.js';
 
+import { earlySignalBootstrapScript } from '../../src/server/early-signals.js';
+import { __signalAt, runWithSignalOwner } from '../../src/signals/index.js';
+import { SIGNAL_CONTROL_ATTR } from '../../src/hydration-markers.js';
+import {
+	publishHydrationControlSignalValues,
+	readEarlySignalValue,
+} from '../../src/signals/early-values.js';
+
 describe('native streamed authority', () => {
+	it('claims iframe inline input history and captures later edits without consuming parent controls', () => {
+		const parentFrame = document.createElement('iframe');
+		document.body.append(parentFrame);
+		const parentDocument = parentFrame.contentDocument!;
+		const iframe = parentDocument.createElement('iframe');
+		parentDocument.body.append(iframe);
+		const foreignDocument = iframe.contentDocument!;
+		const view = foreignDocument.defaultView!;
+		const target = view as unknown as Record<string, unknown>;
+		const parentTarget = parentDocument.defaultView as unknown as Record<string, unknown>;
+		const owner = { scopeKey: 'foreign-inline-controls' };
+		const parentOwner = { scopeKey: owner.scopeKey };
+		const makeInput = (ownerDocument: Document, nodeKey: string) => {
+			const input = ownerDocument.createElement('input');
+			input.setAttribute(
+				SIGNAL_CONTROL_ATTR,
+				JSON.stringify([1, owner.scopeKey, [['', nodeKey, 'value']]]),
+			);
+			input.value = 'server';
+			ownerDocument.body.append(input);
+			return input;
+		};
+		const queued = makeInput(foreignDocument, 'queued');
+		const later = makeInput(foreignDocument, 'later');
+		const parentInput = makeInput(parentDocument, 'queued');
+		const script = earlySignalBootstrapScript().match(/<script[^>]*>([\s\S]*)<\/script>/)![1];
+		new Function('globalThis', 'document', script)(target, foreignDocument);
+		new Function('globalThis', 'document', script)(parentTarget, parentDocument);
+		const edit = (input: HTMLInputElement, value: string) => {
+			input.value = value;
+			input.dispatchEvent(new input.ownerDocument.defaultView!.Event('input', { bubbles: true }));
+		};
+		edit(queued, 'typed before activation');
+		edit(parentInput, 'parent edit');
+		const foreignQueue = (target.__octaneEarlySignalControls as { q: unknown[] }).q;
+		const parentQueue = (parentTarget.__octaneEarlySignalControls as { q: unknown[] }).q;
+		expect(foreignQueue).toHaveLength(1);
+		expect(parentQueue).toHaveLength(1);
+		const bridge = bootstrapStreamedSignalHydration({
+			buildId: 'foreign-inline',
+			documentId: 'foreign-inline',
+			document: foreignDocument,
+			signalOwner: owner,
+		});
+		let parentBridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
+		try {
+			expect(foreignQueue).toHaveLength(0);
+			expect(parentQueue).toHaveLength(1);
+			expect(parentTarget.__octanePublishSignalControl).toBeUndefined();
+			const queued$ = __signalAt('g:queued', 'server', { key: 'queued' });
+			expect(runWithSignalOwner(owner, () => queued$.get())).toBe('typed before activation');
+			edit(later, 'typed after bootstrap before hydrate');
+			const later$ = __signalAt('g:later', 'server', { key: 'later' });
+			expect(runWithSignalOwner(owner, () => later$.get())).toBe(
+				'typed after bootstrap before hydrate',
+			);
+			parentBridge = bootstrapStreamedSignalHydration({
+				buildId: 'parent-inline',
+				documentId: 'parent-inline',
+				document: parentDocument,
+				signalOwner: parentOwner,
+			});
+			expect(parentQueue).toHaveLength(0);
+			expect(runWithSignalOwner(parentOwner, () => queued$.get())).toBe('parent edit');
+			expect(runWithSignalOwner(owner, () => queued$.get())).toBe('typed before activation');
+		} finally {
+			parentBridge?.dispose();
+			bridge.dispose();
+			parentFrame.remove();
+		}
+	});
+
+	it('derives iframe signal ownership from the public target-only call', () => {
+		const iframe = document.createElement('iframe');
+		document.body.append(iframe);
+		const ownerDocument = iframe.contentDocument!;
+		const target = ownerDocument.defaultView as unknown as Record<string, unknown>;
+		const script = earlySignalBootstrapScript().match(/<script[^>]*>([\s\S]*)<\/script>/)![1];
+		new Function('globalThis', 'document', script)(target, ownerDocument);
+		const bridge = bootstrapStreamedSignalHydration({
+			buildId: 'target-only',
+			documentId: 'target-only',
+			target,
+		});
+		try {
+			expect(getNativeStreamedAuthority(bridge.signalOwner, ownerDocument)?.document).toBe(
+				ownerDocument,
+			);
+			expect(getNativeStreamedAuthority(bridge.signalOwner, document)).toBeUndefined();
+		} finally {
+			bridge.dispose();
+			iframe.remove();
+		}
+	});
+
+	it('rejects a document paired with another window before installing signal ingress', () => {
+		const iframe = document.createElement('iframe');
+		document.body.append(iframe);
+		const foreignDocument = iframe.contentDocument!;
+		const target = foreignDocument.defaultView as unknown as Record<string, unknown>;
+		const script = earlySignalBootstrapScript().match(/<script[^>]*>([\s\S]*)<\/script>/)![1];
+		new Function('globalThis', 'document', script)(target, foreignDocument);
+		let bridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
+		try {
+			expect(() => {
+				bridge = bootstrapStreamedSignalHydration({
+					buildId: 'mismatch',
+					documentId: 'mismatch',
+					target,
+					document,
+				});
+			}).toThrow(TypeError);
+		} finally {
+			bridge?.dispose();
+			iframe.remove();
+		}
+	});
+
+	it('refuses an explicit viewless document without a transport target', () => {
+		const foreignDocument = document.implementation.createHTMLDocument('No window');
+		expect(() =>
+			bootstrapStreamedSignalHydration({
+				buildId: 'foreign',
+				documentId: 'viewless',
+				document: foreignDocument,
+			}),
+		).toThrow(TypeError);
+	});
+
+	it('associates default signal ownership and early edits with the explicit foreign document', () => {
+		const foreignDocument = document.implementation.createHTMLDocument('Foreign signals');
+		const target = {
+			__octaneStreamedSignalSelections: { version: 1, identities: [], register() {} },
+		};
+		const foreign = bootstrapStreamedSignalHydration({
+			buildId: 'foreign',
+			documentId: 'foreign-input',
+			document: foreignDocument,
+			target,
+		});
+		const ambient = bootstrapStreamedSignalHydration({
+			buildId: 'ambient',
+			documentId: 'ambient-input',
+			target: { __octaneStreamedSignalSelections: { version: 1, identities: [], register() {} } },
+		});
+		try {
+			expect(foreign.signalOwner).not.toBe(ambient.signalOwner);
+			for (const [ownerDocument, value] of [
+				[document, 'ambient'],
+				[foreignDocument, 'foreign'],
+			] as const) {
+				const input = ownerDocument.createElement('input');
+				input.setAttribute(
+					SIGNAL_CONTROL_ATTR,
+					JSON.stringify([1, foreign.signalOwner.scopeKey, [['', 'draft', 'value']]]),
+				);
+				input.value = value;
+				publishHydrationControlSignalValues(input, 1);
+			}
+			expect(
+				readEarlySignalValue(foreign.signalOwner, { scope: 'document', nodeKey: 'draft' })?.value,
+			).toBe('foreign');
+			expect(getNativeStreamedAuthority(foreign.signalOwner, foreignDocument)?.document).toBe(
+				foreignDocument,
+			);
+			expect(getNativeStreamedAuthority(foreign.signalOwner, document)).toBeUndefined();
+		} finally {
+			foreign.dispose();
+			ambient.dispose();
+		}
+		expect(getNativeStreamedAuthority(foreign.signalOwner, foreignDocument)).toBeUndefined();
+	});
+
 	it('retains host identity when ingress freezes, and refuses it after owner retirement', () => {
 		const owner = { scopeKey: 'native-authority-lifecycle' };
 		const target = {

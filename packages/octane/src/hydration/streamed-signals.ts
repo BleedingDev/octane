@@ -33,6 +33,8 @@ import {
 } from '../streamed-signals-protocol.js';
 import {
 	installStreamedRendererGlobal,
+	assertStreamedRendererDocument,
+	streamedRendererDocument,
 	readStreamedMailboxAuthorities,
 	streamedRendererAuthorityKey,
 	type StreamedRendererAuthority,
@@ -74,24 +76,36 @@ interface StreamedSelectionRouter {
 	readonly admitted: Set<string>;
 	readonly refused: Set<string>;
 	exhausted: boolean;
-	removed: boolean;
 	pendingBytes: number;
-	restore(): void;
 }
 
 const streamedSelectionRouters = /* @__PURE__ */ new WeakMap<
-	Record<string, unknown>,
-	StreamedSelectionRouter
+	Document,
+	WeakMap<Record<string, unknown>, StreamedSelectionRouter>
 >();
 
+const streamedSelectionMailboxDocuments = /* @__PURE__ */ new WeakMap<object, Document>();
+
+function assertSelectionDocument(ownerDocument: Document, early: unknown): void {
+	if (early !== null && typeof early === 'object') {
+		const claimed = streamedSelectionMailboxDocuments.get(early);
+		if (claimed !== undefined && claimed !== ownerDocument) throw new Error(formatClientError(124));
+	}
+}
+
 function installSelectionLease(
+	ownerDocument: Document,
 	target: Record<string, unknown>,
 	early: EarlyStreamedSignalSelections,
 	authority: StreamedRendererAuthority,
 	register: (identity: StreamFrameIdentity) => void,
 ) {
+	assertSelectionDocument(ownerDocument, early);
 	const key = streamedRendererAuthorityKey(authority);
-	let router = streamedSelectionRouters.get(target);
+	let documentRouters = streamedSelectionRouters.get(ownerDocument);
+	if (documentRouters === undefined)
+		streamedSelectionRouters.set(ownerDocument, (documentRouters = new WeakMap()));
+	let router = documentRouters.get(target);
 	if (
 		router !== undefined &&
 		(router.early !== early || router.leases.has(key) || router.retired.has(key))
@@ -107,7 +121,6 @@ function installSelectionLease(
 			throw new Error(formatClientError(268));
 		const leases = new Map<string, (identity: StreamFrameIdentity) => void>();
 		const retired = new Set<string>();
-		const originalRegister = early.register;
 		const created: StreamedSelectionRouter = {
 			early,
 			leases,
@@ -115,15 +128,9 @@ function installSelectionLease(
 			admitted,
 			refused,
 			exhausted: history.exhausted,
-			removed: false,
 			pendingBytes: initialBytes,
-			restore() {
-				created.removed = true;
-				if (early.register === route) early.register = originalRegister;
-			},
 		};
 		const route = (candidate: unknown) => {
-			if (created.removed) return;
 			if (!isStreamFrameIdentity(candidate)) throw new Error(formatClientError(269));
 			const candidateKey = streamedRendererAuthorityKey(candidate);
 			const lease = leases.get(candidateKey);
@@ -182,8 +189,9 @@ function installSelectionLease(
 			created.pendingBytes += bytes + authorityBytes;
 		};
 		early.register = route;
+		streamedSelectionMailboxDocuments.set(early, ownerDocument);
 		router = created;
-		streamedSelectionRouters.set(target, router);
+		documentRouters.set(target, router);
 	}
 	if ((router.exhausted && !router.admitted.has(key)) || router.refused.has(key))
 		throw new Error(formatClientError(268));
@@ -229,19 +237,8 @@ function installSelectionLease(
 				installed.retired.add(key);
 				installed.pendingBytes += retirementBytes;
 			}
-			// The retired mailbox still fences late calls through its own closure.
-			// Keep failed authority markers for this mailbox lifetime too; dropping
-			// them would let a later join mistake incomplete history for no history.
-			if (
-				installed.leases.size === 0 &&
-				early.identities.length === 0 &&
-				installed.refused.size === 0 &&
-				!installed.exhausted &&
-				streamedSelectionRouters.get(target) === installed
-			) {
-				streamedSelectionRouters.delete(target);
-				installed.restore();
-			}
+			// Keep bounded retirement markers for this document and target: late script chunks
+			// must not recreate early history after the final publisher leaves.
 		},
 	};
 }
@@ -249,6 +246,11 @@ function installSelectionLease(
 export interface StreamedSignalHydrationOptions extends StreamedRendererDeliveryOptions {
 	readonly buildId: string;
 	readonly documentId: string;
+	/**
+	 * Actual DOM document owning this ingress and its signal cells. Its window
+	 * supplies the default target; a viewless document requires an explicit target.
+	 */
+	readonly document?: Document;
 	/** Custom authority; pass it to hydrateRoot or use runWithSignalOwner in behavior callbacks. */
 	readonly signalOwner?: SignalOwnerIdentity;
 	/**
@@ -307,8 +309,17 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 	if (!options.buildId || !options.documentId) {
 		throw new TypeError(formatClientError(266));
 	}
-	const target = options.target ?? (globalThis as Record<string, unknown>);
-	const signalOwner = options.signalOwner ?? documentSignalOwner(document);
+	const target =
+		options.target ??
+		(options.document === undefined
+			? (globalThis as Record<string, unknown>)
+			: (options.document.defaultView as unknown as Record<string, unknown> | null));
+	if (target === null) throw new TypeError(formatClientError(267));
+	const ownerDocument = streamedRendererDocument(target, options.document);
+	if (ownerDocument === undefined) throw new TypeError(formatClientError(267));
+	assertSelectionDocument(ownerDocument, target[STREAMED_SIGNAL_SELECTIONS]);
+	assertStreamedRendererDocument(ownerDocument, target);
+	const signalOwner = options.signalOwner ?? documentSignalOwner(ownerDocument);
 	const receiver = createReceiver({
 		buildId: options.buildId,
 		documentId: options.documentId,
@@ -386,7 +397,7 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 	let initialized = false;
 	try {
 		// Reserve the exact authority before initializing state or touching mailboxes.
-		selectionLease = installSelectionLease(target, early, authority, register);
+		selectionLease = installSelectionLease(ownerDocument, target, early, authority, register);
 		uninstallOwnerActivator = installStreamedSignalOwnerActivator((owner) => {
 			if (disposed || !('documentOwner' in owner) || documentOwner(owner) !== signalOwner) return;
 			if (owners.has(owner.instanceKey)) return;
@@ -406,7 +417,7 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 			);
 			initialized = true;
 		}
-		registerSignalOwnerDocument(signalOwner, document);
+		registerSignalOwnerDocument(signalOwner, ownerDocument, target);
 		enableSignalDocument();
 		selectionLease.drain();
 	} catch (error) {
@@ -457,7 +468,7 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 			releaseAuthority = registerNativeStreamedAuthority(
 				signalOwner,
 				authority,
-				document,
+				ownerDocument,
 				() => lifecycle.retired,
 			);
 		} catch (error) {

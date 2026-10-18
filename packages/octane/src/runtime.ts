@@ -19433,6 +19433,7 @@ export function publisherBoundary<P>(
 									? bootstrapStreamedSignalHydration({
 											buildId: parentAuthority.buildId,
 											documentId: parentAuthority.documentId,
+											document: state.wrapper.ownerDocument,
 											signalOwner: state.idState.dataOwner!,
 											target: state.wrapper.ownerDocument.defaultView as unknown as Record<
 												string,
@@ -19615,6 +19616,7 @@ export function externalSnapshotBoundary<P>(
 							? bootstrapStreamedSignalHydration({
 									buildId: authority.publisherBuildId,
 									documentId,
+									document,
 									signalOwner: state.idState.dataOwner!,
 									target: document.defaultView as unknown as Record<string, unknown>,
 								})
@@ -53186,7 +53188,9 @@ function hydrateRootWithOutputHandler(
 	assertValidRootContainer(container);
 	// Leases, presentations and streamed arms below outlive the adoption pass.
 	installHydrationDriver();
-	startEarlySignalHydration(installEarlyControlBridge);
+	const ownerDocument =
+		container.nodeType === 9 ? (container as Document) : container.ownerDocument!;
+	startEarlySignalHydration(ownerDocument, installEarlyControlBridge);
 	let body: ComponentBody;
 	let props: any;
 	let rootKey: any = null;

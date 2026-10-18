@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as Client from 'octane';
 import * as Server from 'octane/server';
 import { prerender } from '../../src/runtime.server.js';
@@ -27,6 +27,13 @@ const Theme = createContext({ title: 'default' });
 const Other = createContext('other default');
 const authority = { publisherBuildId: 'remote-build', runtimeABI: 1 as const };
 const releases: (() => void)[] = [];
+
+// Independent responses need unique wire authority, even when jsdom reuses its Window.
+let responseNumber = 0;
+beforeEach(() => {
+	responseNumber++;
+});
+const responseDocumentId = (label: string) => `${label}-${responseNumber}`;
 
 afterEach(() => {
 	for (const release of releases.splice(0)) release();
@@ -330,7 +337,7 @@ describe('external snapshot admission and selected context codecs', () => {
 		const failed = await prerender(
 			app,
 			{},
-			{ externalSnapshots: { documentId: 'first' }, timeoutMs: 1000 },
+			{ externalSnapshots: { documentId: responseDocumentId('first') }, timeoutMs: 1000 },
 		);
 		expect(failed.html).toContain('publisher pending');
 		expect(signals[0]!.aborted).toBe(true);
@@ -338,7 +345,7 @@ describe('external snapshot admission and selected context codecs', () => {
 		const recovered = await prerender(
 			app,
 			{},
-			{ externalSnapshots: { documentId: 'second' }, timeoutMs: 1000 },
+			{ externalSnapshots: { documentId: responseDocumentId('second') }, timeoutMs: 1000 },
 		);
 		expect(recovered.html).toContain('healthy publisher');
 		expect(signals).toHaveLength(2);
@@ -420,7 +427,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			const cHost = pair(host, '/host/RetryHistory.tsx', dev, {
 				'./remote': { Boundary: C },
 			}).client;
-			const documentId = 'retry-history-' + hostLease;
+			const documentId = responseDocumentId('retry-history-' + hostLease);
 			const options = { externalSnapshots: { documentId } };
 			const container = document.createElement('div');
 			container.innerHTML = (await prerender(sHost['App'], { gate: {} }, options)).html;
@@ -504,7 +511,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			const cHost = pair(host, hostId, dev, {
 				'./remote': { Boundary: C },
 			}).client;
-			const documentId = 'committed-history-' + mode;
+			const documentId = responseDocumentId('committed-history-' + mode);
 			const options = { externalSnapshots: { documentId } };
 			const gate = { pending: undefined as Promise<void> | undefined };
 			const container = document.createElement('div');
@@ -597,7 +604,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		const result = await prerender(
 			host['App'],
 			{ mode: 'visible' },
-			{ externalSnapshots: { documentId: 'jsx-activity-history' } },
+			{ externalSnapshots: { documentId: responseDocumentId('jsx-activity-history') } },
 		);
 		const container = document.createElement('div');
 		container.innerHTML = result.html;
@@ -647,7 +654,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			await prerender(
 				S,
 				{ label: 'Wrapped', initial: 4 },
-				{ externalSnapshots: { documentId: 'publisher-provider' } },
+				{ externalSnapshots: { documentId: responseDocumentId('publisher-provider') } },
 			)
 		).html;
 		activateStreamedMarkup(container);
@@ -665,7 +672,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			app,
 			{ context: 'publisher local' },
 			{
-				externalSnapshots: { documentId: 'publisher-provider' },
+				externalSnapshots: { documentId: responseDocumentId('publisher-provider') },
 				onRecoverableError: (error) => errors.push(error),
 				onUncaughtError: (error) => errors.push(error),
 			},
@@ -740,7 +747,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		const rendered = await prerender(
 			serverApp,
 			{ title: 'server' },
-			{ externalSnapshots: { documentId: 'document-a' } },
+			{ externalSnapshots: { documentId: responseDocumentId('document-a') } },
 		);
 		const container = document.createElement('div');
 		container.innerHTML = rendered.html;
@@ -755,7 +762,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			clientApp,
 			{ title: 'server' },
 			{
-				externalSnapshots: { documentId: 'document-a' },
+				externalSnapshots: { documentId: responseDocumentId('document-a') },
 				onRecoverableError: (error) => errors.push(error),
 				onUncaughtError: (error) => errors.push(error),
 			},
@@ -787,7 +794,9 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		const snapshot = vi.fn(transport(server['Remote']));
 		const S = Server.externalSnapshotBoundary({ authority, component: server['Remote'], snapshot });
 		const C = Client.externalSnapshotBoundary({ authority, component: client['Remote'], snapshot });
-		const options = { externalSnapshots: { documentId: 'external-text-value' } };
+		const options = {
+			externalSnapshots: { documentId: responseDocumentId('external-text-value') },
+		};
 		const props = { label: 'Count', initial: 3 };
 		const container = document.createElement('div');
 		container.innerHTML = (await prerender(S, props, options)).html;
@@ -866,7 +875,9 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 				'./contexts': { Theme },
 				'./remote': { Remote: clientRemote },
 			}).client;
-			const options = { externalSnapshots: { documentId: 'outer-lazy-' + context } };
+			const options = {
+				externalSnapshots: { documentId: responseDocumentId('outer-lazy-' + context) },
+			};
 			const container = document.createElement('div');
 			container.innerHTML = (await prerender(serverApp['App'], { title: 'server' }, options)).html;
 			activateStreamedMarkup(container);
@@ -960,7 +971,9 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			'./contexts': { Theme },
 			'./remote': { Remote: clientRemote },
 		}).client;
-		const options = { externalSnapshots: { documentId: 'outer-lazy-context-gap' } };
+		const options = {
+			externalSnapshots: { documentId: responseDocumentId('outer-lazy-context-gap') },
+		};
 		const container = document.createElement('div');
 		container.innerHTML = (await prerender(serverApp['App'], { title: 'server' }, options)).html;
 		activateStreamedMarkup(container);
@@ -1054,8 +1067,13 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			Client.createElement(C, { label: 'A', initial: 1 }),
 			Client.createElement(C, { label: 'B', initial: 7 }),
 		];
-		const html = (await prerender(sApp, {}, { externalSnapshots: { documentId: 'siblings' } }))
-			.html;
+		const html = (
+			await prerender(
+				sApp,
+				{},
+				{ externalSnapshots: { documentId: responseDocumentId('siblings') } },
+			)
+		).html;
 		const container = document.createElement('div');
 		container.innerHTML = html;
 		activateStreamedMarkup(container);
@@ -1066,7 +1084,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			container,
 			cApp,
 			{},
-			{ externalSnapshots: { documentId: 'siblings' } },
+			{ externalSnapshots: { documentId: responseDocumentId('siblings') } },
 		);
 		try {
 			await Client.act(async () => {});
@@ -1095,7 +1113,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		const C = Client.externalSnapshotBoundary({ authority, component: client['Remote'], snapshot });
 		const container = document.createElement('div');
 		container.innerHTML = (
-			await prerender(S, {}, { externalSnapshots: { documentId: 'history' } })
+			await prerender(S, {}, { externalSnapshots: { documentId: responseDocumentId('history') } })
 		).html;
 		activateStreamedMarkup(container);
 		document.body.append(container);
@@ -1106,7 +1124,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			C,
 			{},
 			{
-				externalSnapshots: { documentId: 'history' },
+				externalSnapshots: { documentId: responseDocumentId('history') },
 				onRecoverableError: (error) => errors.push(error),
 				onUncaughtError: (error) => errors.push(error),
 			},
@@ -1140,7 +1158,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			await prerender(
 				S,
 				{ label: 'admitted', initial: 1 },
-				{ externalSnapshots: { documentId: 'browser-admission' } },
+				{ externalSnapshots: { documentId: responseDocumentId('browser-admission') } },
 			)
 		).html;
 		activateStreamedMarkup(container);
@@ -1151,7 +1169,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			C,
 			{ label: 'admitted', initial: 1 },
 			{
-				externalSnapshots: { documentId: 'browser-admission' },
+				externalSnapshots: { documentId: responseDocumentId('browser-admission') },
 				onUncaughtError: (error) => errors.push(error),
 			},
 		);
@@ -1178,7 +1196,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			const result = await prerender(
 				sHost['App'],
 				{},
-				{ externalSnapshots: { documentId: 'ids-' + fresh } },
+				{ externalSnapshots: { documentId: responseDocumentId('ids-' + fresh) } },
 			);
 			const container = document.createElement('div');
 			container.innerHTML = result.html;
@@ -1196,7 +1214,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 				container,
 				cHost['App'],
 				{},
-				{ externalSnapshots: { documentId: 'ids-' + fresh } },
+				{ externalSnapshots: { documentId: responseDocumentId('ids-' + fresh) } },
 			);
 			try {
 				await Client.act(async () => {});
@@ -1252,7 +1270,9 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 				'./contexts': { Theme },
 				'./remote': { Local: client['Remote'], A: make('a', 'client'), B: make('b', 'client') },
 			}).client;
-			const options = { externalSnapshots: { documentId: 'globals-' + removed } };
+			const options = {
+				externalSnapshots: { documentId: responseDocumentId('globals-' + removed) },
+			};
 			const html = (await prerender(sHost['App'], { a: true, b: true, title: 'server' }, options))
 				.html;
 			const container = document.createElement('div');
@@ -1318,7 +1338,10 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		const result = await prerender(
 			hostServer['App'],
 			{ title: 'a title', second: true },
-			{ externalSnapshots: { documentId: 'head-doc' }, headChannel: 'separate' },
+			{
+				externalSnapshots: { documentId: responseDocumentId('head-doc') },
+				headChannel: 'separate',
+			},
 		);
 		document.head.innerHTML = result.css + result.head;
 		const container = document.createElement('div');
@@ -1336,7 +1359,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			hostClient['App'],
 			{ title: 'a title', second: true },
 			{
-				externalSnapshots: { documentId: 'head-doc' },
+				externalSnapshots: { documentId: responseDocumentId('head-doc') },
 				onRecoverableError: (error) => errors.push(error),
 				onUncaughtError: (error) => errors.push(error),
 			},
@@ -1367,7 +1390,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		const snapshot = transport(server['Remote']);
 		const S = Server.externalSnapshotBoundary({ authority, component: server['Remote'], snapshot });
 		const C = Client.externalSnapshotBoundary({ authority, component: client['Remote'], snapshot });
-		const options = { externalSnapshots: { documentId: 'recover-head' } };
+		const options = { externalSnapshots: { documentId: responseDocumentId('recover-head') } };
 		const result = await prerender(S, {}, { ...options, headChannel: 'separate' });
 		if (result.head === undefined) throw new Error('Separate head output is required.');
 		document.head.innerHTML = result.head;
@@ -1436,7 +1459,9 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		const client = pair(source, '/host/RecoveryControl.tsrx', dev, {
 			'./remote': { Boundary: C },
 		}).client;
-		const options = { externalSnapshots: { documentId: 'structural-recovery-control' } };
+		const options = {
+			externalSnapshots: { documentId: responseDocumentId('structural-recovery-control') },
+		};
 		const container = document.createElement('div');
 		container.innerHTML = (await prerender(server['App'], {}, options)).html;
 		activateStreamedMarkup(container);
@@ -1511,7 +1536,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			sApp,
 			{},
 			{
-				externalSnapshots: { documentId: 'late-style' },
+				externalSnapshots: { documentId: responseDocumentId('late-style') },
 				headChannel: 'separate',
 				onHeadReady: (head) => heads.push(head),
 				onError: (error) => serverErrors.push(error),
@@ -1548,7 +1573,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			container,
 			cApp,
 			{},
-			{ externalSnapshots: { documentId: 'late-style' } },
+			{ externalSnapshots: { documentId: responseDocumentId('late-style') } },
 		);
 		try {
 			await Client.act(async () => {});
@@ -1660,7 +1685,7 @@ it.each([
 			});
 		const identity = {
 			buildId: 'adapter-lazy-build',
-			documentId: 'adapter-lazy-' + boundary + '-' + delivery,
+			documentId: responseDocumentId('adapter-lazy-' + boundary + '-' + delivery),
 		};
 		const options = {
 			externalSnapshots: { documentId: identity.documentId },
@@ -1752,8 +1777,6 @@ it.each([
 			bridge?.dispose();
 			stream?.abort();
 			container.remove();
-			Reflect.deleteProperty(globalThis, '__octaneStreamedSignalSelections');
-			Reflect.deleteProperty(globalThis, '__octaneStreamedRenderer');
 		}
 	},
 );
@@ -1875,7 +1898,7 @@ export function Remote(props: { label: string }) {
 		const clientApp = contexts ? ClientWorkerApplication : clientRemote;
 		const identity = {
 			buildId: 'forwarded-host',
-			documentId: 'forwarded-external-document-' + contexts,
+			documentId: responseDocumentId('forwarded-external-document-' + contexts),
 		};
 		const errors: unknown[] = [];
 		const collector = createPipeableCollector();
@@ -1971,7 +1994,7 @@ it.each(['unmount', 'retire', 'resume'] as const)(
 			component: modules.client['Remote'],
 			snapshot,
 		});
-		const documentId = 'pending-native-' + ending;
+		const documentId = responseDocumentId('pending-native-' + ending);
 		const container = document.createElement('div');
 		container.innerHTML = (await prerender(server, {}, { externalSnapshots: { documentId } })).html;
 		activateStreamedMarkup(container);
@@ -2033,6 +2056,89 @@ it.each(['unmount', 'retire', 'resume'] as const)(
 			lifecycle.dispose();
 			bridge.dispose();
 			container.remove();
+		}
+	},
+);
+
+it.each(['ambient', 'iframe'] as const)(
+	'joins streamed external publishers in their actual %s document',
+	async (realm) => {
+		const modules = pair(
+			`import {useState,publisherBoundary} from 'octane'; function Counter(){const [count,setCount]=useState(3); return <button onClick={()=>setCount(count+1)}>{count}</button>;} const Native=publisherBoundary(Counter,{publisherKey:'foreign-nested'}); export function Remote(){return <Native/>;}`,
+			'/remote/ForeignDocument.tsx',
+			false,
+		);
+		const snapshot = transport(modules.server.Remote);
+		const server = Server.externalSnapshotBoundary({
+			authority,
+			component: modules.server.Remote,
+			snapshot,
+		});
+		const client = Client.externalSnapshotBoundary({
+			authority,
+			component: modules.client.Remote,
+			snapshot,
+		});
+		const iframe = realm === 'iframe' ? document.createElement('iframe') : undefined;
+		if (iframe) document.body.append(iframe);
+		const ownerDocument = iframe?.contentDocument ?? document;
+		const target = ownerDocument.defaultView as unknown as Record<string, unknown>;
+		const container = ownerDocument.createElement('div');
+		ownerDocument.body.append(container);
+		const identity = {
+			buildId: 'foreign-host',
+			documentId: responseDocumentId('external-' + realm),
+		};
+		container.innerHTML =
+			Server.earlySignalBootstrapScript() +
+			(
+				await prerender(
+					server,
+					{},
+					{
+						externalSnapshots: { documentId: identity.documentId },
+						streamedSignals: identity,
+						earlySignalBootstrap: 'external',
+					},
+				)
+			).html;
+		for (const script of Array.from(container.querySelectorAll('script'))) {
+			if (script.type === 'application/json') continue;
+			new Function('globalThis', 'document', script.textContent!)(target, ownerDocument);
+			script.remove();
+		}
+		const button = container.querySelector('button');
+		const bridge = bootstrapStreamedSignalHydration({
+			...identity,
+			document: ownerDocument,
+			target,
+		});
+		const errors: unknown[] = [];
+		const root = Client.hydrateRoot(
+			container,
+			client,
+			{},
+			{
+				signalOwner: bridge.signalOwner,
+				externalSnapshots: { documentId: identity.documentId },
+				onUncaughtError: (error) => errors.push(error),
+				onRecoverableError: (error) => errors.push(error),
+			},
+		);
+		try {
+			await Client.act(async () => {});
+			expect(errors).toEqual([]);
+			expect(container.querySelector('button')).toBe(button);
+			await Client.act(() => button!.click());
+			expect(button!.textContent).toBe('4');
+			expect(errors).toEqual([]);
+			root.unmount();
+			expect(container.querySelector('button')).toBeNull();
+		} finally {
+			root.unmount();
+			bridge.dispose();
+			container.remove();
+			iframe?.remove();
 		}
 	},
 );

@@ -8,9 +8,10 @@ import * as ServerSignals from 'octane/signals/server';
 import { formatClientError } from '../../src/error-codes.client.generated.js';
 import { PUBLISHER_BOUNDARY_ATTR } from '../../src/publisher-boundary-protocol.js';
 import { loadCompiledFixtureSource } from '../_server-fixture.js';
-import { activateStreamedMarkup, resetStreamRuntimeGlobals } from '../_server-stream.js';
+import { resetStreamRuntimeGlobals } from '../_server-stream.js';
 
 const publisherKey = 'document-bound-publisher';
+const documentRealms = ['ambient', 'iframe'] as const;
 const streamedSignals = { buildId: 'publisher-document-build', documentId: 'publisher-document' };
 const source = `import {useId} from 'octane';
 import {useSignal$} from 'octane/signals/client';
@@ -44,7 +45,7 @@ afterEach(() => {
 });
 
 describe('native publisher document authority', () => {
-	it('adopts genuine native DOM only in the bootstrapped document', () => {
+	it.each(documentRealms)('adopts DOM only in its bootstrapped %s document', (realm) => {
 		const modules = pair();
 		const ServerBoundary = Server.publisherBoundary(modules.server.Remote, { publisherKey });
 		const ClientBoundary = Client.publisherBoundary(modules.client.Remote, { publisherKey });
@@ -53,7 +54,9 @@ describe('native publisher document authority', () => {
 			{ initial: 7, onExecute() {} },
 			{ streamedSignals, earlySignalBootstrap: 'external' },
 		);
-		const documentA = document;
+		const iframe = realm === 'iframe' ? document.createElement('iframe') : undefined;
+		if (iframe) document.body.append(iframe);
+		const documentA = iframe?.contentDocument ?? document;
 		const documentB = documentA.implementation.createHTMLDocument('Copied native publisher');
 		const containerA = documentA.createElement('div');
 		const containerB = documentB.createElement('div');
@@ -84,9 +87,21 @@ describe('native publisher document authority', () => {
 		let bridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 		try {
 			documentA.head.innerHTML = Server.earlySignalBootstrapScript();
-			activateStreamedMarkup(documentA.head);
-			activateStreamedMarkup(containerA);
-			bridge = bootstrapStreamedSignalHydration(streamedSignals);
+			for (const parent of [documentA.head, containerA]) {
+				for (const script of Array.from(parent.querySelectorAll('script'))) {
+					if (script.type === 'application/json') continue;
+					new Function('globalThis', 'document', script.textContent!)(
+						documentA.defaultView ?? globalThis,
+						documentA,
+					);
+					script.remove();
+				}
+			}
+			bridge = bootstrapStreamedSignalHydration({
+				...streamedSignals,
+				document: documentA,
+				target: documentA.defaultView as unknown as Record<string, unknown>,
+			});
 			const authorityOptions = {
 				signalOwner: bridge.signalOwner,
 				externalSnapshots: { documentId: streamedSignals.documentId },
@@ -135,6 +150,7 @@ describe('native publisher document authority', () => {
 			bridge?.dispose();
 			containerB.remove();
 			containerA.remove();
+			iframe?.remove();
 		}
 	});
 
