@@ -4,6 +4,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { describe, expect, it } from 'vitest';
 import {
+	getServerOutput,
 	reserveFreePort,
 	startServerOnFreePort,
 	stopServer,
@@ -117,6 +118,31 @@ describe('website integration process lifecycle', () => {
 		} finally {
 			server.closeAllConnections();
 			await new Promise<void>((resolve) => server.close(() => resolve()));
+			await stopServer(child);
+		}
+	});
+
+	it('retains bounded post-start server errors without retrying the failed request', async () => {
+		const { port, release } = await reserveFreePort();
+		await release();
+		const child = spawnFixture(`
+			import { createServer } from 'node:http';
+			let failures = 0;
+			createServer((request, response) => {
+				if (request.url === '/ready') return response.writeHead(204).end();
+				process.stderr.write('x'.repeat(70 * 1024) + 'late SSR sentinel');
+				response.writeHead(500).end('SSR failed ' + ++failures);
+			}).listen(${port}, '127.0.0.1');
+		`);
+		try {
+			await waitForServer(child, `http://127.0.0.1:${port}/ready`, 5_000);
+			const response = await fetch(`http://127.0.0.1:${port}/failed`);
+			expect(response.status).toBe(500);
+			expect(await response.text()).toBe('SSR failed 1');
+			await expect.poll(() => getServerOutput(child)).toContain('late SSR sentinel');
+			expect(getServerOutput(child).length).toBeLessThanOrEqual(64 * 1024);
+			expect(getServerOutput(undefined)).toBe('');
+		} finally {
 			await stopServer(child);
 		}
 	});
