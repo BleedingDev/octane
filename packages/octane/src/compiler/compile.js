@@ -17802,19 +17802,24 @@ function canonicalHotSignalComponent(ctx, bindingKey, wrapper, origin) {
 function hotComponentIdentityInitializer(ctx, node, value) {
 	if (!ctx.hmr || !ctx.filename) return value;
 	const identity = JSON.stringify([ctx.filename.replace(/\\/g, '/'), 'component', node.id.name]);
+	const stamp = b.call(
+		b.member(b.id('Object'), 'assign'),
+		value,
+		b.object([
+			b.prop(
+				'init',
+				b.call(b.member(b.id('Symbol'), 'for'), b.literal('octane.hmr.identity')),
+				b.literal(identity),
+				true,
+			),
+		]),
+	);
+	// Earlier module code can make a hoisted declaration non-extensible.
+	// Fresh initializers cannot have escaped before this stamp.
 	return inheritOriginLoc(
-		b.call(
-			b.member(b.id('Object'), 'assign'),
-			value,
-			b.object([
-				b.prop(
-					'init',
-					b.call(b.member(b.id('Symbol'), 'for'), b.literal('octane.hmr.identity')),
-					b.literal(identity),
-					true,
-				),
-			]),
-		),
+		value.type === 'Identifier'
+			? b.conditional(b.call(b.member(b.id('Object'), 'isExtensible'), value), stamp, value)
+			: stamp,
 		node,
 	);
 }
