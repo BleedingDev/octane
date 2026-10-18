@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { createOctaneSourcePlugin } from './packed-source-compiler.mjs';
+import { selectPackedPackages } from './package-pack-selection.mjs';
 import { checkPackedValdiContract } from './check-packed-valdi-contract.mjs';
 import {
 	cpSync,
@@ -46,9 +47,11 @@ import {
 	NATIVE_GRAPH_FORBIDDEN_MODULE,
 	PACKED_COMMONJS_CONSUMER_PACKAGES,
 	PACKED_JAVASCRIPT_CONSUMER_PACKAGES,
+	PACKED_RUNTIME_CONSUMER_PACKAGES,
 	PACKED_TSRX_CONSUMER_PROJECTS,
 	PACKED_TSRX_CONSUMER_ESRAP_VERSION,
 	PACKED_TSRX_BROWSER_AMBIENT_FILE,
+	PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS,
 	PACKED_TSRX_LANE_SENTINEL_FILE,
 	PACKED_TSRX_LANE_SENTINEL_PROJECT,
 	PACKED_TSRX_PROBE_PACKAGES,
@@ -1443,9 +1446,12 @@ function validatePackedTsrxConsumer(tempRoot, archives, packedFiles, packedManif
 				// MDX's server provider belongs to the full Node lane above. Keep its
 				// client source checked here; an actual client import of server code
 				// still enters the TypeScript program despite this root exclusion.
-				sourceExcludeFiles: resolvePackedTsrxSourceDirectories(consumerDirectory, [
-					'@octanejs/mdx',
-				]).map((directory) => `${directory}/src/server.tsrx`),
+				sourceExcludeFiles: PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS.flatMap(
+					({ packageName, sourceFile }) =>
+						resolvePackedTsrxSourceDirectories(consumerDirectory, [packageName]).map(
+							(directory) => `${directory}/${sourceFile}`,
+						),
+				),
 			},
 			consumerTsrxFiles: [],
 			sourcePackages: [...browserSourceConsumerSpecifiers.keys()],
@@ -2098,6 +2104,21 @@ try {
 	);
 }
 
+// Focus the package inventory, retaining every existing consumer scenario and
+// its normal packed inputs rather than replacing acceptance with a smoke test.
+const packagesToPack = selectPackedPackages(process.argv.slice(2), packages, [
+	...PACKED_RUNTIME_CONSUMER_PACKAGES,
+	...PACKED_JAVASCRIPT_CONSUMER_PACKAGES,
+	...PACKED_TSRX_PROBE_PACKAGES,
+	...PACKED_STRICT_BROWSER_SOURCE_PACKAGES,
+	...packedExampleCanaries.flatMap((canary) => canary.packages),
+	'@octanejs/rspack-plugin',
+	'@octanejs/lynx',
+	'@octanejs/rspeedy-plugin',
+]);
+if (process.argv.length > 2 && process.env.OCTANE_PACK_ARTIFACT_DIR) {
+	throw new Error('release cohort artifact retention requires the full package inventory');
+}
 const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'octane-pack-check-'));
 const failures = [];
 const packedArchives = new Map();
@@ -2106,7 +2127,7 @@ const packedManifests = new Map();
 let rawTsrxFiles = 0;
 
 try {
-	for (const pkg of packages) {
+	for (const pkg of packagesToPack) {
 		const outputDirectory = path.join(tempRoot, pkg.dir);
 		mkdirSync(outputDirectory, { recursive: true });
 		try {
@@ -2215,5 +2236,5 @@ if (failures.length) {
 }
 
 console.log(
-	`validated ${packages.length} package tarball(s); preserved ${rawTsrxFiles} raw TSRX source file(s).`,
+	`validated ${packagesToPack.length} package tarball(s); preserved ${rawTsrxFiles} raw TSRX source file(s).${process.argv.length > 2 ? ` Focused package: ${process.argv[3]}; source binding enrollment limited to the focused closure (${packedTsrxConsumerPlan.sourceConsumerSpecifiers.size} binding packages).` : ''}`,
 );

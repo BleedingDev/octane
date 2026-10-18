@@ -102,7 +102,7 @@ export function createPackedJavascriptConsumerManifest(archiveSpecs) {
 	};
 }
 
-const packedRuntimeConsumerPackages = [
+export const PACKED_RUNTIME_CONSUMER_PACKAGES = [
 	'@octanejs/alien-signals',
 	'@octanejs/apollo-client',
 	'@octanejs/dropzone',
@@ -118,7 +118,7 @@ export function createPackedRuntimeConsumerDependencies(manifests, archiveSpecs)
 	const dependencies = {};
 	for (const packageName of findPackedWorkspaceDependencyClosure(
 		manifests,
-		packedRuntimeConsumerPackages,
+		PACKED_RUNTIME_CONSUMER_PACKAGES,
 	)) {
 		const archiveSpec = archiveSpecs[packageName];
 		if (typeof archiveSpec !== 'string' || !archiveSpec.startsWith('file:')) {
@@ -717,7 +717,12 @@ export function assertPackedTsrxLaneSentinelReported(result, label) {
 // These packages have deliberate API assertions in the hand-authored consumer
 // probes. Keep them installed even when source compilation is temporarily
 // deferred for one of them.
+export const PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS = [
+	{ packageName: '@octanejs/mdx', sourceFile: 'src/server.tsrx' },
+];
+
 export const PACKED_TSRX_PROBE_PACKAGES = [
+	...PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS.map(({ packageName }) => packageName),
 	'@octanejs/cmdk',
 	'@octanejs/input-otp',
 	'@octanejs/recharts',

@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, test } from 'node:test';
 import { NATIVE_TSC } from './octane-tsc/native.mjs';
+import { selectPackedPackages } from './package-pack-selection.mjs';
+import { getWorkspacePackages } from './workspace-packages.mjs';
 import {
 	createPackedJavascriptConsumerManifest,
 	createPackedRuntimeConsumerDependencies,
@@ -43,6 +45,7 @@ import {
 	splitPackedTsrxTypecheckOutput,
 	PACKED_TSRX_CONSUMER_PROJECTS,
 	PACKED_TSRX_BROWSER_AMBIENT_FILE,
+	PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS,
 	PACKED_TSRX_LANE_SENTINEL_FILE,
 	PACKED_TSRX_LANE_SENTINEL_PROJECT,
 	PACKED_TSRX_PROBE_PACKAGES,
@@ -51,6 +54,101 @@ import {
 } from './package-pack-canaries.mjs';
 
 import { verifyDist } from '../packages/octane/scripts/verify-dist.mjs';
+
+describe('packed package selection', () => {
+	const packages = [
+		{ name: 'octane', manifest: {} },
+		{ name: '@octanejs/compiler', manifest: {} },
+		{
+			name: '@octanejs/router',
+			manifest: {
+				peerDependencies: { octane: '*', '@octanejs/compiler': '*' },
+				dependencies: { '@octanejs/history': 'workspace:*', external: '1.0.0' },
+			},
+		},
+		{
+			name: '@octanejs/history',
+			manifest: { optionalDependencies: { '@octanejs/optional': 'workspace:*' } },
+		},
+		{ name: '@octanejs/optional', manifest: { dependencies: { '@octanejs/router': '*' } } },
+		{ name: '@octanejs/canonical-canary', manifest: { peerDependencies: { octane: '*' } } },
+		{ name: '@octanejs/unrelated', manifest: {} },
+	];
+
+	test('no arguments retain the complete canonical package inventory and order', () => {
+		assert.equal(selectPackedPackages([], packages, []), packages);
+	});
+
+	test('an exact package keeps consumer inputs and the complete workspace dependency closure', () => {
+		assert.deepEqual(
+			selectPackedPackages(['--package', '@octanejs/router'], packages, [
+				'@octanejs/canonical-canary',
+			]).map((pkg) => pkg.name),
+			packages.filter((pkg) => pkg.name !== '@octanejs/unrelated').map((pkg) => pkg.name),
+		);
+	});
+
+	for (const args of [
+		['--package'],
+		['--package', '--package'],
+		['--package', '@octanejs/router', '--package', '@octanejs/router'],
+		['--package', '@octanejs/router', '@octanejs/history'],
+		['--package=@octanejs/router'],
+		['--skip-consumers'],
+		['@octanejs/router'],
+	]) {
+		test(`rejects malformed or duplicate selection ${JSON.stringify(args)}`, () => {
+			assert.throws(() => selectPackedPackages(args, packages, []), /exactly one --package/);
+		});
+	}
+
+	test('rejects unknown, partial and wildcard package names', () => {
+		for (const name of ['@octanejs/missing', 'router', '@octanejs/*', '']) {
+			assert.throws(
+				() => selectPackedPackages(['--package', name], packages, []),
+				/unknown packable package/,
+			);
+		}
+	});
+
+	test('fails closed when a required canonical consumer input is unavailable', () => {
+		assert.throws(
+			() =>
+				selectPackedPackages(['--package', '@octanejs/router'], packages, [
+					'@octanejs/missing-canary',
+				]),
+			/unknown packable package: @octanejs\/missing-canary/,
+		);
+	});
+
+	test('the real focused router inventory resolves every canonical browser root exclusion', () => {
+		const workspacePackages = getWorkspacePackages();
+		const selected = selectPackedPackages(
+			['--package', '@octanejs/tanstack-router'],
+			workspacePackages,
+			[...PACKED_TSRX_PROBE_PACKAGES, ...PACKED_STRICT_BROWSER_SOURCE_PACKAGES],
+		);
+		const directory = mkdtempSync(path.join(tmpdir(), 'octane-focused-pack-roots-'));
+		try {
+			for (const pkg of selected) {
+				const link = path.join(directory, 'node_modules', pkg.name);
+				mkdirSync(path.dirname(link), { recursive: true });
+				symlinkSync(pkg.directory, link);
+			}
+			for (const { packageName, sourceFile } of PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS) {
+				const [relativeDirectory] = resolvePackedTsrxSourceDirectories(directory, [packageName]);
+				assert.ok(fs.statSync(path.resolve(directory, relativeDirectory, sourceFile)).isFile());
+				// Removing this input reproduces the canonical resolver's pre-check failure.
+				rmSync(path.join(directory, 'node_modules', packageName));
+				assert.throws(() => resolvePackedTsrxSourceDirectories(directory, [packageName]), {
+					code: 'ENOENT',
+				});
+			}
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+});
 
 const repositoryRequire = createRequire(import.meta.url);
 
