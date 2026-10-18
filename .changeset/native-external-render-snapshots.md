@@ -7,6 +7,8 @@ Add opt-in native external snapshot boundaries with explicit publisher and docum
 
 Carry native stylesheet resources across snapshot boundaries by href, preserving precedence, authored attributes and streaming order while deduplicating nested and sibling publishers within each document.
 
+Initialize renderer-local context providers on their first compiled DOM render, and preserve external snapshot nodes and typed input while reconciling live host context values.
+
 Add registered router render profiles and public capture, restore and disposal contracts for request-owned routing snapshots without rerunning application loaders or lifecycle hooks.
 
-Router capture requires the server-load pending-state fix in TanStack/router#8740. The current router-core 1.171.34 pin is not qualified for this feature; adopt the fixed core before publishing these APIs.
+Router capture requires the server-load pending-state fix in TanStack/router#8740. The adapter now takes router-core 1.171.38 as an exact peer so the application owns one shared core instance without a transitive archive request. Qualify the final merged core archive and its resolved identity before publishing these APIs.

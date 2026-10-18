@@ -8,7 +8,12 @@ import * as Signals from '../../src/signals/index.js';
 import { bootstrapStreamedSignalHydration } from '../../src/hydration/streamed-signals.js';
 import { createContext } from '../../src/universal-native.js';
 import { loadCompiledFixtureSource } from '../_server-fixture.js';
-import { activateStreamedMarkup, deferred, resetStreamRuntimeGlobals } from '../_server-stream.js';
+import {
+	activateStreamedMarkup,
+	createPipeableCollector,
+	deferred,
+	resetStreamRuntimeGlobals,
+} from '../_server-stream.js';
 import {
 	captureExternalSnapshotContexts,
 	createExternalSnapshotRequest,
@@ -42,10 +47,10 @@ function transport(
 		? C
 		: never,
 ) {
-	return async (request, signal?: AbortSignal) => {
+	return async (request: Server.ExternalSnapshotRequest, signal?: AbortSignal) => {
 		const prepared = await Server.prepareExternalSnapshotRequest(
 			Server.serializeExternalSnapshotRequest(request),
-			{ authority, signal },
+			{ authority, ...(signal === undefined ? {} : { signal }) },
 		);
 		try {
 			return Server.decodeExternalSnapshot(
@@ -63,11 +68,12 @@ describe('external snapshot admission and selected context codecs', () => {
 		(timeoutMs) => {
 			const component = vi.fn();
 			const snapshot = vi.fn();
-			for (const runtime of [Client, Server]) {
-				expect(() =>
-					runtime.externalSnapshotBoundary({ authority, component, snapshot, timeoutMs }),
-				).toThrow(/External snapshot timeout|Minified Octane error #358/);
-			}
+			expect(() =>
+				Client.externalSnapshotBoundary({ authority, component, snapshot, timeoutMs }),
+			).toThrow(/External snapshot timeout|Minified Octane error #358/);
+			expect(() =>
+				Server.externalSnapshotBoundary({ authority, component, snapshot, timeoutMs }),
+			).toThrow(/External snapshot timeout|Minified Octane error #358/);
 			expect(component).not.toHaveBeenCalled();
 			expect(snapshot).not.toHaveBeenCalled();
 		},
@@ -76,23 +82,21 @@ describe('external snapshot admission and selected context codecs', () => {
 	it('accepts the maximum supported boundary deadline without starting publisher work', () => {
 		const component = vi.fn();
 		const snapshot = vi.fn();
-		for (const runtime of [Client, Server]) {
-			expect(
-				typeof runtime.externalSnapshotBoundary({
-					authority,
-					component,
-					snapshot,
-					timeoutMs: 2147483647,
-				}),
-			).toBe('function');
-		}
+		const options = { authority, component, snapshot, timeoutMs: 2147483647 };
+		expect(typeof Client.externalSnapshotBoundary(options)).toBe('function');
+		expect(typeof Server.externalSnapshotBoundary(options)).toBe('function');
 		expect(component).not.toHaveBeenCalled();
 		expect(snapshot).not.toHaveBeenCalled();
 	});
 
 	it('transfers only the publisher keys and owns codec registration until disposal', async () => {
+		const Theme = Server.createContext({ title: 'default' });
 		const decode = vi.fn((value) => ({ title: String(value) }));
-		const codec = { key: 'theme', encode: (value: { title: string }) => value.title, decode };
+		const codec: {
+			key: string;
+			encode: (value: { title: string }) => unknown;
+			decode: (value: unknown) => { title: string };
+		} = { key: 'theme', encode: (value) => value.title, decode };
 		const release = registerExternalSnapshotContext(Theme, codec);
 		releases.push(release);
 		releases.push(
@@ -142,8 +146,8 @@ describe('external snapshot admission and selected context codecs', () => {
 		releases.push(
 			registerExternalSnapshotContext(Theme, {
 				key: 'theme',
-				encode: (value) => value,
-				decode: (value) => value,
+				encode: (value) => value.title,
+				decode: (value) => ({ title: String(value) }),
 			}),
 		);
 	});
@@ -182,6 +186,7 @@ describe('external snapshot admission and selected context codecs', () => {
 	});
 
 	it('awaits selected context reconstruction before invoking the native publisher', async () => {
+		const Theme = Server.createContext({ title: 'default' });
 		const pending = deferred<{ title: string }>();
 		const decode = vi.fn(() => pending.promise);
 		releases.push(
@@ -249,6 +254,7 @@ describe('external snapshot admission and selected context codecs', () => {
 	);
 
 	it('owns endpoint-local provider initialization and rejects overrides before execution', async () => {
+		const Other = Server.createContext('other default');
 		registerTheme();
 		const request = createExternalSnapshotRequest(
 			authority,
@@ -306,7 +312,10 @@ describe('external snapshot admission and selected context codecs', () => {
 			snapshot: (request, signal) => {
 				signals.push(signal!);
 				return healthy
-					? Server.renderExternalSnapshot(component, request, { authority, signal })
+					? Server.renderExternalSnapshot(component, request, {
+							authority,
+							...(signal === undefined ? {} : { signal }),
+						})
 					: new Promise(() => {});
 			},
 		});
@@ -344,19 +353,24 @@ export function Remote(props) {
   return <section><label htmlFor={id}>{theme.title}<input id={id} defaultValue="draft" /></label><button onClick={() => value$.set(value => value + 1)}>{props.label + ':' + value$.get()}</button></section>;
 }`;
 
-function fixtures(dev: boolean) {
-	const modules = { './contexts': { Theme, Other } };
+function fixtures(
+	dev: boolean,
+	contexts: { server: Record<string, unknown>; client: Record<string, unknown> } = {
+		server: { Theme, Other },
+		client: { Theme, Other },
+	},
+) {
 	const server = loadCompiledFixtureSource(remoteSource, {
 		id: '/remote/Widget.tsx',
 		mode: 'server',
 		compileOptions: { dev },
-		runtimeModules: { ...modules, 'octane/signals/server': ServerSignals },
+		runtimeModules: { './contexts': contexts.server, 'octane/signals/server': ServerSignals },
 	});
 	const client = loadCompiledFixtureSource(remoteSource, {
 		id: '/remote/Widget.tsx',
 		mode: 'client',
 		compileOptions: { dev },
-		runtimeModules: { ...modules, 'octane/signals/client': ClientSignals },
+		runtimeModules: { './contexts': contexts.client, 'octane/signals/client': ClientSignals },
 	});
 	return { server, client };
 }
@@ -385,9 +399,17 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			const client = pair(source, '/remote/RetryHistory.tsx', dev, {
 				'./data': { load: clientLoad, onReady },
 			}).client;
-			const snapshot = transport(server.Remote);
-			const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
-			const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
+			const snapshot = transport(server['Remote']);
+			const S = Server.externalSnapshotBoundary({
+				authority,
+				component: server['Remote'],
+				snapshot,
+			});
+			const C = Client.externalSnapshotBoundary({
+				authority,
+				component: client['Remote'],
+				snapshot,
+			});
 			const host = `import {Boundary} from './remote';function read(value){if(value!==undefined)throw value;return 'host ready';}function Sibling(props){return <span>{read(props.gate.pending)}</span>;}export function App(props){return <main><Boundary/><Sibling gate={props.gate}/></main>;}`;
 			const sHost = pair(host, '/host/RetryHistory.tsx', dev, {
 				'./remote': { Boundary: S },
@@ -398,7 +420,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			const documentId = 'retry-history-' + hostLease;
 			const options = { externalSnapshots: { documentId } };
 			const container = document.createElement('div');
-			container.innerHTML = (await prerender(sHost.App, { gate: {} }, options)).html;
+			container.innerHTML = (await prerender(sHost['App'], { gate: {} }, options)).html;
 			activateStreamedMarkup(container);
 			document.body.append(container);
 			const button = container.querySelector('button')!;
@@ -410,7 +432,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 				: undefined;
 			const root = Client.hydrateRoot(
 				container,
-				cHost.App,
+				cHost['App'],
 				{ gate },
 				{
 					...options,
@@ -456,9 +478,17 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			const client = pair(source, '/remote/CommittedHistory.tsx', dev, {
 				'./data': { load: () => browserData.promise },
 			}).client;
-			const snapshot = transport(server.Remote);
-			const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
-			const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
+			const snapshot = transport(server['Remote']);
+			const S = Server.externalSnapshotBoundary({
+				authority,
+				component: server['Remote'],
+				snapshot,
+			});
+			const C = Client.externalSnapshotBoundary({
+				authority,
+				component: client['Remote'],
+				snapshot,
+			});
 			const host =
 				mode === 'suspense'
 					? `import {Suspense} from 'octane';import {Boundary} from './remote';function read(value){if(value!==undefined)throw value;return 'host ready';}function Sibling(props){return <span>{read(props.gate.pending)}</span>;}export function App(props){return <Suspense fallback={<p data-pending="">host pending</p>}><section data-host=""><Boundary/><Sibling gate={props.gate}/></section></Suspense>;}`
@@ -475,7 +505,9 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			const options = { externalSnapshots: { documentId } };
 			const gate = { pending: undefined as Promise<void> | undefined };
 			const container = document.createElement('div');
-			container.innerHTML = (await prerender(sHost.App, { mode: 'visible', gate }, options)).html;
+			container.innerHTML = (
+				await prerender(sHost['App'], { mode: 'visible', gate }, options)
+			).html;
 			activateStreamedMarkup(container);
 			document.body.append(container);
 			const section = container.querySelector<HTMLElement>('[data-host]')!;
@@ -485,7 +517,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			const bridge = bootstrapStreamedSignalHydration({ buildId: 'host-build', documentId });
 			const root = Client.hydrateRoot(
 				container,
-				cHost.App,
+				cHost['App'],
 				{ mode: 'visible', gate },
 				{
 					...options,
@@ -503,7 +535,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 				if (mode === 'suspense') gate.pending = pending.promise;
 				await Client.act(() => {
 					Client.flushSync(() =>
-						root.render(cHost.App, { mode: mode === 'activity' ? 'hidden' : 'visible', gate }),
+						root.render(cHost['App'], { mode: mode === 'activity' ? 'hidden' : 'visible', gate }),
 					);
 				});
 				expect(container.querySelector('[data-host]')).toBe(section);
@@ -520,7 +552,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 				expect(section.style.display).toBe('none');
 				gate.pending = undefined;
 				pending.resolve();
-				await Client.act(() => root.render(cHost.App, { mode: 'visible', gate }));
+				await Client.act(() => root.render(cHost['App'], { mode: 'visible', gate }));
 				expect(container.querySelector('[data-host]')).toBe(section);
 				expect(section.style.display).not.toBe('none');
 				expect(container.querySelector('[data-pending]')).toBeNull();
@@ -550,8 +582,8 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		).server;
 		const Boundary = Server.externalSnapshotBoundary({
 			authority,
-			component: server.Remote,
-			snapshot: transport(server.Remote),
+			component: server['Remote'],
+			snapshot: transport(server['Remote']),
 		});
 		const host = pair(
 			`import {Activity,Suspense} from 'octane';import {Boundary} from './remote';export function App(props){return <Suspense fallback={<p>loading snapshot</p>}><Activity mode={props.mode}><section data-host=""><Boundary label="first"/><Boundary label="second"/></section></Activity></Suspense>;}`,
@@ -560,7 +592,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			{ './remote': { Boundary } },
 		).server;
 		const result = await prerender(
-			host.App,
+			host['App'],
 			{ mode: 'visible' },
 			{ externalSnapshots: { documentId: 'jsx-activity-history' } },
 		);
@@ -573,30 +605,40 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 	});
 
 	it('retains compiled signal and ID adoption with publisher-local native providers', async () => {
-		const { server, client } = pair(
-			`import {useContext,useId} from 'octane';import {useSignal$} from 'octane/signals/client';import {Other} from './contexts';export function Remote(props){const value$=useSignal$(props.initial);const id=useId();const context=useContext(Other);return <section><input id={id} defaultValue="draft"/><button onClick={()=>value$.set(value=>value+1)}>{props.label+':'+value$.get()+':'+context}</button></section>;}`,
-			'/remote/LocalProvider.tsx',
-			dev,
-			{
-				'./contexts': { Other },
+		const serverOther = Server.createContext('other default');
+		const clientOther = Client.createContext('other default');
+		const source = `import {useContext,useId} from 'octane';import {useSignal$} from 'octane/signals/client';import {Other} from './contexts';export function Remote(props){const value$=useSignal$(props.initial);const id=useId();const context=useContext(Other);return <section><input id={id} defaultValue="draft"/><button onClick={()=>value$.set(value=>value+1)}>{props.label+':'+value$.get()+':'+context}</button></section>;}`;
+		const fixture = { id: '/remote/LocalProvider.tsx', compileOptions: { dev } };
+		const server = loadCompiledFixtureSource(source, {
+			...fixture,
+			mode: 'server',
+			runtimeModules: {
+				'./contexts': { Other: serverOther },
 				'octane/signals/server': ServerSignals,
+			},
+		});
+		const client = loadCompiledFixtureSource(source, {
+			...fixture,
+			mode: 'client',
+			runtimeModules: {
+				'./contexts': { Other: clientOther },
 				'octane/signals/client': ClientSignals,
 			},
-		);
-		const snapshot = async (request, signal) => {
+		});
+		const snapshot = async (request: Server.ExternalSnapshotRequest, signal?: AbortSignal) => {
 			const prepared = await Server.prepareExternalSnapshotRequest(request, {
 				authority,
-				signal,
-				initializeContexts: (provide) => provide(Other, 'publisher local'),
+				...(signal === undefined ? {} : { signal }),
+				initializeContexts: (provide) => provide(serverOther, 'publisher local'),
 			});
 			try {
-				return await Server.renderExternalSnapshot(server.Remote, prepared);
+				return await Server.renderExternalSnapshot(server['Remote'], prepared);
 			} finally {
 				await Server.releasePreparedExternalSnapshotRequest(prepared);
 			}
 		};
-		const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
-		const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
+		const S = Server.externalSnapshotBoundary({ authority, component: server['Remote'], snapshot });
+		const C = Client.externalSnapshotBoundary({ authority, component: client['Remote'], snapshot });
 		const container = document.createElement('div');
 		container.innerHTML = (
 			await prerender(
@@ -610,8 +652,8 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		const button = container.querySelector('button')!;
 		const input = container.querySelector('input')!;
 		const errors: unknown[] = [];
-		const app = (props) =>
-			Client.createElement(Other, {
+		const app = (props: { context: string }) =>
+			Client.createElement(clientOther, {
 				value: props.context,
 				children: Client.createElement(C, { label: 'Wrapped', initial: 4 }),
 			});
@@ -642,14 +684,25 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 	});
 
 	it('retains real SSR nodes through lazy activation and follows live host context', async () => {
-		registerTheme();
-		const { server, client } = fixtures(dev);
-		const pending = deferred<{ default: typeof client.Remote }>();
-		const snapshot = vi.fn(async (request) =>
+		const serverTheme = Server.createContext({ title: 'default' });
+		const clientTheme = Client.createContext({ title: 'default' });
+		releases.push(
+			registerExternalSnapshotContext(serverTheme, {
+				key: 'theme',
+				encode: (value) => value.title,
+				decode: (value) => ({ title: String(value) }),
+			}),
+		);
+		const { server, client } = fixtures(dev, {
+			server: { Theme: serverTheme },
+			client: { Theme: clientTheme },
+		});
+		const pending = deferred<{ default: (typeof client)['Remote'] }>();
+		const snapshot = vi.fn(async (request: Server.ExternalSnapshotRequest) =>
 			Server.decodeExternalSnapshot(
 				Server.serializeExternalSnapshot(
 					await Server.renderExternalSnapshot(
-						server.Remote,
+						server['Remote'],
 						Server.decodeExternalSnapshotRequest(
 							Server.serializeExternalSnapshotRequest(request),
 							authority,
@@ -661,7 +714,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		);
 		const ServerBoundary = Server.externalSnapshotBoundary({
 			authority,
-			component: server.Remote,
+			component: server['Remote'],
 			snapshot,
 			contextKeys: ['theme'],
 		});
@@ -671,13 +724,13 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			snapshot,
 			contextKeys: ['theme'],
 		});
-		const serverApp = (props) =>
-			Server.createElement(Theme, {
+		const serverApp = (props: { title: string }) =>
+			Server.createElement(serverTheme, {
 				value: { title: props.title },
 				children: Server.createElement(ServerBoundary, { label: 'Count', initial: 3 }),
 			});
-		const clientApp = (props) =>
-			Client.createElement(Theme, {
+		const clientApp = (props: { title: string }) =>
+			Client.createElement(clientTheme, {
 				value: { title: props.title },
 				children: Client.createElement(ClientBoundary, { label: 'Count', initial: 3 }),
 			});
@@ -707,7 +760,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		try {
 			Client.flushSync(() => {});
 			expect(container.querySelector('button')).toBe(button);
-			pending.resolve({ default: client.Remote });
+			pending.resolve({ default: client['Remote'] });
 			await Client.act(async () => {});
 			expect(container.querySelector('button')).toBe(button);
 			expect(container.querySelector('input')).toBe(input);
@@ -726,13 +779,260 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		}
 	});
 
+	it('silently reconciles non-context text within an authenticated external snapshot shape', async () => {
+		const { server, client } = fixtures(dev);
+		const snapshot = vi.fn(transport(server['Remote']));
+		const S = Server.externalSnapshotBoundary({ authority, component: server['Remote'], snapshot });
+		const C = Client.externalSnapshotBoundary({ authority, component: client['Remote'], snapshot });
+		const options = { externalSnapshots: { documentId: 'external-text-value' } };
+		const props = { label: 'Count', initial: 3 };
+		const container = document.createElement('div');
+		container.innerHTML = (await prerender(S, props, options)).html;
+		activateStreamedMarkup(container);
+		document.body.append(container);
+		const section = container.querySelector('section')!;
+		const input = container.querySelector('input')!;
+		const button = container.querySelector('button')!;
+		const id = input.id;
+		input.value = 'typed before hydration';
+		const serverText = [...button.childNodes].find((node): node is Text => node instanceof Text);
+		if (serverText === undefined) throw new Error('Publisher counter text is required.');
+		expect(serverText.data).toBe('Count:3');
+		serverText.data = 'different server text';
+		expect(container.querySelector('label')!.textContent).toBe('default');
+		expect(button.textContent).toBe('different server text');
+		const errors: unknown[] = [];
+		const root = Client.hydrateRoot(container, C, props, {
+			...options,
+			onRecoverableError: (error) => errors.push(error),
+			onUncaughtError: (error) => errors.push(error),
+		});
+		try {
+			await Client.act(async () => {});
+			expect(container.querySelector('section')).toBe(section);
+			expect(container.querySelector('input')).toBe(input);
+			expect(container.querySelector('button')).toBe(button);
+			expect(input.id).toBe(id);
+			expect(input.value).toBe('typed before hydration');
+			expect(container.querySelector('label')!.textContent).toBe('default');
+			expect(button.textContent).toBe('Count:3');
+			await Client.act(() => button.click());
+			expect(button.textContent).toBe('Count:4');
+			expect(snapshot).toHaveBeenCalledTimes(1);
+			expect(errors).toEqual([]);
+		} finally {
+			root.unmount();
+			container.remove();
+		}
+	});
+
+	it.each(['same', 'different'] as const)(
+		'retains external SSR nodes through deferred outer and inner lazy loading, initial context=%s',
+		async (context) => {
+			registerTheme();
+			const { server, client } = fixtures(dev);
+			const admitted = deferred<void>();
+			const loaded = deferred<{ default: (typeof client)['Remote'] }>();
+			const loadInner = vi.fn(() => loaded.promise);
+			const snapshot = vi.fn(transport(server['Remote']));
+			const serverRemote = Server.lazy(async () => ({
+				default: Server.externalSnapshotBoundary({
+					authority,
+					component: server['Remote'],
+					snapshot,
+					contextKeys: ['theme'],
+				}),
+			}));
+			const clientRemote = Client.lazy(async () => {
+				await admitted.promise;
+				return {
+					default: Client.externalSnapshotBoundary({
+						authority,
+						component: Client.lazy(loadInner),
+						snapshot,
+						contextKeys: ['theme'],
+					}),
+				};
+			});
+			const source = `import {Suspense} from 'octane';import {Theme} from './contexts';import {Remote} from './remote';export function App(props){return <Theme value={{title:props.title}}><Suspense fallback={<p>loading publisher</p>}><Remote label="Count" initial={3}/></Suspense></Theme>;}`;
+			const serverApp = pair(source, '/host/OuterLazy.tsx', dev, {
+				'./contexts': { Theme },
+				'./remote': { Remote: serverRemote },
+			}).server;
+			const clientApp = pair(source, '/host/OuterLazy.tsx', dev, {
+				'./contexts': { Theme },
+				'./remote': { Remote: clientRemote },
+			}).client;
+			const options = { externalSnapshots: { documentId: 'outer-lazy-' + context } };
+			const container = document.createElement('div');
+			container.innerHTML = (await prerender(serverApp['App'], { title: 'server' }, options)).html;
+			activateStreamedMarkup(container);
+			document.body.append(container);
+			const section = container.querySelector('section')!;
+			const input = container.querySelector('input')!;
+			const button = container.querySelector('button')!;
+			const id = input.id;
+			input.value = 'typed before hydration';
+			const errors: unknown[] = [];
+			const title = context === 'same' ? 'server' : 'browser';
+			const root = Client.hydrateRoot(
+				container,
+				clientApp['App'],
+				{ title },
+				{
+					...options,
+					onRecoverableError: (error) => errors.push(error),
+					onUncaughtError: (error) => errors.push(error),
+				},
+			);
+			const assertRetained = (phase: string) => {
+				expect.soft(errors, phase + ': renderer errors').toEqual([]);
+				expect.soft(container.querySelector('section'), phase + ': section').toBe(section);
+				expect.soft(container.querySelector('input'), phase + ': input').toBe(input);
+				expect.soft(container.querySelector('button'), phase + ': counter').toBe(button);
+				expect
+					.soft(container.querySelector('input')?.value, phase + ': draft')
+					.toBe('typed before hydration');
+				expect.soft(container.querySelector('input')?.id, phase + ': ID').toBe(id);
+			};
+			try {
+				await Client.act(async () => {});
+				assertRetained('before admission');
+				expect(loadInner).not.toHaveBeenCalled();
+				await Client.act(() => admitted.resolve());
+				await vi.waitFor(() => expect(loadInner).toHaveBeenCalled());
+				assertRetained('after admission');
+				await Client.act(() => loaded.resolve({ default: client['Remote'] }));
+				assertRetained('after module load');
+				expect(container.querySelector('label')!.textContent).toBe(title);
+				await Client.act(() => container.querySelector('button')!.click());
+				expect(container.querySelector('button')!.textContent).toBe('Count:4');
+				await Client.act(() => root.render(clientApp['App'], { title: 'live host' }));
+				assertRetained('after live host update');
+				expect(container.querySelector('label')!.textContent).toBe('live host');
+				expect(container.querySelector('button')!.textContent).toBe('Count:4');
+				expect(snapshot).toHaveBeenCalledTimes(1);
+				expect(errors).toEqual([]);
+			} finally {
+				admitted.resolve();
+				loaded.resolve({ default: client['Remote'] });
+				root.unmount();
+				container.remove();
+			}
+		},
+	);
+
+	it('retains external SSR nodes when host context commits during the admission-to-module gap', async () => {
+		registerTheme();
+		const { server, client } = fixtures(dev);
+		const admitted = deferred<void>();
+		const loaded = deferred<{ default: (typeof client)['Remote'] }>();
+		const loadInner = vi.fn(() => loaded.promise);
+		const snapshot = vi.fn(transport(server['Remote']));
+		const serverRemote = Server.lazy(async () => ({
+			default: Server.externalSnapshotBoundary({
+				authority,
+				component: server['Remote'],
+				snapshot,
+				contextKeys: ['theme'],
+			}),
+		}));
+		const clientRemote = Client.lazy(async () => {
+			await admitted.promise;
+			return {
+				default: Client.externalSnapshotBoundary({
+					authority,
+					component: Client.lazy(loadInner),
+					snapshot,
+					contextKeys: ['theme'],
+				}),
+			};
+		});
+		const source = `import {Suspense} from 'octane';import {Theme} from './contexts';import {Remote} from './remote';export function App(props){return <Theme value={{title:props.title}}><output data-host-context="">{props.title}</output><Suspense fallback={<p>loading publisher</p>}><Remote label="Count" initial={3}/></Suspense></Theme>;}`;
+		const serverApp = pair(source, '/host/OuterLazy.tsx', dev, {
+			'./contexts': { Theme },
+			'./remote': { Remote: serverRemote },
+		}).server;
+		const clientApp = pair(source, '/host/OuterLazy.tsx', dev, {
+			'./contexts': { Theme },
+			'./remote': { Remote: clientRemote },
+		}).client;
+		const options = { externalSnapshots: { documentId: 'outer-lazy-context-gap' } };
+		const container = document.createElement('div');
+		container.innerHTML = (await prerender(serverApp['App'], { title: 'server' }, options)).html;
+		activateStreamedMarkup(container);
+		document.body.append(container);
+		const section = container.querySelector('section')!;
+		const input = container.querySelector('input')!;
+		const button = container.querySelector('button')!;
+		const id = input.id;
+		input.value = 'typed before hydration';
+		const errors: unknown[] = [];
+		const title = 'server';
+		const root = Client.hydrateRoot(
+			container,
+			clientApp['App'],
+			{ title },
+			{
+				...options,
+				onRecoverableError: (error) => errors.push(error),
+				onUncaughtError: (error) => errors.push(error),
+			},
+		);
+		const assertRetained = (phase: string) => {
+			expect.soft(errors, phase + ': renderer errors').toEqual([]);
+			expect.soft(container.querySelector('section'), phase + ': section').toBe(section);
+			expect.soft(container.querySelector('input'), phase + ': input').toBe(input);
+			expect.soft(container.querySelector('button'), phase + ': counter').toBe(button);
+			expect
+				.soft(container.querySelector('input')?.value, phase + ': draft')
+				.toBe('typed before hydration');
+			expect.soft(container.querySelector('input')?.id, phase + ': ID').toBe(id);
+		};
+		try {
+			await Client.act(async () => {});
+			assertRetained('before admission');
+			expect(loadInner).not.toHaveBeenCalled();
+			await Client.act(() => admitted.resolve());
+			await vi.waitFor(() => expect(loadInner).toHaveBeenCalled());
+			assertRetained('after admission');
+			await Client.act(() => {
+				Client.flushSync(() =>
+					root.render(clientApp['App'], { title: 'updated during module gap' }),
+				);
+			});
+			await Client.act(async () => {});
+			expect(container.querySelector('[data-host-context]')!.textContent).toBe(
+				'updated during module gap',
+			);
+			expect(loadInner).toHaveBeenCalledTimes(1);
+			assertRetained('after committed host update while module is pending');
+			await Client.act(() => loaded.resolve({ default: client['Remote'] }));
+			assertRetained('after module load');
+			expect(container.querySelector('label')!.textContent).toBe('updated during module gap');
+			await Client.act(() => container.querySelector('button')!.click());
+			expect(container.querySelector('button')!.textContent).toBe('Count:4');
+			await Client.act(() => root.render(clientApp['App'], { title: 'live host' }));
+			assertRetained('after live host update');
+			expect(container.querySelector('label')!.textContent).toBe('live host');
+			expect(container.querySelector('button')!.textContent).toBe('Count:4');
+			expect(snapshot).toHaveBeenCalledTimes(1);
+			expect(errors).toEqual([]);
+		} finally {
+			admitted.resolve();
+			loaded.resolve({ default: client['Remote'] });
+			root.unmount();
+			container.remove();
+		}
+	});
+
 	it('isolates same compiled signal sites and useId between boundaries', async () => {
 		const { server, client } = fixtures(dev);
-		const snapshot = async (request) =>
+		const snapshot = async (request: Server.ExternalSnapshotRequest) =>
 			Server.decodeExternalSnapshot(
 				Server.serializeExternalSnapshot(
 					await Server.renderExternalSnapshot(
-						server.Remote,
+						server['Remote'],
 						Server.decodeExternalSnapshotRequest(
 							Server.serializeExternalSnapshotRequest(request),
 							authority,
@@ -741,8 +1041,8 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 					),
 				),
 			);
-		const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
-		const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
+		const S = Server.externalSnapshotBoundary({ authority, component: server['Remote'], snapshot });
+		const C = Client.externalSnapshotBoundary({ authority, component: client['Remote'], snapshot });
 		const sApp = () => [
 			Server.createElement(S, { label: 'A', initial: 1 }),
 			Server.createElement(S, { label: 'B', initial: 7 }),
@@ -787,9 +1087,9 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		const client = pair(source, '/remote/History.tsx', dev, {
 			'./data': { load: clientLoad },
 		}).client;
-		const snapshot = transport(server.Remote);
-		const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
-		const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
+		const snapshot = transport(server['Remote']);
+		const S = Server.externalSnapshotBoundary({ authority, component: server['Remote'], snapshot });
+		const C = Client.externalSnapshotBoundary({ authority, component: client['Remote'], snapshot });
 		const container = document.createElement('div');
 		container.innerHTML = (
 			await prerender(S, {}, { externalSnapshots: { documentId: 'history' } })
@@ -822,9 +1122,11 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 
 	it('rejects mismatched browser authority before invoking the native component', async () => {
 		const { server, client } = fixtures(dev);
-		const snapshot = transport(server.Remote);
-		const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
-		const invoke = vi.fn(client.Remote);
+		const snapshot = transport(server['Remote']);
+		const S = Server.externalSnapshotBoundary({ authority, component: server['Remote'], snapshot });
+		const invoke = vi.fn<Client.ComponentBody<{ label: string; initial: number }>>(
+			client['Remote'],
+		);
 		const C = Client.externalSnapshotBoundary({
 			authority: { ...authority, publisherBuildId: 'foreign-build' },
 			component: invoke,
@@ -863,15 +1165,15 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 	it('keeps host sibling IDs stable when external ID counts differ and one boundary mounts fresh', async () => {
 		const source = `import {useId} from 'octane'; function Field() {const id=useId();return <input id={id} />;} export function Remote(props){return <section data-remote={props.label}><Field />{props.extra ? <Field /> : null}</section>;}`;
 		const { server, client } = pair(source, '/remote/Ids.tsx', dev);
-		const snapshot = transport(server.Remote);
-		const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
-		const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
+		const snapshot = transport(server['Remote']);
+		const S = Server.externalSnapshotBoundary({ authority, component: server['Remote'], snapshot });
+		const C = Client.externalSnapshotBoundary({ authority, component: client['Remote'], snapshot });
 		const hostSource = `import {useId} from 'octane';import {Boundary} from './remote';function HostId(props){const id=useId();return <span id={id} data-host={props.label}>{props.label}</span>;}export function App(){return <main><HostId label="before"/><Boundary label="a" extra={true}/><Boundary label="b" extra={false}/><HostId label="after"/></main>;}`;
 		const sHost = pair(hostSource, '/host/Ids.tsx', dev, { './remote': { Boundary: S } }).server;
 		const cHost = pair(hostSource, '/host/Ids.tsx', dev, { './remote': { Boundary: C } }).client;
 		for (const fresh of [false, true]) {
 			const result = await prerender(
-				sHost.App,
+				sHost['App'],
 				{},
 				{ externalSnapshots: { documentId: 'ids-' + fresh } },
 			);
@@ -889,7 +1191,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			}
 			const root = Client.hydrateRoot(
 				container,
-				cHost.App,
+				cHost['App'],
 				{},
 				{ externalSnapshots: { documentId: 'ids-' + fresh } },
 			);
@@ -918,37 +1220,37 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		registerTheme();
 		const secondAuthority = { ...authority, publisherBuildId: 'second-publisher' };
 		for (const removed of ['a', 'b']) {
-			const pending = deferred<{ default: typeof client.Remote }>();
-			const invoke = vi.fn(client.Remote);
+			const pending = deferred<{ default: (typeof client)['Remote'] }>();
+			const invoke = vi.fn(client['Remote']);
 			const make = (label: string, mode: 'client' | 'server') => {
 				const selectedAuthority = label === 'a' ? authority : secondAuthority;
-				return (mode === 'client' ? Client : Server).externalSnapshotBoundary({
+				const options = {
 					authority: selectedAuthority,
-					component:
-						mode === 'server'
-							? server.Remote
-							: label === removed
-								? Client.lazy(() => pending.promise)
-								: client.Remote,
 					contextKeys: ['theme'],
-					snapshot: (request, signal) =>
-						Server.renderExternalSnapshot(server.Remote, request, {
+					snapshot: (request: Server.ExternalSnapshotRequest, signal?: AbortSignal) =>
+						Server.renderExternalSnapshot(server['Remote'], request, {
 							authority: selectedAuthority,
-							signal,
+							...(signal === undefined ? {} : { signal }),
 						}),
-				});
+				};
+				return mode === 'server'
+					? Server.externalSnapshotBoundary({ ...options, component: server['Remote'] })
+					: Client.externalSnapshotBoundary({
+							...options,
+							component: label === removed ? Client.lazy(() => pending.promise) : client['Remote'],
+						});
 			};
 			const hostSource = `import {Theme} from './contexts';import {Local,A,B} from './remote';export function App(props){return <Theme value={{title:props.title}}><main><Local label="host"/>{props.a ? <A label="a"/> : null}{props.b ? <B label="b"/> : null}</main></Theme>;}`;
 			const sHost = pair(hostSource, '/host/Global.tsx', dev, {
 				'./contexts': { Theme },
-				'./remote': { Local: server.Remote, A: make('a', 'server'), B: make('b', 'server') },
+				'./remote': { Local: server['Remote'], A: make('a', 'server'), B: make('b', 'server') },
 			}).server;
 			const cHost = pair(hostSource, '/host/Global.tsx', dev, {
 				'./contexts': { Theme },
-				'./remote': { Local: client.Remote, A: make('a', 'client'), B: make('b', 'client') },
+				'./remote': { Local: client['Remote'], A: make('a', 'client'), B: make('b', 'client') },
 			}).client;
 			const options = { externalSnapshots: { documentId: 'globals-' + removed } };
-			const html = (await prerender(sHost.App, { a: true, b: true, title: 'server' }, options))
+			const html = (await prerender(sHost['App'], { a: true, b: true, title: 'server' }, options))
 				.html;
 			const container = document.createElement('div');
 			container.innerHTML = html;
@@ -961,7 +1263,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			const errors: unknown[] = [];
 			const root = Client.hydrateRoot(
 				container,
-				cHost.App,
+				cHost['App'],
 				{ a: true, b: true, title: 'server' },
 				{
 					...options,
@@ -973,19 +1275,19 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 				await Client.act(async () => {});
 				expect(errors).toEqual([]);
 				expect(container.querySelector(`[data-global="${survivor}"]`)).toBe(survivorButton);
-				expect(survivorButton.dataset.hydrated).toBe('true');
+				expect(survivorButton.dataset['hydrated']).toBe('true');
 				await Client.act(() => survivorButton.click());
 				expect(survivorButton.textContent).toBe(survivor + ':1:server');
 				expect(container.querySelector('[data-global="host"]')!.textContent).toBe('host:0:server');
 				await Client.act(() =>
-					root.render(cHost.App, { a: removed !== 'a', b: removed !== 'b', title: 'live' }),
+					root.render(cHost['App'], { a: removed !== 'a', b: removed !== 'b', title: 'live' }),
 				);
 				pending.resolve({ default: invoke });
 				await Client.act(async () => {});
 				expect(invoke).not.toHaveBeenCalled();
 				expect(container.querySelector(`[data-global="${removed}"]`)).toBeNull();
 				expect(container.querySelector(`[data-global="${survivor}"]`)).toBe(survivorButton);
-				expect(survivorButton.dataset.hydrated).toBe('true');
+				expect(survivorButton.dataset['hydrated']).toBe('true');
 				await Client.act(() => survivorButton.click());
 				expect(survivorButton.textContent).toBe(survivor + ':2:live');
 				expect(container.querySelector('[data-global="host"]')!.textContent).toBe('host:0:live');
@@ -1000,18 +1302,18 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 	it('adopts each publisher head node and deduplicates native styles against the host', async () => {
 		const source = `export function Remote(props) @{ <><meta name={props.label} content={props.title} /><style>.external {color: rebeccapurple;}</style><section class="external">{props.label as string}</section></> }`;
 		const { server, client } = pair(source, '/remote/Head.tsrx', dev);
-		const snapshot = transport(server.Remote);
-		const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
-		const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
+		const snapshot = transport(server['Remote']);
+		const S = Server.externalSnapshotBoundary({ authority, component: server['Remote'], snapshot });
+		const C = Client.externalSnapshotBoundary({ authority, component: client['Remote'], snapshot });
 		const hostSource = `import {Boundary, Local} from './remote'; export function App(props) @{ <><Local label="host" title="host title" /><Boundary label="a" title={props.title} />@if(props.second) {<Boundary label="b" title="b title" />}</> }`;
 		const hostServer = pair(hostSource, '/host/Head.tsrx', dev, {
-			'./remote': { Boundary: S, Local: server.Remote },
+			'./remote': { Boundary: S, Local: server['Remote'] },
 		}).server;
 		const hostClient = pair(hostSource, '/host/Head.tsrx', dev, {
-			'./remote': { Boundary: C, Local: client.Remote },
+			'./remote': { Boundary: C, Local: client['Remote'] },
 		}).client;
 		const result = await prerender(
-			hostServer.App,
+			hostServer['App'],
 			{ title: 'a title', second: true },
 			{ externalSnapshots: { documentId: 'head-doc' }, headChannel: 'separate' },
 		);
@@ -1028,7 +1330,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		const errors: unknown[] = [];
 		const root = Client.hydrateRoot(
 			container,
-			hostClient.App,
+			hostClient['App'],
 			{ title: 'a title', second: true },
 			{
 				externalSnapshots: { documentId: 'head-doc' },
@@ -1043,7 +1345,9 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			).toEqual(heads);
 			expect(document.head.querySelectorAll('meta')).toHaveLength(3);
 			expect(errors).toEqual([]);
-			await Client.act(() => root.render(hostClient.App, { title: 'live title', second: false }));
+			await Client.act(() =>
+				root.render(hostClient['App'], { title: 'live title', second: false }),
+			);
 			expect(heads[1]!.getAttribute('content')).toBe('live title');
 			expect(heads[2]!.isConnected).toBe(false);
 			expect(heads[0]!.isConnected).toBe(true);
@@ -1057,11 +1361,12 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 	it('adopts publisher head nodes when its body recovers with a fresh ID namespace', async () => {
 		const source = `export function Remote() @{ <><p>publisher body</p><meta name="recovered-publisher" content="owned" /></> }`;
 		const { server, client } = pair(source, '/remote/RecoverHead.tsrx', dev);
-		const snapshot = transport(server.Remote);
-		const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
-		const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
+		const snapshot = transport(server['Remote']);
+		const S = Server.externalSnapshotBoundary({ authority, component: server['Remote'], snapshot });
+		const C = Client.externalSnapshotBoundary({ authority, component: client['Remote'], snapshot });
 		const options = { externalSnapshots: { documentId: 'recover-head' } };
 		const result = await prerender(S, {}, { ...options, headChannel: 'separate' });
+		if (result.head === undefined) throw new Error('Separate head output is required.');
 		document.head.innerHTML = result.head;
 		const head = document.head.querySelector('meta[name="recovered-publisher"]')!;
 		expect(head).not.toBeNull();
@@ -1069,31 +1374,107 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		container.innerHTML = result.html;
 		const changed = document.createElement('section');
 		changed.textContent = 'replaced server body';
-		container.querySelector('p')!.replaceWith(changed);
+		const serverBody = container.querySelector('p')!;
+		serverBody.replaceWith(changed);
 		activateStreamedMarkup(container);
 		document.body.append(container);
 		const uncaught: unknown[] = [];
+		const recoverable = vi.fn<(error: unknown) => void>();
 		const root = Client.hydrateRoot(
 			container,
 			C,
 			{},
 			{
 				...options,
-				onRecoverableError: () => {},
+				onRecoverableError: recoverable,
 				onUncaughtError: (error) => uncaught.push(error),
 			},
 		);
 		try {
 			await Client.act(async () => {});
 			expect(container.querySelector('p')?.textContent).toBe('publisher body');
+			expect(container.querySelector('p')).not.toBe(serverBody);
+			expect(changed.isConnected).toBe(false);
+			expect(container.querySelector('section')).toBeNull();
 			expect(document.head.querySelectorAll('meta[name="recovered-publisher"]')).toHaveLength(1);
 			expect(document.head.querySelector('meta[name="recovered-publisher"]')).toBe(head);
 			expect(uncaught).toEqual([]);
+			// Joining the publisher recreates its descriptor children before activation.
+			// Uncertified changed captures mark this recovery stale, which reports nothing.
+			expect(recoverable).not.toHaveBeenCalled();
 		} finally {
 			root.unmount();
 			container.remove();
 		}
 		expect(head.isConnected).toBe(false);
+	});
+
+	it('reports unchanged host island structural recovery while preserving its external publisher sibling', async () => {
+		const remote = pair(
+			`export function Remote() @{ <section data-publisher="">publisher body</section> }`,
+			'/remote/RecoveryControl.tsrx',
+			dev,
+		);
+		const snapshot = transport(remote.server['Remote']);
+		const S = Server.externalSnapshotBoundary({
+			authority,
+			component: remote.server['Remote'],
+			snapshot,
+		});
+		const C = Client.externalSnapshotBoundary({
+			authority,
+			component: remote.client['Remote'],
+			snapshot,
+		});
+		const source = `import {Hydrate} from 'octane';import {load} from 'octane/hydration';import {Boundary} from './remote';export function App() @{ <main><Hydrate split={false} when={load()}><p data-host="stable">unchanged host</p></Hydrate><Boundary /></main> }`;
+		const server = pair(source, '/host/RecoveryControl.tsrx', dev, {
+			'./remote': { Boundary: S },
+		}).server;
+		const client = pair(source, '/host/RecoveryControl.tsrx', dev, {
+			'./remote': { Boundary: C },
+		}).client;
+		const options = { externalSnapshots: { documentId: 'structural-recovery-control' } };
+		const container = document.createElement('div');
+		container.innerHTML = (await prerender(server['App'], {}, options)).html;
+		activateStreamedMarkup(container);
+		document.body.append(container);
+		const host = container.querySelector('[data-host]')!;
+		const publisher = container.querySelector('[data-publisher]')!;
+		const changed = document.createElement('section');
+		changed.textContent = 'corrupted host island';
+		host.replaceWith(changed);
+		const recoverable = vi.fn<(error: unknown) => void>();
+		const uncaught: unknown[] = [];
+		const root = Client.hydrateRoot(
+			container,
+			client['App'],
+			{},
+			{
+				...options,
+				onRecoverableError: recoverable,
+				onUncaughtError: (error) => uncaught.push(error),
+			},
+		);
+		try {
+			await Client.act(async () => {});
+			expect(container.querySelector('[data-host]')?.textContent).toBe('unchanged host');
+			expect(container.querySelector('[data-host]')).not.toBe(host);
+			expect(changed.isConnected).toBe(false);
+			expect(container.querySelector('[data-publisher]')).toBe(publisher);
+			expect(publisher.textContent).toBe('publisher body');
+			expect(uncaught).toEqual([]);
+			expect(recoverable).toHaveBeenCalledTimes(1);
+			expect(recoverable).toHaveBeenCalledWith(
+				expect.objectContaining({
+					message: expect.stringMatching(
+						/^Hydration failed because the server rendered HTML didn't match the client\./,
+					),
+				}),
+			);
+		} finally {
+			root.unmount();
+			container.remove();
+		}
 	});
 
 	it('delivers external native CSS before a late streamed content segment', async () => {
@@ -1107,12 +1488,15 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 			signals.push(signal!);
 			if (captured !== undefined) {
 				expect(signals[0]!.aborted).toBe(true);
-				return Server.renderExternalSnapshot(server.Remote, request, { authority, signal });
+				return Server.renderExternalSnapshot(server['Remote'], request, {
+					authority,
+					...(signal === undefined ? {} : { signal }),
+				});
 			}
 			captured = request;
 			return pending.promise;
 		};
-		const S = Server.externalSnapshotBoundary({ authority, component: server.Remote, snapshot });
+		const S = Server.externalSnapshotBoundary({ authority, component: server['Remote'], snapshot });
 		const sApp = () =>
 			Server.createElement(Server.Suspense, {
 				fallback: Server.createElement('p', { children: 'waiting' }),
@@ -1132,7 +1516,9 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		);
 		const html = new Response(stream).text();
 		await vi.waitFor(() => expect(captured).toBeDefined());
-		pending.resolve(await Server.renderExternalSnapshot(server.Remote, captured!, { authority }));
+		pending.resolve(
+			await Server.renderExternalSnapshot(server['Remote'], captured!, { authority }),
+		);
 		const text = await html;
 		expect(serverErrors).toEqual([]);
 		expect(heads).toEqual(['']);
@@ -1149,7 +1535,7 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		expect(document.querySelectorAll('style[data-octane]')).toHaveLength(1);
 		expect(getComputedStyle(section).color).toBe('rgb(102, 51, 153)');
 		const client = loadCompiledFixtureSource(source, { ...fixture, mode: 'client' });
-		const C = Client.externalSnapshotBoundary({ authority, component: client.Remote, snapshot });
+		const C = Client.externalSnapshotBoundary({ authority, component: client['Remote'], snapshot });
 		const cApp = () =>
 			Client.createElement(Client.Suspense, {
 				fallback: Client.createElement('p', { children: 'waiting' }),
@@ -1171,3 +1557,392 @@ describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 		}
 	});
 });
+
+// Keep the adapter's descriptor/wrapper shape separate from the compiled JSX
+// regression above. The controls vary only native ownership and SSR delivery;
+// explicit development-mode coverage remains in the original four-case test.
+it.each([
+	{ boundary: 'plain', delivery: 'prerender' },
+	{ boundary: 'plain', delivery: 'stream' },
+	{ boundary: 'publisher', delivery: 'prerender' },
+	{ boundary: 'publisher', delivery: 'stream' },
+	{ boundary: 'external', delivery: 'prerender' },
+	{ boundary: 'external', delivery: 'stream' },
+] as const)(
+	'retains adapter-shaped lazy SSR nodes with $boundary ownership and $delivery delivery',
+	async ({ boundary, delivery }) => {
+		const serverTheme = Server.createContext({ title: 'default' });
+		const clientTheme = Client.createContext({ title: 'default' });
+		releases.push(
+			registerExternalSnapshotContext(serverTheme, {
+				key: 'theme',
+				encode: (value: { title: string }) => value.title,
+				decode: (value) => ({ title: String(value) }),
+			}),
+		);
+		const fixture = { id: '/remote/Widget.tsx', compileOptions: { dev: false } };
+		const server = loadCompiledFixtureSource(remoteSource, {
+			...fixture,
+			mode: 'server',
+			runtimeModules: {
+				'./contexts': { Theme: serverTheme },
+				'octane/signals/server': ServerSignals,
+			},
+		});
+		const client = loadCompiledFixtureSource(remoteSource, {
+			...fixture,
+			mode: 'client',
+			runtimeModules: {
+				'./contexts': { Theme: clientTheme },
+				'octane/signals/client': ClientSignals,
+			},
+		});
+		type Props = { label: string; initial: number };
+		const admitted = deferred<void>();
+		const loaded = deferred<{ default: (typeof client)['Remote'] }>();
+		const loadInner = vi.fn(() => loaded.promise);
+		const inner = Client.lazy(loadInner);
+		const snapshot = vi.fn(transport(server['Remote']));
+		const serverBoundary =
+			boundary === 'external'
+				? Server.externalSnapshotBoundary({
+						authority,
+						component: server['Remote'],
+						snapshot,
+						contextKeys: ['theme'],
+					})
+				: boundary === 'publisher'
+					? Server.publisherBoundary(server['Remote'], { publisherKey: 'adapter/Widget' })
+					: server['Remote'];
+		const clientBoundary =
+			boundary === 'external'
+				? Client.externalSnapshotBoundary({
+						authority,
+						component: inner,
+						snapshot,
+						contextKeys: ['theme'],
+					})
+				: boundary === 'publisher'
+					? Client.publisherBoundary(inner, { publisherKey: 'adapter/Widget' })
+					: inner;
+		const ServerLoaded = (props: Props) => {
+			Server.preinit('/adapter-publisher.css', { as: 'style', precedence: 'federated' });
+			return Server.createElement(serverBoundary, props);
+		};
+		const ClientLoaded = (props: Props) => {
+			Client.preinit('/adapter-publisher.css', { as: 'style', precedence: 'federated' });
+			return Client.createElement(clientBoundary, props);
+		};
+		const serverModule = deferred<{ default: typeof ServerLoaded }>();
+		const serverLazy = Server.lazy(() => serverModule.promise);
+		const clientLazy = Client.lazy(async () => {
+			await admitted.promise;
+			return { default: ClientLoaded };
+		});
+		const serverApp = (props: { title: string }) =>
+			Server.createElement(serverTheme, {
+				value: { title: props.title },
+				children: Server.createElement(Server.Suspense, {
+					fallback: undefined,
+					children: Server.createElement(serverLazy, { label: 'Count', initial: 3 }),
+				}),
+			});
+		const clientApp = (props: { title: string }) =>
+			Client.createElement(clientTheme, {
+				value: { title: props.title },
+				children: Client.createElement(Client.Suspense, {
+					fallback: undefined,
+					children: Client.createElement(clientLazy, { label: 'Count', initial: 3 }),
+				}),
+			});
+		const identity = {
+			buildId: 'adapter-lazy-build',
+			documentId: 'adapter-lazy-' + boundary + '-' + delivery,
+		};
+		const options = {
+			externalSnapshots: { documentId: identity.documentId },
+			streamedSignals: identity,
+			earlySignalBootstrap: 'external' as const,
+		};
+		const errors: unknown[] = [];
+		const container = document.createElement('div');
+		document.body.append(container);
+		let root: ReturnType<typeof Client.hydrateRoot> | undefined;
+		let bridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
+		let stream: ReturnType<typeof Server.renderToPipeableStream> | undefined;
+		try {
+			let html: string;
+			if (delivery === 'stream') {
+				const collector = createPipeableCollector();
+				const shell = deferred<void>();
+				stream = Server.renderToPipeableStream(
+					serverApp,
+					{ title: 'server' },
+					{
+						...options,
+						onShellReady: () => shell.resolve(),
+						onShellError: (error) => shell.reject(error),
+						onError: (error) => errors.push(error),
+					},
+				);
+				stream.pipe(collector.destination);
+				await shell.promise;
+				serverModule.resolve({ default: ServerLoaded });
+				html = await collector.ended;
+			} else {
+				const rendered = prerender(serverApp, { title: 'server' }, options);
+				serverModule.resolve({ default: ServerLoaded });
+				html = (await rendered).html;
+			}
+			container.innerHTML = Server.earlySignalBootstrapScript() + html;
+			activateStreamedMarkup(container);
+			const section = container.querySelector('section');
+			expect(section, 'resolved server section').not.toBeNull();
+			const input = section!.querySelector('input')!;
+			const button = section!.querySelector('button')!;
+			const id = input.id;
+			input.value = 'typed before hydration';
+			const assertRetained = (phase: string) => {
+				expect.soft(errors, phase + ': renderer errors').toEqual([]);
+				expect.soft(container.querySelector('section'), phase + ': section').toBe(section);
+				expect.soft(container.querySelector('input'), phase + ': input').toBe(input);
+				expect.soft(container.querySelector('button'), phase + ': counter').toBe(button);
+				expect.soft(container.querySelector('input')?.id, phase + ': ID').toBe(id);
+				expect
+					.soft(container.querySelector('input')?.value, phase + ': draft')
+					.toBe('typed before hydration');
+			};
+			bridge = bootstrapStreamedSignalHydration(identity);
+			await Client.act(() => {
+				root = Client.hydrateRoot(
+					container,
+					clientApp,
+					{ title: 'server' },
+					{
+						externalSnapshots: options.externalSnapshots,
+						signalOwner: bridge!.signalOwner,
+						onRecoverableError: (error) => errors.push(error),
+						onUncaughtError: (error) => errors.push(error),
+					},
+				);
+			});
+			assertRetained('before admission');
+			expect(loadInner).not.toHaveBeenCalled();
+			await Client.act(() => admitted.resolve());
+			await vi.waitFor(() => expect(loadInner).toHaveBeenCalled());
+			assertRetained('after admission, before module');
+			await Client.act(() => loaded.resolve({ default: client['Remote'] }));
+			assertRetained('after module load');
+			expect(container.querySelector('label')!.textContent).toBe('server');
+			await Client.act(() => container.querySelector('button')!.click());
+			expect(container.querySelector('button')!.textContent).toBe('Count:4');
+			await Client.act(() => root!.render(clientApp, { title: 'live host' }));
+			assertRetained('after live host update');
+			expect(container.querySelector('label')!.textContent).toBe('live host');
+			expect(container.querySelector('button')!.textContent).toBe('Count:4');
+			expect(errors).toEqual([]);
+		} finally {
+			admitted.resolve();
+			loaded.resolve({ default: client['Remote'] });
+			serverModule.resolve({ default: ServerLoaded });
+			root?.unmount();
+			bridge?.dispose();
+			stream?.abort();
+			container.remove();
+			Reflect.deleteProperty(globalThis, '__octaneStreamedSignalSelections');
+			Reflect.deleteProperty(globalThis, '__octaneStreamedRenderer');
+		}
+	},
+);
+
+it.each([false, true])(
+	'adopts a streamed external useState component through delayed forwarding lazy wrappers, transparent contexts=%s',
+	async (contexts) => {
+		type Props = { label: string };
+		const source = `import { useLayoutEffect, useState } from 'octane';
+import { recordCommit } from './observer';
+export function Remote(props: { label: string }) {
+  const [count, setCount] = useState(3);
+  useLayoutEffect(() => { recordCommit(); }, []);
+  return <section data-worker-adoption=""><input defaultValue="server draft" /><button data-counter="" onClick={() => setCount(value => value + 1)}>{props.label}: {count}</button></section>;
+}`;
+		let commits = 0;
+		const fixture = { id: '/worker-adoption/Widget.tsx', compileOptions: { dev: false } };
+		const server = loadCompiledFixtureSource<{
+			Remote: (props: Props) => ReturnType<typeof Server.createElement>;
+		}>(source, {
+			...fixture,
+			mode: 'server',
+			runtimeModules: { './observer': { recordCommit() {} } },
+		});
+		const client = loadCompiledFixtureSource<{ Remote: Client.ComponentBody<Props> }>(source, {
+			...fixture,
+			mode: 'client',
+			runtimeModules: {
+				'./observer': {
+					recordCommit() {
+						commits++;
+					},
+				},
+			},
+		});
+		const admitted = deferred<void>();
+		const loaded = deferred<{ default: Client.ComponentBody<Props> }>();
+		const loadInner = vi.fn(() => loaded.promise);
+		const inner = Client.lazy(loadInner);
+		const snapshot = transport(server.Remote);
+		const serverBoundary = Server.externalSnapshotBoundary({
+			authority,
+			component: server.Remote,
+			snapshot,
+			contextKeys: [],
+		});
+		const clientBoundary = Client.externalSnapshotBoundary({
+			authority,
+			component: inner,
+			snapshot,
+			contextKeys: [],
+		});
+		const ServerLoaded = (props: Props) => Server.createElement(serverBoundary, props);
+		const ClientLoaded = (props: Props) => Client.createElement(clientBoundary, props);
+		const Forwarded: Client.ComponentBody<Props> = (props, scope, extra) =>
+			client.Remote(props, scope, extra);
+		const serverLazy = Server.lazy(async () => ({ default: ServerLoaded }));
+		const clientLazy = Client.lazy(async () => {
+			await admitted.promise;
+			return { default: ClientLoaded };
+		});
+		const serverRemote = () =>
+			Server.createElement(Server.Suspense, {
+				fallback: undefined,
+				children: Server.createElement(serverLazy, { label: 'Native' }),
+			});
+		const clientRemote = () =>
+			Client.createElement(Client.Suspense, {
+				fallback: undefined,
+				children: Client.createElement(clientLazy, { label: 'Native' }),
+			});
+		// Server and client application adapters insert transparent return-based
+		// wrappers around two real providers; component names and call ownership
+		// differ while the publisher's visible output remains identical.
+		type ProviderProps = { children?: unknown };
+		const serverWorkerContext = Server.createContext('worker');
+		const serverFederationContext = Server.createContext('federation');
+		const clientWorkerContext = Client.createContext('worker');
+		const clientFederationContext = Client.createContext('federation');
+		const ServerWorkerRoot = (props: ProviderProps) =>
+			Server.createElement(serverWorkerContext, {
+				value: 'worker',
+				children: props.children,
+			});
+		const ServerFederationRoot = (props: ProviderProps) =>
+			Server.createElement(serverFederationContext, {
+				value: 'federation',
+				children: props.children,
+			});
+		const ClientWorkerRoot = (props: ProviderProps) =>
+			Client.createElement(clientWorkerContext, {
+				value: 'worker',
+				children: props.children,
+			});
+		const ClientFederationRoot = (props: ProviderProps) =>
+			Client.createElement(clientFederationContext, {
+				value: 'federation',
+				children: props.children,
+			});
+		const ServerInputApp = () => Server.createElement(serverRemote, {});
+		const ClientInputApp = () => Client.createElement(clientRemote, {});
+		const ServerApp = () =>
+			Server.createElement(ServerFederationRoot, {
+				children: Server.createElement(ServerInputApp, {}),
+			});
+		const ServerNativeApp = () =>
+			Server.createElement(ServerWorkerRoot, {
+				children: Server.createElement(ServerApp, {}),
+			});
+		const ClientFederationApplication = () =>
+			Client.createElement(ClientFederationRoot, {
+				children: Client.createElement(ClientInputApp, {}),
+			});
+		const ClientWorkerApplication = () =>
+			Client.createElement(ClientWorkerRoot, {
+				children: Client.createElement(ClientFederationApplication, {}),
+			});
+		const serverApp = contexts ? ServerNativeApp : serverRemote;
+		const clientApp = contexts ? ClientWorkerApplication : clientRemote;
+		const identity = {
+			buildId: 'forwarded-host',
+			documentId: 'forwarded-external-document-' + contexts,
+		};
+		const errors: unknown[] = [];
+		const collector = createPipeableCollector();
+		const stream = Server.renderToPipeableStream(
+			serverApp,
+			{},
+			{
+				externalSnapshots: { documentId: identity.documentId },
+				streamedSignals: identity,
+				earlySignalBootstrap: 'external',
+				onError: (error) => errors.push(error),
+			},
+		);
+		stream.pipe(collector.destination);
+		const container = document.createElement('div');
+		document.body.append(container);
+		let root: ReturnType<typeof Client.hydrateRoot> | undefined;
+		let bridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
+		try {
+			container.innerHTML = Server.earlySignalBootstrapScript() + (await collector.ended);
+			activateStreamedMarkup(container, { removeScripts: false });
+			const section = container.querySelector('section');
+			const input = section?.querySelector('input');
+			const button = section?.querySelector('button');
+			if (!section || !input || !button)
+				throw new Error('The streamed publisher did not emit its Widget');
+			input.value = 'typed before hydration';
+			const assertRetained = () => {
+				expect(container.querySelectorAll('section')).toHaveLength(1);
+				expect(container.querySelectorAll('button')).toHaveLength(1);
+				expect(container.querySelector('section')).toBe(section);
+				expect(container.querySelector('input')).toBe(input);
+				expect(container.querySelector('button')).toBe(button);
+				expect(input.value).toBe('typed before hydration');
+				expect(errors).toEqual([]);
+			};
+			bridge = bootstrapStreamedSignalHydration(identity);
+			await Client.act(() => {
+				root = Client.hydrateRoot(
+					container,
+					clientApp,
+					{},
+					{
+						externalSnapshots: { documentId: identity.documentId },
+						signalOwner: bridge!.signalOwner,
+						onRecoverableError: (error) => errors.push(error),
+						onUncaughtError: (error) => errors.push(error),
+					},
+				);
+			});
+			assertRetained();
+			expect(loadInner).not.toHaveBeenCalled();
+			await Client.act(() => admitted.resolve());
+			await vi.waitFor(() => expect(loadInner).toHaveBeenCalledOnce());
+			assertRetained();
+			expect(commits).toBe(0);
+			await Client.act(() => loaded.resolve({ default: Forwarded }));
+			assertRetained();
+			expect(commits).toBe(1);
+			expect(button.textContent).toBe('Native: 3');
+			await Client.act(() => button.click());
+			assertRetained();
+			expect(button.textContent).toBe('Native: 4');
+		} finally {
+			admitted.resolve();
+			loaded.resolve({ default: Forwarded });
+			root?.unmount();
+			bridge?.dispose();
+			stream.abort();
+			container.remove();
+		}
+	},
+);

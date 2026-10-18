@@ -18799,9 +18799,10 @@ function activateHydrateBoundary(state: HydrateSlot): void {
 	}
 	const hydration =
 		preserved?.hydration ?? new HydrationCapability(block, getNextSibling(state.start), null);
-	// Native publishers keep ancestor context live; only their native signal reads
-	// have server history. Adopt the same shape while reconciling dynamic values.
-	hydration.reconcileValues = state.props.__publisher !== undefined;
+	// Native publishers and external snapshots keep ancestor context live; only
+	// native signal reads have server history. Reconcile values within the same shape.
+	hydration.reconcileValues =
+		state.props.__publisher !== undefined || state.props.__external !== undefined;
 	// A suspended first attempt keeps its capability, so re-check each attempt.
 	if (!hydration.staleServerValues && hydrateServerValuesStale(state))
 		hydration.staleServerValues = true;
@@ -35648,6 +35649,9 @@ function scopedElementDescriptor<P>(
 	children: () => unknown,
 	invocationSite?: string,
 ): ElementDescriptor<P> {
+	if (typeof type === 'function' && isRendererContext(type)) {
+		registerClientRendererBridge(renderClientContextProvider, flushSync);
+	}
 	const src = (props ?? null) as any;
 	const hasKey = hasElementConfigKey(src);
 	const key = hasKey ? '' + src.key : null;
@@ -36255,6 +36259,9 @@ export function componentSlot(
 	if (!activity && typeof comp !== 'function' && typeof comp !== 'string') {
 		throw invalidElementTypeError(comp);
 	}
+	if (typeof comp === 'function' && isRendererContext(comp)) {
+		registerClientRendererBridge(renderClientContextProvider, flushSync);
+	}
 	// Dynamic JSX tags can resolve to a host STRING at runtime. Keep this
 	// descriptor/de-opt capability in the generic entry point: compiler-proven
 	// void component calls can then retain the function-only core without also
@@ -36347,9 +36354,6 @@ export function componentSlotFromConfig(
 	invocationSite?: string,
 	anchor?: Node | null,
 ): void {
-	if (typeof comp === 'function' && isRendererContext(comp)) {
-		registerClientRendererBridge(renderClientContextProvider, flushSync);
-	}
 	const key = hasElementConfigKey(config) ? '' + config.key : undefined;
 	const props = copyElementConfig(config);
 	applyElementDefaultProps(comp, props);

@@ -72,7 +72,7 @@ export function loadPlainHookFixtureSource<T extends CompiledFixtureModule = Com
 		dev: options.hmr ?? false,
 		profile: false,
 		inlineHookMemo: options.inlineHookMemo,
-		manualSlots: options.manualSlots,
+		...(options.manualSlots === undefined ? {} : { manualSlots: options.manualSlots }),
 	});
 	// The plain path deliberately leaves TypeScript to its host toolchain.
 	// Strip it here exactly once, then use the same evaluation boundary as the
@@ -222,7 +222,7 @@ export function loadServerFixture<T extends CompiledFixtureModule = CompiledFixt
 	return loadCompiledFixtureSource<T>(readFileSync(absolute, 'utf8'), {
 		id: options.id ?? defaultId,
 		mode: 'server',
-		compileOptions: options.compileOptions,
-		runtimeModules: options.runtimeModules,
+		...(options.compileOptions === undefined ? {} : { compileOptions: options.compileOptions }),
+		...(options.runtimeModules === undefined ? {} : { runtimeModules: options.runtimeModules }),
 	});
 }

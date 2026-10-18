@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { hydrateRoot } from 'octane';
 import { renderToString } from 'octane/server';
-import type { AnyRouter } from '@tanstack/router-core';
 import { RouterClient } from '@octanejs/tanstack-router/ssr/client';
 import { mount, nextPaint } from '../_helpers';
+import { installServerHydration } from '../_server-hydration';
 import { createDeferred, makeRouterClientRouter } from '../_fixtures/router-client.tsrx';
 // @ts-expect-error the shared fixture plugin compiles the router graph for the server
 import * as server from '../_fixtures/router-client.tsrx?octane-ssr';
@@ -15,23 +15,6 @@ async function flush() {
 		await new Promise((r) => setTimeout(r, 0));
 		await nextPaint();
 	}
-}
-
-// The payload router-core's hydrate() reads: the root rendered on the server and
-// the ssr:false child is still pending, so hydrate() runs its loader on the client.
-function setDehydratedPayload(router: AnyRouter) {
-	const [rootMatch, clientMatch] = router.matchRoutes(router.stores.location.get());
-	(window as any).$_TSR = {
-		router: {
-			manifest: undefined,
-			lastMatchId: clientMatch.id,
-			matches: [
-				{ i: rootMatch.id, u: Date.now(), s: 'success', ssr: true },
-				{ i: clientMatch.id, u: Date.now(), s: 'pending', ssr: false },
-			],
-		},
-		buffer: [],
-	};
 }
 
 function isHidden(el: Element, container: Element) {
@@ -61,7 +44,7 @@ describe('@octanejs/tanstack-router — RouterClient', () => {
 	it('shows the root layout with the pending child once hydrate() settles', async () => {
 		const loader = createDeferred<string>();
 		const router = makeRouterClientRouter({ loader });
-		setDehydratedPayload(router);
+		await installServerHydration(server.makeRouterClientRouter({ isServer: true }));
 
 		const r = mount(RouterClient as any, { router });
 		await flush();
@@ -91,7 +74,7 @@ describe('@octanejs/tanstack-router — RouterClient', () => {
 
 		const loader = createDeferred<string>();
 		const router = makeRouterClientRouter({ loader });
-		setDehydratedPayload(router);
+		await installServerHydration(server.makeRouterClientRouter({ isServer: true }));
 		const errors: unknown[] = [];
 		const root = hydrateRoot(
 			container,
