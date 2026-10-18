@@ -279,7 +279,11 @@ import {
 	isRendererStreamToken,
 	rendererRangeClose,
 } from './stream-protocol.js';
-import { isRendererContext, registerClientRendererBridge } from './renderer-bridge.js';
+import {
+	hasRendererContexts,
+	isRendererContext,
+	registerClientRendererBridge,
+} from './renderer-bridge.js';
 import { defineRemovedContextMembers, registerContext } from './context-identity.js';
 import {
 	createNativeReadDriver,
@@ -36483,7 +36487,7 @@ export function componentSlot(
 	if (!activity && typeof comp !== 'function' && typeof comp !== 'string') {
 		throw invalidElementTypeError(comp);
 	}
-	if (typeof comp === 'function' && isRendererContext(comp)) {
+	if (hasRendererContexts && typeof comp === 'function' && isRendererContext(comp)) {
 		registerClientRendererBridge(renderClientContextProvider, flushSync);
 	}
 	// Dynamic JSX tags can resolve to a host STRING at runtime. Keep this

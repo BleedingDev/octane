@@ -16,10 +16,12 @@ let clientContextProvider: RendererContextProvider | undefined;
 let serverContextProvider: RendererContextProvider | undefined;
 let hostFlusher: RendererHostFlusher | undefined;
 const rendererContexts = new WeakSet<Function>();
+export let hasRendererContexts = false;
 
 /** Brand renderer-local contexts without observing authored function properties. */
 export function registerRendererContext(context: Function): void {
 	rendererContexts.add(context);
+	hasRendererContexts = true;
 }
 
 /** Recognize only renderer-local Providers at a dynamic JSX descriptor boundary. */
