@@ -37,7 +37,7 @@
       "arch": "any",
       "packageManager": "pnpm@12.9.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "d1e81429b31d21572627306d8bf3cbad1ea25a7fdb161d5e42fdf5069ee75cba"
+      "lockfileSha256": "cfa2c52ca7e8cec2a00df6a2c0a67b6fc444e580d520b920edb7032138a0c94b"
     }
   },
   "lanes": [
@@ -106,7 +106,7 @@
       "environment": "workspace-node",
       "project": "tanstack-router-ssr-query-pristine-types",
       "evidenceOrigin": "upstream-suite",
-      "notes": "Invokes the vendored upstream tsconfig.build.json under typescript55–typescript60, matching upstream test:types accept/reject evidence (no dedicated expectType artifacts).",
+      "notes": "Invokes the vendored upstream tsconfig.build.json under typescript55–typescript60, matching upstream test:types accept/reject evidence (no dedicated expectType artifacts). The pristine-only npm core alias follows @tanstack/react-router@1.170.41's exact router-core@1.171.34 dependency, so both upstream React and query integration declarations share that unmodified baseline; the adapted lane retains the host fork core.",
       "execution": {
         "kind": "typescript",
         "compiler": "tsc",
@@ -171,7 +171,7 @@
         {
           "path": "packages/tanstack-router-ssr-query/audit/type-probes/tsconfig.pristine.json",
           "role": "support",
-          "sha256": "eba45ac24d71cfe94866c7f2e5c66986abcb49c7ae47362439439bbcf7539aca"
+          "sha256": "36c2f68d9a692cfdd90426fea83efa52f6c06d222ed3f7404f48402524f80074"
         }
       ]
     },

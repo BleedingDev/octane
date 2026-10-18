@@ -29,6 +29,7 @@
     "@octanejs/tanstack-query": "workspace:*",
     "@octanejs/tanstack-router": "workspace:*",
     "@tanstack/router-core": "catalog:default",
+    "@tanstack/router-core-pristine": "npm:@tanstack/router-core@1.171.34",
     "@tanstack/react-query": "catalog:default",
     "@tanstack/react-router": "catalog:default",
     "@tanstack/react-router-ssr-query": "1.167.3",

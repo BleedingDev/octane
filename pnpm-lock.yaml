@@ -9338,6 +9338,9 @@ importers:
       '@tanstack/router-core':
         specifier: catalog:default
         version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz
+      '@tanstack/router-core-pristine':
+        specifier: npm:@tanstack/router-core@1.171.34
+        version: '@tanstack/router-core@1.171.34'
       '@tsrx/react':
         specifier: catalog:default
         version: 0.4.5(react@19.2.7)

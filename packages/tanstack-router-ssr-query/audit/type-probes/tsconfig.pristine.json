@@ -4,7 +4,11 @@
     "jsx": "react-jsx",
     "jsxImportSource": "react",
     "rootDir": "../../upstream/src",
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@tanstack/router-core": ["../../node_modules/@tanstack/router-core-pristine"],
+      "@tanstack/router-core/*": ["../../node_modules/@tanstack/router-core-pristine/dist/esm/*"]
+    }
   },
   "include": ["../../upstream/src"]
 }
