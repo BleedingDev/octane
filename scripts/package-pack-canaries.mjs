@@ -824,6 +824,8 @@ import {
 	associateRouterRenderProfile,
 	captureRouterRenderSnapshot,
 	createRouterRenderRouteTree,
+	defaultParseSearch,
+	defaultStringifySearch,
 	disposeRouterRenderSnapshot,
 	getRouterRenderProfile,
 	registerRouterRenderProfile,
@@ -869,7 +871,7 @@ const packedRouterProfile: RouterRenderProfile = {
 	id: { key: 'packed-router', version: '1' },
 	assertHost: router => assertDefaultRouterRenderHost(router),
 	createRoutingTree: snapshot => createRouterRenderRouteTree(snapshot.routes),
-	routingOptions: () => ({}),
+	routingOptions: () => ({ parseSearch: defaultParseSearch, stringifySearch: defaultStringifySearch }),
 };
 export async function verifyPackedSnapshotTypes(request: ExternalSnapshotRequest, options: ExternalSnapshotRenderOptions, component: Parameters<typeof renderExternalSnapshot>[0]) {
 	const prepared: PreparedExternalSnapshotRequest = await prepareExternalSnapshotRequest(serializeExternalSnapshotRequest(request), options);

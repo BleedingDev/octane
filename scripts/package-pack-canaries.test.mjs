@@ -605,6 +605,86 @@ declare namespace NodeJS { interface Process { env: { NODE_ENV?: string } } }
 		});
 	}
 
+	test('generated router profiles satisfy required native search codecs under strict TypeScript', async () => {
+		const ts = (await import('typescript')).default;
+		const routerDirectory = path.resolve(import.meta.dirname, '../packages/tanstack-router');
+		const contractFile = path.join(routerDirectory, 'src/ssr/routerRenderSnapshot.ts');
+		const contract = ts.createSourceFile(
+			contractFile,
+			fs.readFileSync(contractFile, 'utf8'),
+			ts.ScriptTarget.Latest,
+			true,
+		);
+		const routingType = contract.statements.find(
+			(node) => ts.isTypeAliasDeclaration(node) && node.name.text === 'RouterRenderRoutingOptions',
+		);
+		assert.ok(routingType, 'the probe must use the real public routing contract');
+		const filename = path.join(routerDirectory, 'packed-routing-contract.ts');
+		const options = {
+			strict: true,
+			noEmit: true,
+			skipLibCheck: false,
+			types: [],
+			target: ts.ScriptTarget.ESNext,
+			module: ts.ModuleKind.ESNext,
+			moduleResolution: ts.ModuleResolutionKind.Bundler,
+		};
+		const diagnose = (source) => {
+			const host = ts.createCompilerHost(options);
+			const getSourceFile = host.getSourceFile.bind(host);
+			host.getSourceFile = (file, languageVersion, ...rest) =>
+				file === filename
+					? ts.createSourceFile(file, source, languageVersion, true)
+					: getSourceFile(file, languageVersion, ...rest);
+			return ts.getPreEmitDiagnostics(ts.createProgram([filename], options, host));
+		};
+		for (const render of [
+			renderPackedTsrxConsumerTypeProbe,
+			renderPackedStrictBrowserConsumerTypeProbe,
+		]) {
+			const probe = ts.createSourceFile('probe.ts', render(), ts.ScriptTarget.Latest, true);
+			const profile = probe.statements
+				.filter(ts.isVariableStatement)
+				.flatMap((node) => node.declarationList.declarations)
+				.find((node) => node.name.getText(probe) === 'packedRouterProfile');
+			const routingOptions = profile.initializer.properties.find(
+				(node) => node.name?.getText(probe) === 'routingOptions',
+			).initializer;
+			const nativeImport = probe.statements.find(
+				(node) =>
+					ts.isImportDeclaration(node) && node.moduleSpecifier.text === '@octanejs/tanstack-router',
+			);
+			const codecs = nativeImport.importClause.namedBindings.elements
+				.filter((node) => ['defaultParseSearch', 'defaultStringifySearch'].includes(node.name.text))
+				.map((node) => node.getText(probe));
+			// Isolate the generated expression and the actual public alias so this
+			// focused control need not compile the unrelated published TSRX inventory.
+			const source = `import { type AnyRouter, ${codecs.join(', ')} } from '@tanstack/router-core';
+${routingType.getText(contract)}
+const routingOptions: () => RouterRenderRoutingOptions = ${routingOptions.getText(probe)};
+const accepted = routingOptions();
+`;
+			assert.deepEqual(
+				diagnose(source).map((diagnostic) =>
+					ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'),
+				),
+				[],
+			);
+			for (const codec of ['parseSearch', 'stringifySearch']) {
+				const diagnostics = diagnose(`${source}
+const { ${codec}: omitted, ...incomplete } = accepted;
+const rejected: RouterRenderRoutingOptions = incomplete;
+`);
+				assert.equal(diagnostics.length, 1);
+				assert.equal(diagnostics[0].code, 2741);
+				assert.match(
+					ts.flattenDiagnosticMessageText(diagnostics[0].messageText, '\n'),
+					new RegExp(codec),
+				);
+			}
+		}
+	});
+
 	test('rejects TSRX parser diagnostics even when the checker exits successfully', () => {
 		const diagnostic =
 			'[tsrx-tsc] node_modules/@octanejs/source/src/Component.tsrx: Add a trailing comma, as in `<T,>() => ...`.\n';
