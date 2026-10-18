@@ -1,5 +1,10 @@
 import { formatClientError } from '../error-codes.client.generated.js';
-import { documentSignalOwner } from '../signals/document-owner.js';
+import {
+	documentSignalOwner,
+	registerSignalDocumentLifecycle,
+	type SignalDocumentLifecycleParticipant,
+} from '../signals/document-owner.js';
+export { joinSignalDocumentLifecycle } from '../signals/document-owner.js';
 import { createSignalOwnerLifecycle } from '../signals/facade.js';
 import type { SignalOwner } from '../signals/types.js';
 import type { IndependentHydrateLifecycle } from './independent-island.js';
@@ -23,38 +28,6 @@ interface DocumentLifecycleParticipant {
 	readonly onRetire: () => void;
 }
 
-interface DocumentLifecycleRegistration {
-	readonly documentId: string;
-	join(
-		owner: SignalOwner,
-		streamedHydration: Pick<StreamedSignalResults, 'suspend'> | undefined,
-		onRetire: () => void,
-	): () => void;
-}
-
-const documentLifecycles = /* @__PURE__ */ new WeakMap<
-	Document,
-	Set<DocumentLifecycleRegistration>
->();
-
-/** @internal Publishers borrow the host's identity check, never its data owner. */
-export function joinSignalDocumentLifecycle(options: {
-	readonly document: Document;
-	readonly documentId: string;
-	readonly signalOwner: SignalOwner;
-	readonly streamedHydration: Pick<StreamedSignalResults, 'suspend'> | undefined;
-	readonly onRetire: () => void;
-}): (() => void) | undefined {
-	// A manual renderer may opt out of document lifecycle handling entirely.
-	const registrations = documentLifecycles.get(options.document);
-	if (registrations === undefined) return;
-	for (const registration of registrations) {
-		if (registration.documentId === options.documentId)
-			return registration.join(options.signalOwner, options.streamedHydration, options.onRetire);
-	}
-	throw new TypeError(formatClientError(357));
-}
-
 /** Optional feature-local lifetime for one executing document, never an account manager. */
 export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleOptions) {
 	const document = options.document;
@@ -69,9 +42,19 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 	let waiting: Promise<boolean> | undefined;
 	let wake: ((active: boolean) => void) | undefined;
 	let participants: Set<DocumentLifecycleParticipant> | undefined;
-	const registration: DocumentLifecycleRegistration = {
+	const registration = {
+		get active() {
+			return !disposed && !frozen;
+		},
+		whenActive(): Promise<boolean> {
+			return disposed ? Promise.resolve(false) : (waiting ?? Promise.resolve(true));
+		},
 		documentId: options.documentId,
-		join(signalOwner, streamedHydration, onRetire) {
+		join(
+			signalOwner: SignalOwner,
+			streamedHydration: Pick<StreamedSignalResults, 'suspend'> | undefined,
+			onRetire: () => void,
+		): SignalDocumentLifecycleParticipant {
 			const participant = {
 				owner: createSignalOwnerLifecycle(signalOwner),
 				streamedHydration,
@@ -91,9 +74,13 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 				participant.owner.retire();
 				throw error;
 			}
-			return () => {
+			const leave = () => {
 				participants!.delete(participant);
 			};
+			return Object.defineProperties(leave, {
+				active: { get: () => !disposed && !frozen },
+				whenActive: { value: () => registration.whenActive() },
+			}) as SignalDocumentLifecycleParticipant;
 		},
 	};
 	const compatible = (): boolean => {
@@ -119,9 +106,7 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 		disposed = true;
 		view.removeEventListener('pagehide', hide);
 		view.removeEventListener('pageshow', show);
-		const registrations = documentLifecycles.get(document)!;
-		registrations.delete(registration);
-		if (registrations.size === 0) documentLifecycles.delete(document);
+		unregister();
 		try {
 			// Unmount islands while their document data is still live. Retiring first
 			// would notify each island of the retirement and break its cleanups.
@@ -208,13 +193,11 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 	};
 	view.addEventListener('pagehide', hide);
 	view.addEventListener('pageshow', show);
-	let registrations = documentLifecycles.get(document);
-	if (registrations === undefined) documentLifecycles.set(document, (registrations = new Set()));
-	registrations.add(registration);
+	const unregister = registerSignalDocumentLifecycle(document, registration);
 	return {
 		signalOwner,
 		whenActive(): Promise<boolean> {
-			return disposed ? Promise.resolve(false) : (waiting ?? Promise.resolve(true));
+			return registration.whenActive();
 		},
 		dispose,
 	};

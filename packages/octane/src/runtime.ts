@@ -28,11 +28,12 @@ import {
 	type ExternalSnapshotBoundaryOptions,
 	type ExternalSnapshotAuthority,
 } from './external-snapshot-protocol.js';
-import { bootstrapStreamedSignalHydration } from './hydration/streamed-signals.js';
+import type { bootstrapStreamedSignalHydration } from './hydration/streamed-signals.js';
 import { getNativeHotOwnerDriver } from './native-hot-owner.js';
 import type { HotSignalOwnerProof } from './signals/hot-declarations.js';
 import {
 	getNativeStreamedAuthority,
+	nativeStreamedSignalBootstrap,
 	type NativeStreamedAuthority,
 } from './hydration/native-streamed-authority.js';
 import {
@@ -42,7 +43,10 @@ import {
 	type PublisherBoundaryDescriptor,
 } from './publisher-boundary-protocol.js';
 
-import { joinSignalDocumentLifecycle } from './hydration/document-lifecycle.js';
+import {
+	joinSignalDocumentLifecycle,
+	type SignalDocumentLifecycleParticipant,
+} from './signals/document-owner.js';
 
 import { hydrating, hydrationStarted, setHydrating, startHydration } from './hydration-flag.js';
 import { resolveHookPath } from './hook-slot-cache.js';
@@ -18305,6 +18309,13 @@ function beginHydrateStreamWait(state: HydrateSlot): Promise<void> | null {
 }
 
 function requestHydrateBoundary(state: HydrateSlot): void {
+	// Native publishers must install ingress and join the committed document before
+	// queued interaction can activate their first child read.
+	if (
+		(state.props.__external !== undefined || state.props.__publisher !== undefined) &&
+		!preparedNativePublisherHydrations?.has(state)
+	)
+		return;
 	if (state.hydrated || state.activationRequested || state.block.disposed) return;
 	// A direct strategy prop can become never() after an earlier installer was
 	// registered. Its cleanup should cancel normal callbacks, but guard here too:
@@ -19227,12 +19238,71 @@ export const Hydrate: ComponentBody<HydrateProps> =
 export const __HydrateCompiled: ComponentBody<HydrateProps> =
 	/* @__PURE__ */ initializeHydrateComponent(compiledHydrateBoundaryBody);
 
+// Allocate native preparation state only for an actual committed publisher.
+let preparedNativePublisherHydrations: WeakSet<HydrateSlot> | undefined;
+function prepareNativePublisherHydration(
+	state: HydrateSlot,
+	scope: Scope,
+	documentId: string | undefined,
+	streamed: boolean,
+	initialize: () => () => void,
+): void {
+	let disposed = false;
+	let release: (() => void) | undefined;
+	let cancelWait: (() => void) | undefined;
+	// Join before loading so retirement/freeze cannot race a delayed engine import.
+	const participant =
+		documentId === undefined
+			? undefined
+			: joinPublisherLifecycle(state, state.idState.dataOwner!, documentId, undefined);
+	registerHookCleanup(scope, () => {
+		disposed = true;
+		cancelWait?.();
+		participant?.();
+		release?.();
+	});
+	const activate = (): void => {
+		if (disposed || state.block.disposed || state.parentBlock.disposed) return;
+		release = initialize();
+		participant?.();
+		(preparedNativePublisherHydrations ??= new WeakSet()).add(state);
+		requestHydrateBoundary(state);
+	};
+	// An already bootstrapped native document preserves synchronous activation.
+	if ((!streamed || nativeStreamedSignalBootstrap !== undefined) && participant?.active !== false) {
+		activate();
+		return;
+	}
+	const ready =
+		streamed && nativeStreamedSignalBootstrap === undefined
+			? import('./hydration/streamed-signals.js')
+			: Promise.resolve();
+	void ready
+		.then(async () => {
+			if (disposed) return;
+			while (participant !== undefined && !participant.active) {
+				if (disposed) return;
+				const active = await new Promise<boolean>((resolve) => {
+					cancelWait = () => resolve(false);
+					void participant.whenActive().then(resolve);
+				});
+				cancelWait = undefined;
+				if (!active || disposed) return;
+			}
+			activate();
+		})
+		.catch((error) => {
+			participant?.();
+			if (!disposed && !state.block.disposed) failHydrateBoundary(state, error);
+		});
+}
+
 function joinPublisherLifecycle(
 	state: HydrateSlot,
 	signalOwner: SignalOwner,
 	documentId: string,
 	streamedHydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined,
-): (() => void) | undefined {
+): SignalDocumentLifecycleParticipant | undefined {
 	return joinSignalDocumentLifecycle({
 		document: state.wrapper.ownerDocument,
 		documentId,
@@ -19345,42 +19415,51 @@ export function publisherBoundary<P>(
 			useLayoutEffect(
 				() => {
 					if (joined.current) return;
-					const parentAuthority = parentStreamedAuthority(
-						state.parentBlock,
-						state.wrapper.ownerDocument,
-					);
-					const bridge =
-						state.serverPreserved && parentAuthority !== undefined
-							? bootstrapStreamedSignalHydration({
-									buildId: parentAuthority.buildId,
-									documentId: parentAuthority.documentId,
-									signalOwner: state.idState.dataOwner!,
-									target: state.wrapper.ownerDocument.defaultView as unknown as Record<
-										string,
-										unknown
-									>,
-								})
-							: undefined;
-					let release: (() => void) | undefined;
-					try {
-						release = joinNativePublisher(
-							state,
-							publisherKey,
-							parentAuthority?.documentId,
-							bridge,
-							undefined,
-							descriptor,
-						);
-					} catch (error) {
-						bridge?.dispose();
-						throw error;
-					}
 					joined.current = true;
-					registerHookCleanup(scope, () => {
-						release?.();
-						bridge?.dispose();
-					});
-					requestHydrateBoundary(state);
+					const authority = parentStreamedAuthority(state.parentBlock, state.wrapper.ownerDocument);
+					prepareNativePublisherHydration(
+						state,
+						scope,
+						authority?.documentId,
+						state.serverPreserved && authority !== undefined,
+						() => {
+							const bootstrapStreamedSignalHydration = nativeStreamedSignalBootstrap!;
+							const parentAuthority = parentStreamedAuthority(
+								state.parentBlock,
+								state.wrapper.ownerDocument,
+							);
+							const bridge =
+								state.serverPreserved && parentAuthority !== undefined
+									? bootstrapStreamedSignalHydration({
+											buildId: parentAuthority.buildId,
+											documentId: parentAuthority.documentId,
+											signalOwner: state.idState.dataOwner!,
+											target: state.wrapper.ownerDocument.defaultView as unknown as Record<
+												string,
+												unknown
+											>,
+										})
+									: undefined;
+							let release: (() => void) | undefined;
+							try {
+								release = joinNativePublisher(
+									state,
+									publisherKey,
+									parentAuthority?.documentId,
+									bridge,
+									undefined,
+									descriptor,
+								);
+							} catch (error) {
+								bridge?.dispose();
+								throw error;
+							}
+							return () => {
+								release?.();
+								bridge?.dispose();
+							};
+						},
+					);
 				},
 				[state],
 				streamSlot,
@@ -19524,40 +19603,42 @@ export function externalSnapshotBoundary<P>(
 			useLayoutEffect(
 				() => {
 					if (streamJoined.current) return;
+					streamJoined.current = true;
 					// Only a committed host may consume publisher history. An abandoned
 					// root hydration must leave its frames available for the next attempt.
 					const host = state.parentBlock.idState.renderOwner!;
 					const document = state.wrapper.ownerDocument;
 					const documentId = host.externalSnapshotDocumentId!;
-					const bridge = state.serverPreserved
-						? bootstrapStreamedSignalHydration({
-								buildId: authority.publisherBuildId,
+					prepareNativePublisherHydration(state, scope, documentId, state.serverPreserved, () => {
+						const bootstrapStreamedSignalHydration = nativeStreamedSignalBootstrap!;
+						const bridge = state.serverPreserved
+							? bootstrapStreamedSignalHydration({
+									buildId: authority.publisherBuildId,
+									documentId,
+									signalOwner: state.idState.dataOwner!,
+									target: document.defaultView as unknown as Record<string, unknown>,
+								})
+							: undefined;
+						let leaveDocumentLifecycle: (() => void) | undefined;
+						try {
+							leaveDocumentLifecycle = joinNativePublisher(
+								state,
+								JSON.stringify(['octane:external', authority.publisherBuildId, state.boundaryId]),
 								documentId,
-								signalOwner: state.idState.dataOwner!,
-								target: document.defaultView as unknown as Record<string, unknown>,
-							})
-						: undefined;
-					let leaveDocumentLifecycle: (() => void) | undefined;
-					try {
-						leaveDocumentLifecycle = joinNativePublisher(
-							state,
-							JSON.stringify(['octane:external', authority.publisherBuildId, state.boundaryId]),
-							documentId,
-							bridge,
-							getNativeHotOwnerDriver()?.getComponentBuild(options.component, true),
-						);
-					} catch (error) {
-						bridge?.dispose();
-						throw error;
-					}
-					streamJoined.current = true;
-					// Suspense and Activity disconnect layout effects while retaining the
-					// mounted boundary. Its publisher lease ends only at actual unmount.
-					registerHookCleanup(scope, () => {
-						leaveDocumentLifecycle?.();
-						bridge?.dispose();
+								bridge,
+								getNativeHotOwnerDriver()?.getComponentBuild(options.component, true),
+							);
+						} catch (error) {
+							bridge?.dispose();
+							throw error;
+						}
+						// Suspense and Activity disconnect layout effects while retaining the
+						// mounted boundary. Its publisher lease ends only at actual unmount.
+						return () => {
+							leaveDocumentLifecycle?.();
+							bridge?.dispose();
+						};
 					});
-					requestHydrateBoundary(state);
 				},
 				[state],
 				streamSlot,

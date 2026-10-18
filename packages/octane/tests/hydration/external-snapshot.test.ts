@@ -5,7 +5,10 @@ import { prerender } from '../../src/runtime.server.js';
 import * as ClientSignals from '../../src/signals/client.js';
 import * as ServerSignals from '../../src/signals/server.js';
 import * as Signals from '../../src/signals/index.js';
-import { bootstrapStreamedSignalHydration } from '../../src/hydration/streamed-signals.js';
+import {
+	bootstrapStreamedSignalHydration,
+	installSignalDocumentLifecycle,
+} from '../../src/hydration/streamed-signals.js';
 import { createContext } from '../../src/universal-native.js';
 import { loadCompiledFixtureSource } from '../_server-fixture.js';
 import {
@@ -1942,6 +1945,93 @@ export function Remote(props: { label: string }) {
 			root?.unmount();
 			bridge?.dispose();
 			stream.abort();
+			container.remove();
+		}
+	},
+);
+
+it.each(['unmount', 'retire', 'resume'] as const)(
+	'keeps pending publisher activation inside the frozen document lifetime: %s',
+	async (ending) => {
+		const execute = vi.fn();
+		const modules = pair(
+			`import {onExecute} from './callbacks';export function Remote(){onExecute();return <button>publisher</button>;}`,
+			'/remote/PendingNativeBootstrap.tsx',
+			false,
+			{ './callbacks': { onExecute: execute } },
+		);
+		const snapshot = transport(modules.server['Remote']);
+		const server = Server.externalSnapshotBoundary({
+			authority,
+			component: modules.server['Remote'],
+			snapshot,
+		});
+		const client = Client.externalSnapshotBoundary({
+			authority,
+			component: modules.client['Remote'],
+			snapshot,
+		});
+		const documentId = 'pending-native-' + ending;
+		const container = document.createElement('div');
+		container.innerHTML = (await prerender(server, {}, { externalSnapshots: { documentId } })).html;
+		activateStreamedMarkup(container);
+		document.body.append(container);
+		const button = container.querySelector('button');
+		const bridge = bootstrapStreamedSignalHydration({
+			buildId: 'pending-host',
+			documentId,
+			signalOwner: Object.freeze({ scopeKey: 'octane:document' }),
+		});
+		const lifecycle = installSignalDocumentLifecycle({
+			document,
+			buildId: 'pending-host',
+			documentId,
+			signalOwner: bridge.signalOwner,
+			readIdentity: () => ({ buildId: 'pending-host', documentId }),
+		});
+		const transition = (type: string) => {
+			const event = new Event(type);
+			Object.defineProperty(event, 'persisted', { value: true });
+			window.dispatchEvent(event);
+		};
+		transition('pagehide');
+		execute.mockClear();
+		const errors: unknown[] = [];
+		const root = Client.hydrateRoot(
+			container,
+			client,
+			{},
+			{
+				externalSnapshots: { documentId },
+				signalOwner: bridge.signalOwner,
+				onUncaughtError: (error) => errors.push(error),
+				onRecoverableError: (error) => errors.push(error),
+			},
+		);
+		try {
+			Client.flushSync(() => {});
+			// Captured input must not bypass the pending native preparation gate.
+			button!.click();
+			expect(execute).not.toHaveBeenCalled();
+			if (ending === 'unmount') root.unmount();
+			if (ending === 'retire') lifecycle.dispose();
+			await Client.act(async () => {});
+			expect(execute).not.toHaveBeenCalled();
+			if (ending === 'resume') {
+				transition('pageshow');
+				await Client.act(async () => {});
+				expect(execute).toHaveBeenCalled();
+				expect(container.querySelector('button')).toBe(button);
+			} else {
+				transition('pageshow');
+				await Client.act(async () => {});
+				expect(execute).not.toHaveBeenCalled();
+			}
+			expect(errors).toEqual([]);
+		} finally {
+			root.unmount();
+			lifecycle.dispose();
+			bridge.dispose();
 			container.remove();
 		}
 	},

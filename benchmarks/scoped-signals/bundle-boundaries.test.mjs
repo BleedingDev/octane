@@ -26,6 +26,7 @@ import {
 	entrySource,
 	gitBlobHash,
 	verifyBundleInputs,
+	verifyOrdinaryEngineOutput,
 	verifyTransitionBoundary,
 } from './bundle-boundaries.mjs';
 
@@ -289,9 +290,13 @@ test('baseline blob evidence agrees with Git for exact UTF-8 source bytes', () =
 	assert.notEqual(gitBlobHash(contents), gitBlobHash(Buffer.from('const sign = "α";\r\n')));
 });
 
-test('ordinary entries allow protocol seams but reject both scoped and raw engines', () => {
+test('ordinary entries allow zero-byte engine resolution but reject emitted scoped and raw engines', () => {
 	const ordinary = [source('runtime.ts'), source('signals/read-protocol.ts')];
 	verifyBundleInputs(scenario('ordinary-client'), ordinary);
+	verifyBundleInputs(scenario('ordinary-client'), [
+		...ordinary,
+		{ ...source('signals/engine.ts'), bytesInOutput: 0 },
+	]);
 	assert.throws(
 		() => verifyBundleInputs(scenario('ordinary-client'), [...ordinary, alien()]),
 		/ordinary imports reached Alien Signals/,
@@ -299,7 +304,15 @@ test('ordinary entries allow protocol seams but reject both scoped and raw engin
 	assert.throws(
 		() =>
 			verifyBundleInputs(scenario('ordinary-client'), [...ordinary, source('signals/engine.ts')]),
-		/ordinary imports reached the scoped engine/,
+		/missing emitted-byte evidence/,
+	);
+	assert.throws(
+		() =>
+			verifyBundleInputs(scenario('ordinary-client'), [
+				...ordinary,
+				{ ...source('signals/engine.ts'), bytesInOutput: 1 },
+			]),
+		/ordinary entry retained scoped engine/,
 	);
 });
 
@@ -331,11 +344,8 @@ test('ordinary client roots tree-shake native transitions and require emitted-by
 	}
 });
 
-test('production public roots omit concrete native transitions while native reads retain them', async (t) => {
-	const bundle = async (id) => {
-		const entry = scenario(id);
-		const directory = path.resolve('packages/octane');
-		const native = `import {createRoot, startTransition} from 'octane';
+function nativeTransitionControl(directory) {
+	const native = `import {createRoot, startTransition} from 'octane';
 import {useSignal$} from 'octane/signals/client';
 function View() @{
  const count$ = useSignal$(0);
@@ -344,15 +354,52 @@ function View() @{
  </button>
 }
 export function mount(parent) { const root = createRoot(parent); root.render(View); return root; }`;
+	return compile(native, path.join(directory, 'NativeTransitionControl.tsrx'), {
+		mode: 'client',
+		dev: false,
+		hmr: false,
+		nativeReads: true,
+	}).code;
+}
+
+test('ordinary imports do not initialize native signals without tree shaking', async () => {
+	const directory = path.resolve('packages/octane');
+	const result = await build({
+		stdin: {
+			contents: `import * as protocol from './src/signals/read-protocol.ts';
+export async function inspect() {
+ const ordinary = await import('./src/index.ts');
+ let starts = 0;
+ protocol.startEarlySignalHydration(() => starts++);
+ const before = {enabled: protocol.nativeSignalHydration, starts, createRoot: typeof ordinary.createRoot};
+ await import('./src/signals/index.ts');
+ return {before, nativeEnabled: protocol.nativeSignalHydration};
+}`,
+			resolveDir: directory,
+		},
+		bundle: true,
+		write: false,
+		treeShaking: false,
+		format: 'esm',
+		platform: 'browser',
+		target: 'es2022',
+		tsconfigRaw: { compilerOptions: {} },
+		define: { 'process.env.NODE_ENV': '"production"', __OCTANE_PROFILE_ENABLED__: 'false' },
+	});
+	const api = await import(
+		'data:text/javascript;base64,' + Buffer.from(result.outputFiles[0].text).toString('base64')
+	);
+	const resultState = await api.inspect();
+	assert.deepEqual(resultState.before, { enabled: false, starts: 0, createRoot: 'function' });
+	assert.equal(resultState.nativeEnabled, true, 'Actual signal opt-in must initialize the engine.');
+});
+
+test('production public roots omit concrete native transitions while native reads retain them', async (t) => {
+	const bundle = async (id) => {
+		const entry = scenario(id);
+		const directory = path.resolve('packages/octane');
 		const contents =
-			id === 'native-client'
-				? compile(native, path.join(directory, 'NativeTransitionControl.tsrx'), {
-						mode: 'client',
-						dev: false,
-						hmr: false,
-						nativeReads: true,
-					}).code
-				: entrySource(entry);
+			id === 'native-client' ? nativeTransitionControl(directory) : entrySource(entry);
 		const result = await build({
 			stdin: { contents, resolveDir: directory },
 			bundle: true,
@@ -460,6 +507,87 @@ export function mount(parent) { const root = createRoot(parent); root.render(Vie
 		host.remove();
 	}
 	verifyTransitionBoundary(scenario('ordinary-client'), ordinary.inputs);
+});
+
+test('ordinary shared-chunk closures omit scoped engines and reject a real engine export', async (t) => {
+	const directory = path.resolve('packages/octane');
+	const entries = {
+		ordinary: entrySource(scenario('ordinary-client')),
+		engine: entrySource(scenario('engine')),
+		native: nativeTransitionControl(directory),
+		negative: `export {createRoot} from 'octane'; export {createScope} from 'octane/signals';`,
+	};
+	for (const ids of [
+		['ordinary', 'engine'],
+		['ordinary', 'native'],
+		['negative', 'engine'],
+	]) {
+		const result = await build({
+			entryPoints: ids,
+			bundle: true,
+			write: false,
+			splitting: true,
+			outdir: path.join(tmpdir(), 'octane-scoped-boundary-output'),
+			metafile: true,
+			minify: true,
+			format: 'esm',
+			platform: 'browser',
+			target: 'es2022',
+			legalComments: 'none',
+			tsconfigRaw: { compilerOptions: {} },
+			define: { 'process.env.NODE_ENV': '"production"', __OCTANE_PROFILE_ENABLED__: 'false' },
+			plugins: [
+				{
+					name: 'scoped-boundary-entries',
+					setup(builder) {
+						builder.onResolve({ filter: /^(ordinary|engine|native|negative)$/ }, (args) => ({
+							path: args.path,
+							namespace: 'scoped-boundary-entries',
+						}));
+						builder.onLoad({ filter: /.*/, namespace: 'scoped-boundary-entries' }, (args) => ({
+							contents: entries[args.path],
+							resolveDir: directory,
+							loader: 'ts',
+						}));
+					},
+				},
+			],
+		});
+		const outputs = result.metafile.outputs;
+		const entry = Object.keys(outputs).find(
+			(name) => outputs[name].entryPoint === 'scoped-boundary-entries:' + ids[0],
+		);
+		assert.ok(entry);
+		const closure = new Set();
+		const visit = (name) => {
+			if (closure.has(name)) return;
+			closure.add(name);
+			for (const imported of outputs[name].imports)
+				if (outputs[imported.path]) visit(imported.path);
+		};
+		visit(entry);
+		assert.ok(closure.size > 1, 'The control must exercise an actual shared executable chunk.');
+		const inputs = Object.keys(result.metafile.inputs).map((name) => ({
+			path: path.resolve(name),
+			bytesInOutput: [...closure].reduce(
+				(total, output) => total + (outputs[output].inputs[name]?.bytesInOutput ?? 0),
+				0,
+			),
+		}));
+		if (ids[0] === 'negative')
+			assert.throws(
+				() => verifyOrdinaryEngineOutput(scenario('ordinary-client'), inputs),
+				/ordinary entry retained scoped engine/,
+			);
+		else verifyOrdinaryEngineOutput(scenario('ordinary-client'), inputs);
+		t.diagnostic(
+			JSON.stringify({
+				entries: ids,
+				executableChunks: closure.size,
+				bytes: [...closure].reduce((total, name) => total + outputs[name].bytes, 0),
+			}),
+		);
+	}
 });
 
 // Only the renderer consumes the signal Action frame and transition coordinator,

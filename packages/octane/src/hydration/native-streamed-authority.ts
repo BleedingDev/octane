@@ -1,5 +1,14 @@
 import { formatClientError } from '../error-codes.client.generated.js';
 import type { SignalOwnerIdentity } from '../signals/types.js';
+import type { bootstrapStreamedSignalHydration } from './streamed-signals.js';
+
+/** @internal Installed only when the native stream implementation is evaluated. */
+export let nativeStreamedSignalBootstrap: typeof bootstrapStreamedSignalHydration | undefined;
+export function installNativeStreamedSignalBootstrap(
+	bootstrap: typeof bootstrapStreamedSignalHydration,
+): void {
+	nativeStreamedSignalBootstrap = bootstrap;
+}
 
 export interface NativeStreamedAuthority {
 	readonly buildId: string;

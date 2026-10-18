@@ -194,10 +194,29 @@ export function verifyTransitionBoundary(scenario, inputs) {
 	);
 }
 
-// Engine boundaries inspect the complete resolved graph, including modules
-// that tree shaking removes. A zero-byte engine dependency is still a defect.
-// Runtime exports can resolve their optional native adapters, but an ordinary
-// entry must tree-shake every byte of those concrete implementations.
+// Ordinary entries must emit no scoped engine, including in their executable
+// shared-chunk closure. Optional runtime exports can resolve engine modules
+// that tree shaking removes; resolved presence alone does not ship that engine.
+export function verifyOrdinaryEngineOutput(scenario, inputs) {
+	for (const input of inputs) {
+		if (
+			!/\/src\/signals\/(?:index|engine|graph|requests|encoding|client|server|facade)\.[jt]s$/.test(
+				input.path.replaceAll('\\', '/'),
+			)
+		)
+			continue;
+		assert.ok(
+			Number.isSafeInteger(input.bytesInOutput) && input.bytesInOutput >= 0,
+			`${scenario.id}: missing emitted-byte evidence for ${input.path}`,
+		);
+		assert.equal(
+			input.bytesInOutput,
+			0,
+			`${scenario.id}: ordinary entry retained scoped engine ${input.path}`,
+		);
+	}
+}
+
 export function verifyBundleInputs(scenario, inputs, engineDependency = 'vendored') {
 	assert.ok(
 		engineDependency === 'external' || engineDependency === 'vendored',
@@ -205,9 +224,9 @@ export function verifyBundleInputs(scenario, inputs, engineDependency = 'vendore
 	);
 	const names = inputs.map((input) => input.path.replaceAll('\\', '/'));
 	const alien = inputs.filter((input) => input.package?.name === 'alien-signals');
-	const engine = names.filter((name) =>
+	const engine = inputs.filter((input) =>
 		/\/src\/signals\/(?:index|engine|graph|requests|encoding|client|server|facade)\.[jt]s$/.test(
-			name,
+			input.path.replaceAll('\\', '/'),
 		),
 	);
 	const compiler = names.filter((name) => /\/src\/compiler\//.test(name));
@@ -216,7 +235,7 @@ export function verifyBundleInputs(scenario, inputs, engineDependency = 'vendore
 	assert.deepEqual(react, [], `${scenario.id}: React reached a native entry`);
 	if (scenario.id.startsWith('ordinary-')) {
 		assert.deepEqual(alien, [], `${scenario.id}: ordinary imports reached Alien Signals`);
-		assert.deepEqual(engine, [], `${scenario.id}: ordinary imports reached the scoped engine`);
+		verifyOrdinaryEngineOutput(scenario, engine);
 		const adapters = inputs.filter((input) =>
 			/\/src\/(?:signals\/native-read-(?:client|server|collector|inspection|retry)|server\/signal-query-observation)\.[jt]s$/.test(
 				input.path.replaceAll('\\', '/'),

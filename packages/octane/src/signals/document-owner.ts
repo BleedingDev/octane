@@ -68,3 +68,55 @@ export function installStreamedSignalOwnerActivator(
 		if (activators.size === 0) streamedSignalOwnerActivator = undefined;
 	};
 }
+
+/** @internal A joined publisher shares the host document's actual activation lifetime. */
+export interface SignalDocumentLifecycleParticipant {
+	(): void;
+	readonly active: boolean;
+	whenActive(): Promise<boolean>;
+}
+
+interface DocumentLifecycleRegistration {
+	readonly documentId: string;
+	join(
+		owner: SignalOwner,
+		streamedHydration: { suspend(): void } | undefined,
+		onRetire: () => void,
+	): SignalDocumentLifecycleParticipant;
+}
+
+const documentLifecycles = /* @__PURE__ */ new WeakMap<
+	Document,
+	Set<DocumentLifecycleRegistration>
+>();
+
+/** @internal Installed by the optional native document lifecycle implementation. */
+export function registerSignalDocumentLifecycle(
+	document: Document,
+	registration: DocumentLifecycleRegistration,
+): () => void {
+	let registrations = documentLifecycles.get(document);
+	if (registrations === undefined) documentLifecycles.set(document, (registrations = new Set()));
+	registrations.add(registration);
+	return () => {
+		registrations.delete(registration);
+		if (registrations.size === 0) documentLifecycles.delete(document);
+	};
+}
+
+/** @internal Publishers borrow the host's identity check, never its data owner. */
+export function joinSignalDocumentLifecycle(options: {
+	readonly document: Document;
+	readonly documentId: string;
+	readonly signalOwner: SignalOwner;
+	readonly streamedHydration: { suspend(): void } | undefined;
+	readonly onRetire: () => void;
+}): SignalDocumentLifecycleParticipant | undefined {
+	const registrations = documentLifecycles.get(options.document);
+	if (registrations === undefined) return;
+	for (const registration of registrations) {
+		if (registration.documentId === options.documentId)
+			return registration.join(options.signalOwner, options.streamedHydration, options.onRetire);
+	}
+	throw new TypeError(formatClientError(357));
+}

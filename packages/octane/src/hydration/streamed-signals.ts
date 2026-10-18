@@ -1,4 +1,7 @@
-import { registerNativeStreamedAuthority } from './native-streamed-authority.js';
+import {
+	registerNativeStreamedAuthority,
+	installNativeStreamedSignalBootstrap,
+} from './native-streamed-authority.js';
 import { formatClientError } from '../error-codes.client.generated.js';
 import {
 	documentSignalOwner,
@@ -496,3 +499,6 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 		},
 	};
 }
+
+// Importing this feature owns its synchronous native bootstrap capability.
+installNativeStreamedSignalBootstrap(bootstrapStreamedSignalHydration);
