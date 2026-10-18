@@ -14,12 +14,42 @@ import { enqueueServerCall } from './server-rpc-batch-client.js';
  * Compiler target for browser calls to a `module server` export.
  * @internal
  */
-export async function __serverRpc(
+export function __serverRpc(
 	hash: string,
 	args: unknown[],
 	options: ServerCallOptions = {},
 	stream = false,
 	limits?: ServerResultLimits,
+): Promise<unknown> {
+	return dispatchServerRpc(
+		hash,
+		args,
+		options,
+		stream,
+		limits,
+		stream ? encodeServerArguments : devalue.stringify,
+		stream ? undefined : devalue.parse,
+	);
+}
+
+/** @internal Compiler target when ServerCallContext proves the bounded protocol. */
+export function __serverRpcStream(
+	hash: string,
+	args: unknown[],
+	options: ServerCallOptions = {},
+	limits?: ServerResultLimits,
+): Promise<unknown> {
+	return dispatchServerRpc(hash, args, options, true, limits, encodeServerArguments);
+}
+
+async function dispatchServerRpc(
+	hash: string,
+	args: unknown[],
+	options: ServerCallOptions,
+	stream: boolean,
+	limits: ServerResultLimits | undefined,
+	encode: (args: unknown[]) => string,
+	decodeLegacy?: (body: string) => { value: unknown },
 ): Promise<unknown> {
 	if (
 		options === null ||
@@ -31,7 +61,7 @@ export async function __serverRpc(
 	options.signal?.throwIfAborted();
 	const resolvedLimits = stream ? serverResultLimits(limits) : undefined;
 	// Encoding can fail (for example an unresolved Promise); never dispatch first.
-	const payload = stream ? encodeServerArguments(args) : devalue.stringify(args);
+	const payload = encode(args);
 	if (stream) {
 		const batched = enqueueServerCall(hash, payload, options, limits);
 		if (batched !== undefined) return batched;
@@ -130,7 +160,7 @@ export async function __serverRpc(
 			);
 		}
 		try {
-			return devalue.parse(body).value;
+			return decodeLegacy!(body).value;
 		} catch (error) {
 			throw new ServerCallUncertainError(error);
 		}

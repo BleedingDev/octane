@@ -195,6 +195,8 @@ export async function buildPackageCommonjs({
 				if (!rewritten.startsWith('.')) rewritten = `./${rewritten}`;
 				output = output.replaceAll(`require("${specifier}")`, `require("${rewritten}")`);
 				output = output.replaceAll(`require('${specifier}')`, `require('${rewritten}')`);
+				output = output.replaceAll(`import("${specifier}"`, `import("${rewritten}"`);
+				output = output.replaceAll(`import('${specifier}'`, `import('${rewritten}'`);
 			}
 			await writeFile(outputPath, output);
 		}),

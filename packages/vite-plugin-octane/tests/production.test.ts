@@ -1162,6 +1162,29 @@ describe('production SSR build', { timeout: 30_000 }, () => {
 		expect(encoded[encoded[0].value]).toBe('rpc:hello');
 	});
 
+	it('discovers contextual-only module-server exports through the production bounded protocol', async () => {
+		const { handler } = await import(pathToFileURL(path.join(distDir, 'server/entry.js')).href);
+		const hash = createHash('sha256')
+			.update('/src/ContextualRpc.tsrx#fixtureContextualRpc')
+			.digest('hex')
+			.slice(0, 8);
+		const response = await handler(
+			new Request(`http://localhost/_$_ripple_rpc_$_/${hash}`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					Accept: 'application/x-octane-rpc+ndjson',
+				},
+				body: '[1,["array",[["string","ready"]]]]',
+			}),
+		);
+		expect(response.status).toBe(200);
+		expect(response.headers.get('Content-Type')).toBe('application/x-octane-rpc+ndjson');
+		expect(await response.text()).toBe(
+			'[1,0,"value",["string","contextual-rpc:ready"]]\n[1,1,"complete",null]\n',
+		);
+	});
+
 	it('discovers module-server exports in full-compiled .tsx modules', async () => {
 		const { handler } = await import(pathToFileURL(path.join(distDir, 'server/entry.js')).href);
 		const hash = createHash('sha256')

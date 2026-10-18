@@ -316,6 +316,22 @@ describe('loader with the neutral compiler', () => {
 		expect(result.module.buildInfo.octane).toMatchObject({ serverRpc: true });
 	});
 
+	it('marks contextual-only module-server owners in browser build metadata', () => {
+		const source = `module server {
+	import type { ServerCallContext } from 'octane/server';
+	export async function save(value: string, context: ServerCallContext) { return value; }
+}
+import { save } from 'server';
+export { save };
+`;
+		const resourcePath = write(root, 'src/contextual-actions.tsrx', source);
+		const result = transform({ root, resourcePath, source });
+
+		expect(String(result.content)).toContain('_$__serverRpcStream(');
+		expect(String(result.content)).not.toContain('_$__serverRpc(');
+		expect(result.module.buildInfo.octane).toMatchObject({ serverRpc: true });
+	});
+
 	it('gates ownership behind requireDirective and reports forgotten pragmas', () => {
 		const options = { requireDirective: true };
 		// Fixtures exist on disk, as in a real build: the loader realpaths the

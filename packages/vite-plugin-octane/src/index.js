@@ -884,7 +884,7 @@ export function octane(inlineOptions = {}) {
 		 */
 		transform(code, id, options) {
 			if (!isBuild || options?.ssr || !is_octane_module_path(id.split('?')[0])) return null;
-			if (!code.includes('_$__serverRpc(')) return null;
+			if (!code.includes('_$__serverRpc(') && !code.includes('_$__serverRpcStream(')) return null;
 			const file = id.split('?')[0];
 			const relative = path.relative(root, file);
 			const isWithinRoot =

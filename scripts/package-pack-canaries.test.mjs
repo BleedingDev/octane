@@ -50,6 +50,8 @@ import {
 	PACKED_STRICT_BROWSER_SOURCE_PACKAGES,
 } from './package-pack-canaries.mjs';
 
+import { verifyDist } from '../packages/octane/scripts/verify-dist.mjs';
+
 const repositoryRequire = createRequire(import.meta.url);
 
 describe('packed runtime consumer dependencies', () => {
@@ -1194,4 +1196,60 @@ test('packed declaration probes retain publisher identity and hot manifest admis
 		assert.match(source, /@ts-expect-error A module generation must remain a string/);
 		assert.match(source, /__registerHotSignalComponent, __remountHotSignalComponent/);
 	}
+});
+
+async function withPublishedDistFixture(run) {
+	const directory = mkdtempSync(path.join(tmpdir(), 'octane-dist-contract-'));
+	try {
+		mkdirSync(path.join(directory, 'dist/cjs'), { recursive: true });
+		writeFileSync(
+			path.join(directory, 'package.json'),
+			JSON.stringify({ type: 'module', exports: {}, publishConfig: { exports: {} } }),
+		);
+		await run(directory);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+}
+
+test('rejects an unresolved deferred import in a published CommonJS module', async () => {
+	await withPublishedDistFixture(async (directory) => {
+		writeFileSync(
+			path.join(directory, 'dist/cjs/index.cjs'),
+			"exports.read = () => import('./lazy.js');\n",
+		);
+		writeFileSync(path.join(directory, 'dist/cjs/lazy.cjs'), 'module.exports = 42;\n');
+		await assert.rejects(verifyDist(directory), /unresolvable imports in dist:[\s\S]*lazy\.js/);
+	});
+});
+
+test('checks relative require targets in published CommonJS modules', async () => {
+	await withPublishedDistFixture(async (directory) => {
+		writeFileSync(
+			path.join(directory, 'dist/cjs/index.cjs'),
+			"module.exports = require('./missing.cjs');\n",
+		);
+		await assert.rejects(verifyDist(directory), /unresolvable imports in dist:[\s\S]*missing\.cjs/);
+	});
+});
+
+test('accepts a published deferred CommonJS target that a consumer can execute', async () => {
+	await withPublishedDistFixture(async (directory) => {
+		writeFileSync(
+			path.join(directory, 'dist/cjs/index.cjs'),
+			"exports.read = () => import('./lazy.cjs').then(value => value.default);\n",
+		);
+		writeFileSync(path.join(directory, 'dist/cjs/lazy.cjs'), 'module.exports = 42;\n');
+		await verifyDist(directory);
+		const execution = spawnSync(
+			process.execPath,
+			[
+				'-e',
+				"require('./dist/cjs/index.cjs').read().then(value => process.stdout.write(String(value)))",
+			],
+			{ cwd: directory, encoding: 'utf8' },
+		);
+		assert.equal(execution.status, 0, execution.stderr);
+		assert.equal(execution.stdout, '42');
+	});
 });

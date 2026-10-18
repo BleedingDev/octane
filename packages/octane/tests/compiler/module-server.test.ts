@@ -88,7 +88,8 @@ export function App() @{ <button onClick={() => save('draft')}>Save</button> }
 		const client = compile(contextual, filename, { mode: 'client' }).code;
 		const server = compile(contextual, filename, { mode: 'server' }).code;
 		expect(client).toContain('args.slice(0, 1)');
-		expect(client).toContain('args[1], true');
+		expect(client).toContain('__serverRpcStream as _$__serverRpcStream');
+		expect(client).toContain(`_$__serverRpcStream("${hash('save')}", args.slice(0, 1), args[1])`);
 		expect(client).not.toContain('context.viewer');
 		expect(server).toContain('__registerServerFunction');
 		expect(server).toContain(`id: "${hash('save')}"`);

@@ -10223,9 +10223,10 @@ function emitServerModuleClientStubs(info, ctx) {
 			const imported = identifierName(specifier.imported);
 			const local = specifier.local?.name;
 			if (!imported || !local) continue;
-			ctx.runtimeNeeded.add('__serverRpc');
 			const hash = strongHash(info.filename + '#' + imported);
 			const contextIndex = info.contexts.get(imported);
+			const helper = contextIndex === undefined ? '__serverRpc' : '__serverRpcStream';
+			ctx.runtimeNeeded.add(helper);
 			const rpcArgs =
 				contextIndex === undefined
 					? [b.literal(hash, JSON.stringify(hash)), b.id('args')]
@@ -10233,11 +10234,10 @@ function emitServerModuleClientStubs(info, ctx) {
 							b.literal(hash, JSON.stringify(hash)),
 							b.call(b.member(b.id('args'), 'slice'), b.literal(0), b.literal(contextIndex)),
 							b.member(b.id('args'), b.literal(contextIndex), true),
-							b.literal(true, 'true'),
 						];
 			nodes.push(
 				inheritOriginLoc(
-					b.const(local, b.arrow([b.rest(b.id('args'))], b.call('_$__serverRpc', ...rpcArgs))),
+					b.const(local, b.arrow([b.rest(b.id('args'))], b.call('_$' + helper, ...rpcArgs))),
 					specifier,
 				),
 			);

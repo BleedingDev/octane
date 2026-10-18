@@ -1,6 +1,7 @@
 import { Hydrate, use, useEffect, useState } from 'octane';
 import { interaction, load, media } from 'octane/hydration';
 import { RpcProbe } from './Rpc.tsx';
+import { ContextualRpcProbe } from './ContextualRpc.tsrx';
 import { Canvas } from '@fixture/object-canvas';
 import { Scene } from './Scene.object.tsrx';
 import { DeferredHydrationProof } from './deferred-hydration.tsrx';
@@ -64,6 +65,7 @@ export function Page(props: { params: Record<string, string>; url: string }) @{
 			<GuardedConst visible={guardedVisible} />
 			<button onClick={() => fixtureRpc('browser')}>Call server</button>
 			<RpcProbe />
+			<ContextualRpcProbe />
 			<Canvas>
 				<Scene />
 			</Canvas>

@@ -160,10 +160,6 @@ const packedTsrxSourceExceptions = new Map([
 		'@octanejs/solana-kit',
 		'its TanStack Query peer declarations are not yet compatible with the installed strict consumer graph',
 	],
-	[
-		'@octanejs/tanstack-router',
-		'its browser source reads process.env.NODE_ENV and its upstream declarations import node:http2',
-	],
 	['@octanejs/tiptap', 'its browser source still reads process.env.NODE_ENV'],
 	[
 		'@octanejs/wagmi',
