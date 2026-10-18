@@ -9783,19 +9783,72 @@ function collectHotComponentExportFlows(input) {
 			return true;
 		if (node.type === 'TSImportEqualsDeclaration' && containsComponent(node.moduleReference))
 			return true;
-		if (
-			rootReference(node) &&
-			selected.has(node.name) &&
-			node.start < components.get(node.name).start
-		)
-			return true;
 		for (const key in node) {
 			if (!AST_WALK_SKIP_KEYS.has(key) && unsafeIdentity(node[key])) return true;
 		}
 		return false;
 	};
-	if (unsafeIdentity(ast)) eligible = false;
-	return { eligible, components: [...selected], componentExports: [...componentExports] };
+	// Function bodies read the canonical binding when called, not where they
+	// are declared. Only evaluation before that binding initializes can retain
+	// a raw component; follow local calls and IIFEs at their call-site position.
+	const earlyCapture = (node, position, active = new Set(), parent, key) => {
+		if (node === null || typeof node !== 'object') return false;
+		if (Array.isArray(node))
+			return node.some((child) => earlyCapture(child, position, active, parent, key));
+		if (
+			node.type === 'FunctionDeclaration' ||
+			node.type === 'FunctionExpression' ||
+			node.type === 'ArrowFunctionExpression' ||
+			node.type === 'ImportDeclaration' ||
+			node.type === 'ExportSpecifier'
+		)
+			return false;
+		if (
+			rootReference(node) &&
+			isIdentifierReference(node, parent, key, lexical) &&
+			components.has(node.name) &&
+			(position ?? node.start) < components.get(node.name).start
+		)
+			return true;
+		if (node.type === 'CallExpression') {
+			let callee = unwrapTsExpr(node.callee);
+			const aliases = new Set();
+			while (rootReference(callee) && !aliases.has(callee.name)) {
+				aliases.add(callee.name);
+				callee = unwrapTsExpr(
+					bindings.get(callee.name)?.item.init ?? opaqueDeclarations.get(callee.name),
+				);
+			}
+			if (
+				callee &&
+				['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(
+					callee.type,
+				) &&
+				!active.has(callee)
+			) {
+				const executing = new Set([...active, callee]);
+				const callPosition = position ?? node.start;
+				if (
+					earlyCapture(callee.params, callPosition, executing, callee, 'params') ||
+					earlyCapture(callee.body, callPosition, executing, callee, 'body')
+				)
+					return true;
+			}
+		}
+		for (const key in node) {
+			if (!AST_WALK_SKIP_KEYS.has(key) && earlyCapture(node[key], position, active, node, key))
+				return true;
+		}
+		return false;
+	};
+	const capturesBeforeInitialization = earlyCapture(ast);
+	if (unsafeIdentity(ast) || capturesBeforeInitialization) eligible = false;
+	return {
+		eligible,
+		capturesBeforeInitialization,
+		components: [...selected],
+		componentExports: [...componentExports],
+	};
 }
 
 // A top-level statement that carries NO runtime value — pure TypeScript type
@@ -11545,6 +11598,16 @@ function compileAuthored(source, filename, options, bundlerMetadata, analyzed = 
 			)
 		: analyzedAst;
 	const attemptAst = lowerSignalAttemptReads(bindingAst);
+	const hotComponentExports =
+		mode === 'client' && options?.hmr === 'webpack'
+			? collectHotComponentExportFlows(attemptAst)
+			: undefined;
+	if (hotComponentExports !== undefined) {
+		options = {
+			...options,
+			__hotComponentEarlyCapture: hotComponentExports.capturesBeforeInitialization,
+		};
+	}
 	const signalAst = lowerSignalDeclarations(
 		startIndependentSignalReads(
 			attemptAst,
@@ -11554,9 +11617,7 @@ function compileAuthored(source, filename, options, bundlerMetadata, analyzed = 
 		),
 		cleanFilename,
 		{ hmr: mode === 'client' && Boolean(options?.hmr) },
-		mode === 'client' && options?.hmr === 'webpack'
-			? { source, ...collectHotComponentExportFlows(attemptAst) }
-			: undefined,
+		hotComponentExports === undefined ? undefined : { source, ...hotComponentExports },
 	);
 	if (bundlerMetadata !== null) bundlerMetadata.hydrateAst = signalAst;
 	const memoizedAst = strongModeEnabled
@@ -13345,7 +13406,11 @@ function compileInternal(
 		);
 		let accept = null;
 		if (webpackHotName !== null) {
-			if (valueExports.length === 0) accept = b.stmt(b.call(b.member(hot(), 'accept')));
+			// A hoisted component may already have escaped as its raw function.
+			// Rebinding the export cannot update that capture, so its importer must
+			// re-evaluate instead of stopping at this component boundary.
+			if (valueExports.length === 0 && !options?.__hotComponentEarlyCapture)
+				accept = b.stmt(b.call(b.member(hot(), 'accept')));
 		} else {
 			const hmrModuleName = allocCompilerName(ctx, '_$hmrModule');
 			const changed = valueExports.some(([, local]) => local === null)
@@ -17730,6 +17795,30 @@ function canonicalHotSignalComponent(ctx, bindingKey, wrapper, origin) {
 	);
 }
 
+// Only module-level authored component declarations pass through these emitters.
+// Their lexical names distinguish declarations without changing when an edit
+// moves a declaration or replaces its body. Stamp the raw implementation before
+// wrapping it so the runtime can match private descendants during HMR.
+function hotComponentIdentityInitializer(ctx, node, value) {
+	if (!ctx.hmr || !ctx.filename) return value;
+	const identity = JSON.stringify([ctx.filename.replace(/\\/g, '/'), 'component', node.id.name]);
+	return inheritOriginLoc(
+		b.call(
+			b.member(b.id('Object'), 'assign'),
+			value,
+			b.object([
+				b.prop(
+					'init',
+					b.call(b.member(b.id('Symbol'), 'for'), b.literal('octane.hmr.identity')),
+					b.literal(identity),
+					true,
+				),
+			]),
+		),
+		node,
+	);
+}
+
 function compileComponent(node, ctx, options) {
 	const name = node.id.name;
 	rejectAsyncOrGenerator(node, name);
@@ -17899,6 +17988,8 @@ function compileComponent(node, ctx, options) {
 					? inheritOriginLoc(b.export(fnNode), node)
 					: fnNode,
 		];
+		if (ctx.hmr && ctx.filename)
+			statements.push(guarded(hotComponentIdentityInitializer(ctx, node, b.id(name))));
 		if (pendingWarm) {
 			statements.push(
 				guarded(b.call(requireRuntimeForContext(ctx, 'markWarm'), b.id(name), pendingWarm)),
@@ -17979,6 +18070,8 @@ function compileComponent(node, ctx, options) {
 				)
 			: warmedFn;
 
+	const identifiedFn = hotComponentIdentityInitializer(ctx, node, abiFn);
+
 	// HMR exports use mutable, live bindings so a re-evaluated module can hand
 	// its fresh body to the previous canonical wrapper and re-export that same
 	// identity. Production components retain their tree-shakeable const binding.
@@ -17986,10 +18079,10 @@ function compileComponent(node, ctx, options) {
 		? canonicalHotSignalComponent(
 				ctx,
 				isDefault ? 'default' : name,
-				inheritOriginLoc(b.call('_$hmr', abiFn), node),
+				inheritOriginLoc(b.call('_$hmr', identifiedFn), node),
 				node,
 			)
-		: abiFn;
+		: identifiedFn;
 	if (node._octaneBindingView) {
 		valueExpr = markPure(
 			inheritOriginLoc(
@@ -22771,6 +22864,21 @@ function compileReturnJsxFunction(node, ctx, options) {
 	// export follow-up statements — compile() embeds them in the single module
 	// AST, whose one esrap print yields the whole module map (chained consumers
 	// like @octanejs/mdx's two-stage .mdx map read segments off that print).
+	const identityStamp =
+		ctx.hmr && ctx.filename
+			? [
+					inheritOriginLoc(
+						b.stmt(
+							b.logical(
+								'&&',
+								b.binary('===', b.unary('typeof', b.id(name)), b.literal('function')),
+								hotComponentIdentityInitializer(ctx, node, b.id(name)),
+							),
+						),
+						node,
+					),
+				]
+			: [];
 	const bindingStamp = node._octaneBindingView
 		? [
 				inheritOriginLoc(
@@ -22792,6 +22900,7 @@ function compileReturnJsxFunction(node, ctx, options) {
 	if (options && options.hmrWrap) {
 		const nodes = [
 			fn,
+			...identityStamp,
 			inheritOriginLoc(
 				b.stmt(
 					b.assignment(
@@ -22827,6 +22936,7 @@ function compileReturnJsxFunction(node, ctx, options) {
 		return {
 			nodes: [
 				fn,
+				...identityStamp,
 				...bindingStamp,
 				inheritOriginLoc(
 					isReassignedComponentDeclaration(node, ctx)
@@ -22838,8 +22948,8 @@ function compileReturnJsxFunction(node, ctx, options) {
 		};
 	}
 	if (options && options.export)
-		return { nodes: [inheritOriginLoc(b.export(fn), node), ...bindingStamp] };
-	return { nodes: [fn, ...bindingStamp] };
+		return { nodes: [inheritOriginLoc(b.export(fn), node), ...identityStamp, ...bindingStamp] };
+	return { nodes: [fn, ...identityStamp, ...bindingStamp] };
 }
 
 function nativeReturnedJsxValue(

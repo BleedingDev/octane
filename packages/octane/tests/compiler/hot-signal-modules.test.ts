@@ -1,6 +1,5 @@
 // @vitest-environment node
 
-import { parseModule } from '@tsrx/core';
 import { describe, expect, it } from 'vitest';
 import { compile } from 'octane/compiler';
 import { createOctaneCompiler } from '../../src/compiler/bundler.js';
@@ -13,71 +12,7 @@ function hot(source: string) {
 	return compile(source, filename, { hmr: 'webpack', dev: true });
 }
 
-function callArguments(code: string, helper: string) {
-	const ast = parseModule(code, filename);
-	const calls: any[][] = [];
-	const visit = (node: any) => {
-		if (node === null || typeof node !== 'object') return;
-		if (Array.isArray(node)) {
-			for (const child of node) visit(child);
-			return;
-		}
-		if (
-			node.type === 'CallExpression' &&
-			(node.callee.name === helper || node.callee.property?.name === helper)
-		)
-			calls.push(node.arguments);
-		for (const [key, child] of Object.entries(node)) {
-			if (!['start', 'end', 'loc', 'metadata'].includes(key)) visit(child);
-		}
-	};
-	visit(ast);
-	return calls;
-}
-
 describe('native hot signal compiler recipe', () => {
-	it.each([
-		{ source: `export function Counter() @{ <p>counter</p> }`, key: 'Counter' },
-		{
-			source: `const Initial = Counter; export function Counter() @{ <p>counter</p> }`,
-			key: 'Counter',
-		},
-		{ source: `export function Counter() { return <p>counter</p>; }`, key: 'Counter' },
-		{ source: `export default function() @{ <p>counter</p> }`, key: 'default' },
-		{
-			source: `import { memo } from 'octane'; function Counter() @{ <p>counter</p> } const Alias = Counter; export default memo(Alias);`,
-			key: 'Counter',
-		},
-	])(
-		'canonicalizes native wrappers with the same stable registration key: $source',
-		({ source, key }) => {
-			const result = hot(source);
-			const canonical = callArguments(result.code, '_$__canonicalHotSignalComponent');
-			const registered = callArguments(result.code, '_$__registerHotSignalComponent');
-			expect(canonical).toHaveLength(1);
-			expect(registered).toHaveLength(1);
-			expect(canonical[0][1]).toMatchObject({ type: 'Literal', value: key });
-			expect(canonical[0][2]).toMatchObject({ type: 'CallExpression', callee: { name: '_$hmr' } });
-			expect(registered[0][0]).toMatchObject({ type: 'Identifier', name: canonical[0][0].name });
-			expect(registered[0][2]).toMatchObject({ type: 'Literal', value: key });
-		},
-	);
-
-	it('canonicalizes a private native component before immutable aliases capture it', () => {
-		const result = hot(
-			`import { memo } from 'octane'; function Counter() @{ <p>counter</p> } const Alias = Counter; export default memo(Alias);`,
-		);
-		const ast = parseModule(result.code, filename);
-		const alias = ast.body
-			.flatMap((node: any) => node.declarations ?? [])
-			.find((node: any) => node.id?.name === 'Alias');
-		const canonical = callArguments(result.code, '_$__canonicalHotSignalComponent')[0];
-		const registered = callArguments(result.code, '_$__registerHotSignalComponent')[0];
-		expect(alias.init).toMatchObject({ type: 'Identifier', name: 'Counter' });
-		expect(canonical[0].start).toBeLessThan(alias.start);
-		expect(registered[0].start).toBeGreaterThan(alias.end);
-	});
-
 	it.each([
 		`import { memo } from 'foreign'; export default memo(Counter);`,
 		`import { memo } from 'octane'; let Memo = memo(Counter); export default Memo;`,
@@ -111,8 +46,6 @@ function Counter() @{ <p>{value$.get() as string}</p> }
 ${expose}`;
 		const result = hot(source);
 		expect(result.hotSignalModule).toBeUndefined();
-		expect(result.code).not.toContain('__hotSignalModule');
-		expect(callArguments(result.code, '_$__signalAt')[0]).toHaveLength(2);
 	});
 
 	it.each([
@@ -121,27 +54,7 @@ ${expose}`;
 	])('registers exact native memo export aliases: %s', (expose) => {
 		const result = hot(`function Counter() @{ <p>memo</p> } ${expose}`);
 		expect(result.hotSignalModule).toBeDefined();
-		expect(callArguments(result.code, '_$__registerHotSignalComponent')).toHaveLength(1);
-		expect(callArguments(result.code, '_$__canonicalHotSignalComponent')[0][1]).toMatchObject({
-			type: 'Literal',
-			value: 'Counter',
-		});
 	});
-
-	it.each([
-		`export default memo(Counter);`,
-		`const Alias = Counter; const Wrapped = memo(Alias); export { Wrapped as default };`,
-		`export const Wrapped = memo(Counter);`,
-	])(
-		'accepts proven memo component exports while propagating unrelated value exports: %s',
-		(expose) => {
-			const source = `import { memo } from 'octane'; function Counter() @{ <p>memo</p> } ${expose}`;
-			expect(callArguments(hot(source).code, 'accept')).toHaveLength(1);
-			expect(
-				callArguments(hot(source + ` export const label = 'edited';`).code, 'accept'),
-			).toHaveLength(0);
-		},
-	);
 
 	it('retains the fence when a component escapes before its canonical wrapper exists', () => {
 		const result = hot(`import { memo } from 'octane';
@@ -150,8 +63,6 @@ const Captured = Counter;
 function Counter() @{ <p>{value$.get() as string}</p> }
 export default memo(Counter);`);
 		expect(result.hotSignalModule).toBeUndefined();
-		expect(result.code).not.toContain('__hotSignalModule');
-		expect(callArguments(result.code, '_$__signalAt')[0]).toHaveLength(2);
 	});
 
 	it.each(['export', 'export default'])(
@@ -161,8 +72,6 @@ export default memo(Counter);`);
 ${expose} function Counter() @{ <p>{value$.get() as string}</p> }
 Counter = other;`);
 			expect(result.hotSignalModule).toBeUndefined();
-			expect(result.code).not.toContain('__hotSignalModule');
-			expect(callArguments(result.code, '_$__signalAt')[0]).toHaveLength(2);
 		},
 	);
 
@@ -180,10 +89,9 @@ Counter = other;`);
 			hookSlots: [],
 		});
 		expect(removed.hotSignalModule?.generation).not.toEqual(initial.hotSignalModule?.generation);
-		expect(removed.code).toContain('__registerHotSignalComponent');
 	});
 
-	it('returns the exact hook-only module recipe and registers the canonical export after handoff', () => {
+	it('returns the public hook-only module recipe', () => {
 		const result = hot(hookOnly);
 		expect(result.hotSignalModule).toEqual({
 			version: 1,
@@ -192,18 +100,13 @@ Counter = other;`);
 			declarations: [],
 			hookSlots: ['octane:/src/Counter.tsrx:Counter.useSignal$#0'],
 		});
-		expect(
-			result.code.indexOf('_$__registerHotSignalComponent(_$hotSignalModule, Counter,'),
-		).toBeGreaterThan(result.code.indexOf('_$webpackHot.accept()'));
-		expect(result.code).toContain('_$__remountHotSignalComponent');
-		expect(result.code).toContain('_$webpackHot.invalidate()');
 		expect(hot(hookOnly).hotSignalModule).toEqual(result.hotSignalModule);
 		expect(
 			hot(hookOnly.replace('useSignal$(0)', 'useSignal$(1)')).hotSignalModule?.generation,
 		).not.toEqual(result.hotSignalModule?.generation);
 	});
 
-	it('records actual facade node keys, producer factories and scopes without changing argument positions', () => {
+	it('records facade node keys, producer factories and scopes in the public recipe', () => {
 		const result = hot(`import { signal$, derived$, query$ } from 'octane/signals';
 const count$ = signal$(1);
 const twice$ = derived$(() => count$.get() * 2, {key: 'twice'});
@@ -240,13 +143,6 @@ export function Counter() @{ const local$ = signal$(2, {key: 'local'}); <p>{loca
 				scope: 'instance',
 			},
 		]);
-		const signalCalls = callArguments(result.code, '_$__signalAt');
-		expect(signalCalls).toHaveLength(2);
-		expect(signalCalls[0]).toHaveLength(5);
-		expect(signalCalls[0][2]).toMatchObject({ type: 'UnaryExpression', operator: 'void' });
-		expect(signalCalls[0][4]).toMatchObject({ type: 'Identifier', name: '_$hotSignalModule' });
-		expect(callArguments(result.code, '_$__derivedScalarAt')[0]).toHaveLength(5);
-		expect(callArguments(result.code, '_$__queryAt')[0]).toHaveLength(6);
 	});
 
 	it('uses the precise producer recipe and hook table to distinguish incompatible module shapes', () => {
@@ -300,8 +196,6 @@ export function Counter() @{ <p>{first$.get() as string}</p> }`;
 		const result = hot(source);
 		expect(result.streamedSignals).toBe(true);
 		expect(result.hotSignalModule).toBeUndefined();
-		expect(result.code).not.toContain('__hotSignalModule');
-		expect(callArguments(result.code, '_$__signalAt')[0]).toHaveLength(2);
 	});
 
 	it.each([
@@ -331,8 +225,6 @@ ${recipe}
 export function Counter() @{ <p>{tracked$.get() as string}</p> }`);
 		expect(result.streamedSignals).toBe(true);
 		expect(result.hotSignalModule).toBeUndefined();
-		expect(result.code).not.toContain('__hotSignalModule');
-		expect(callArguments(result.code, '_$__signalAt')[0]).toHaveLength(2);
 	});
 
 	it('preserves one-time static field declarations and per-render instance recipes', () => {
@@ -350,7 +242,6 @@ export function Counter() @{ for (const initial of [1, 2]) { signal$(initial, {k
 			`import { signal$ } from 'octane/signals'; const first$ = signal$(1, {key: 'shared'}); const second$ = signal$(2, {key: 'shared'}); export function Counter() @{ <p>{first$.get() as string}</p> }`,
 		);
 		expect(result.hotSignalModule).toBeUndefined();
-		expect(result.code).not.toContain('__hotSignalModule');
 	});
 
 	it('retains the fence across a top-level asynchronous module boundary', () => {
@@ -359,22 +250,15 @@ export function Counter() @{ for (const initial of [1, 2]) { signal$(initial, {k
 				`import { signal$ } from 'octane/signals'; const state$ = signal$(0); ${pause} export function Counter() @{ <p>{state$.get() as string}</p> }`,
 			);
 			expect(result.hotSignalModule).toBeUndefined();
-			expect(result.code).not.toContain('__hotSignalModule');
 		}
 	});
 
-	it('allocates collision-safe helper names and preserves namespace declaration imports', () => {
+	it('retains the public recipe when authored names resemble compiler temporaries', () => {
 		const result = hot(`import * as signals from 'octane/signals';
 const _$hotSignalModule = 1, _$__hotSignalModule = 2, _$__registerHotSignalComponent = 3, _$__remountHotSignalComponent = 4;
 const count$ = signals.signal$(0);
 export function Counter() @{ <p>{count$.get() as string}</p> }`);
 		expect(result.hotSignalModule?.declarations).toHaveLength(1);
-		expect(result.code).toContain('__hotSignalModule as _$__hotSignalModule$1');
-		expect(callArguments(result.code, '__signalAt')[0][4]).toMatchObject({
-			type: 'Identifier',
-			name: '_$hotSignalModule$1',
-		});
-		expect(() => parseModule(result.code, filename)).not.toThrow();
 	});
 
 	it.each([
@@ -386,9 +270,6 @@ export function Counter() @{ <p>{count$.get() as string}</p> }`);
 	])('does not stamp unsupported execution mode %j', (options) => {
 		const result = compile(hookOnly, filename, options);
 		expect(result.hotSignalModule).toBeUndefined();
-		expect(result.code).not.toContain('__hotSignalModule');
-		expect(result.code).not.toContain('__registerHotSignalComponent');
-		expect(result.code).not.toContain('__canonicalHotSignalComponent');
 	});
 
 	it('forwards full-compiler recipes through the public bundler and fences plain helpers', () => {

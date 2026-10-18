@@ -704,7 +704,9 @@ function registerHookCleanup(scope: Scope, cleanup: Cleanup): void {
 	if (process.env.NODE_ENV !== 'production') {
 		// A lightweight child uses a host proxy without a component body. Its
 		// cleanup belongs to that child; refreshing the parent disposes it.
-		if ((scope.block.body as any)?.[HMR] !== undefined) {
+		let body = scope.block.body;
+		while (body && (body as any)[MEMO_OWNER] === body) body = (body as any).type;
+		if ((body as any)?.[HMR] !== undefined) {
 			(cleanup as Cleanup & { [HMR]?: true })[HMR] = true;
 		}
 	}
@@ -991,20 +993,74 @@ function retainSignalRetryScope(
 		for (const child of scope.children) retainSignalRetryScope(child.scope, root, holder);
 }
 
+// A restart may still lose to a later root sibling. Its old owners remain
+// restorable until that root accepts the replacement attempt.
+function canRestoreRestartedSignalScope(scope: Scope | null): boolean {
+	const transaction = ROOT_RENDER_TRANSACTION;
+	return (
+		scope !== null &&
+		transaction !== null &&
+		!transaction.aborted &&
+		isRecordingTransitionJournal() &&
+		scope.block.idState.renderOwner === transaction.owner &&
+		!isCreatedInRootRender(transaction, scope.block)
+	);
+}
+
+function retireRestartedSignalOwner(owner: SignalRendererOwnerIdentity, reversible: boolean): void {
+	if (reversible) {
+		let cancelled = false;
+		journalUndo(() => {
+			cancelled = true;
+		});
+		const retire = () => {
+			if (cancelled) return;
+			cancelled = true;
+			retireRendererSignalOwner(owner);
+		};
+		const transaction = ROOT_RENDER_TRANSACTION!;
+		(transaction.commit ??= []).push(retire);
+		// An earlier deletion may synchronously replace or unmount this root.
+		// Its capture still ends even when that stops the remaining commits.
+		(transaction.capture.renderCleanups ??= []).push(retire);
+	} else retireRendererSignalOwner(owner);
+}
+
+// A restored live scope reclaims this identity from the discarded root attempt.
+// Drop both indexes: leaving a path behind could let a later retry steal it.
+function forgetSignalRetryOwner(node: SignalRetryNode, owner: SignalRendererOwnerIdentity): void {
+	if (node.owner === owner) node.owner = undefined;
+	if (node.children !== undefined)
+		for (const child of node.children.values()) forgetSignalRetryOwner(child, owner);
+}
+
 // Move a restarted primary's owners to its boundary's retry cache, where the
 // replacement claims them by path. A root render defers this tree's teardown to
 // its commit, after that claim, so leave each scope ownerless; it still records
 // retirement when deleted. A nested boundary's primary claims only from its own
 // cache, so its owners stay with it and retire with this tree.
 function handOverSignalRetryScope(scope: Scope, root: Scope, state: TrySlot): void {
+	// An HMR retry carries the original component lifetime into the replacement
+	// primary. Its signal owner must not enter the fresh-attempt retry cache.
+	if (process.env.NODE_ENV !== 'production' && HMR_RETAINED_BLOCKS?.has(scope.block)) return;
 	const owner = scope.signalOwner;
 	const path = owner ? signalRetryPath(scope, root) : null;
 	if (path !== null) {
 		const cache = (state.retrySignalOwners ??= { paths: {}, owners: new Set() });
 		const node = signalRetryNode(cache, path, true)!;
-		if (node.owner !== undefined && node.owner !== owner) {
-			cache.owners.delete(node.owner);
-			retireRendererSignalOwner(node.owner);
+		const previous = node.owner;
+		const previouslyCached = cache.owners.has(owner as SignalRendererOwnerIdentity);
+		const reversible = canRestoreRestartedSignalScope(root);
+		if (reversible)
+			journalUndo(() => {
+				scope.signalOwner = owner;
+				node.owner = previous;
+				if (!previouslyCached) cache.owners.delete(owner as SignalRendererOwnerIdentity);
+				if (previous !== undefined) cache.owners.add(previous);
+			});
+		if (previous !== undefined && previous !== owner) {
+			cache.owners.delete(previous);
+			retireRestartedSignalOwner(previous, reversible);
 		}
 		node.owner = owner as SignalRendererOwnerIdentity;
 		cache.owners.add(node.owner);
@@ -1031,12 +1087,13 @@ function clearSignalRetryOwners(holder: {
 // a redeclared query re-selects from the new inputs and shares the in-flight
 // request when its selection is unchanged. Retire only owners whose cells
 // cannot follow those inputs.
-function supersedeSignalRetryOwners(holder: { retrySignalOwners?: SignalRetryOwners }): void {
+function supersedeSignalRetryOwners(holder: TrySlot, primary = holder.tryBlock): void {
 	const cache = holder.retrySignalOwners;
 	if (cache === undefined) return;
+	const reversible = canRestoreRestartedSignalScope(primary);
 	const retired: SignalRendererOwnerIdentity[] = [];
-	collectRetiredSignalRetryOwners(cache.paths, cache, retired, supersedeSignalOwner);
-	for (const owner of retired) retireRendererSignalOwner(owner);
+	collectRetiredSignalRetryOwners(cache.paths, cache, retired, supersedeSignalOwner, reversible);
+	for (const owner of retired) retireRestartedSignalOwner(owner, reversible);
 }
 
 function discardSignalRetryItem(block: Block, error: unknown): void {
@@ -1088,15 +1145,22 @@ function collectRetiredSignalRetryOwners(
 	cache: SignalRetryOwners,
 	retired: SignalRendererOwnerIdentity[],
 	keep?: (owner: SignalRendererOwnerIdentity) => boolean,
+	reversible = false,
 ): void {
-	if (node.owner !== undefined && !keep?.(node.owner)) {
-		cache.owners.delete(node.owner);
-		retired.push(node.owner);
+	const owner = node.owner;
+	if (owner !== undefined && !keep?.(owner)) {
+		if (reversible)
+			journalUndo(() => {
+				node.owner = owner;
+				cache.owners.add(owner);
+			});
+		cache.owners.delete(owner);
+		retired.push(owner);
 		node.owner = undefined;
 	}
 	if (node.children !== undefined)
 		for (const child of node.children.values())
-			collectRetiredSignalRetryOwners(child, cache, retired, keep);
+			collectRetiredSignalRetryOwners(child, cache, retired, keep, reversible);
 }
 
 // Component, child and branch slots hold one occupant at a time, so a newer
@@ -1458,6 +1522,37 @@ function scopeSignalOwner(scope: Scope | null): SignalOwner | undefined {
 			const node = path === null ? undefined : signalRetryNode(cache, path, false);
 			if (node?.owner !== undefined) {
 				owner = node.owner;
+				const claimed = owner;
+				const previous = scope.signalOwner;
+				let restoresPrimary = false;
+				if (
+					boundary !== undefined &&
+					boundary.retrySignalOwners === cache &&
+					isRecordingTransitionJournal() &&
+					ROOT_RENDER_TRANSACTION?.retired != null
+				) {
+					// Only an actual deferred old primary can reclaim this identity.
+					// Root caches are cleared before rollback replays this journal.
+					for (const primary of ROOT_RENDER_TRANSACTION.retired) {
+						if (primary.rare?.trySlot === boundary && canRestoreRestartedSignalScope(primary)) {
+							restoresPrimary = true;
+							break;
+						}
+					}
+				}
+				if (restoresPrimary)
+					journalUndo(() => {
+						// Run before created-scope teardown: that scope borrowed this
+						// identity, while the restored primary resumes owning it.
+						scope.signalOwner = previous;
+						node.owner = claimed;
+						cache.owners.add(claimed);
+						const discarded = root?.retrySignalOwners;
+						if (discarded !== undefined && discarded !== cache) {
+							forgetSignalRetryOwner(discarded.paths, claimed);
+							discarded.owners.delete(claimed);
+						}
+					});
 				node.owner = undefined;
 				cache.owners.delete(owner);
 			}
@@ -4896,8 +4991,9 @@ function deferRootTeardown(
 		}
 	});
 	const suppressedRefs = REF_DETACH_SUPPRESSION;
-	(transaction.commit ??= []).push(() => {
+	const teardown = () => {
 		if (cancelled || block.disposed) return;
+		cancelled = true;
 		// Deletion cleanups retain their connected-DOM observation. The old
 		// range is reconnected only for teardown, before incoming refs/effects.
 		if (parent !== null) {
@@ -4918,7 +5014,11 @@ function deferRootTeardown(
 			for (const node of nodes)
 				if ((STAGED_DOM ? STAGED_DOM.view(node) : node).parentNode === parent)
 					(STAGED_DOM ? STAGED_DOM.view(parent) : parent).removeChild(node);
-	});
+	};
+	(transaction.commit ??= []).push(teardown);
+	// Reentrant deletion cleanup can stop later commits. End this outgoing
+	// lifetime when its capture ends, unless rollback restored its ownership.
+	(transaction.capture.renderCleanups ??= []).push(teardown);
 	if (detachDom && parent !== null)
 		for (const node of nodes) (STAGED_DOM ? STAGED_DOM.view(parent) : parent).removeChild(node);
 }
@@ -5193,6 +5293,14 @@ function commitRootRenders(): void {
 			// Outgoing cleanup may have removed the state origin of a held root
 			// transition. Inspect its lifetime after those deletions have completed.
 			if (owner.transition !== undefined) TRANSITION_ROOT_DRIVER!.commitRoot(owner, transaction);
+			if (
+				process.env.NODE_ENV !== 'production' &&
+				HMR_ACTIVE_RETENTIONS !== 0 &&
+				!owner.disposed &&
+				owner.wakeable === null &&
+				owner.current !== null
+			)
+				settleHmrRetentionsAfterRootCommit(owner.current);
 		} finally {
 			if (typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' && __OCTANE_PROFILE_ENABLED__)
 				__profileRootExit();
@@ -12672,6 +12780,9 @@ function captureRenderPhaseUpdate(cell: RenderPhaseCell, key: RenderPhaseSnapsho
 }
 
 export function renderBlock(block: Block): void {
+	// A parked HMR lifetime has no live output range until its owner claims it.
+	// Keep queued hook updates for that render instead of touching removed DOM.
+	if (process.env.NODE_ENV !== 'production' && HMR_RETAINED_BLOCKS?.has(block)) return;
 	const hydration = hydrating ? activeHydration() : null;
 	// A replacement dynamic range owns client DOM even while its parent adopts
 	// server siblings. Fresh control-flow markers can instead be replay scaffolding
@@ -12731,6 +12842,8 @@ export function renderBlock(block: Block): void {
 			if (++retries > RENDER_PHASE_UPDATE_LIMIT) throw new Error(formatClientError(9));
 		}
 		if (hydration !== null) hydration.settleUnclaimed(block);
+		if (process.env.NODE_ENV !== 'production' && HMR_RETENTION_ROOTS)
+			settleHmrRetentionAfterRender(block);
 		if (retryVisit !== null) pruneSignalRetryVisit(retryVisit, false);
 		if (
 			signalDocumentEnabled &&
@@ -13991,6 +14104,7 @@ function dispatchTeardownErrors(): void {
 
 function unmountBlock(block: Block, detachDom: boolean = true): void {
 	if (block.disposed) return;
+	if (process.env.NODE_ENV !== 'production' && HMR_RETAINED_BLOCKS?.has(block)) return;
 	if (
 		ROOT_RENDER_ROLLBACK &&
 		ROOT_RENDER_TRANSACTION !== null &&
@@ -13999,6 +14113,10 @@ function unmountBlock(block: Block, detachDom: boolean = true): void {
 	)
 		detachDom = false;
 	if (deferRootUnmount(block, detachDom)) return;
+	if (process.env.NODE_ENV !== 'production' && HMR_RETENTION_ROOTS) {
+		const retention = HMR_RETENTION_ROOTS.get(block);
+		if (retention !== undefined) releaseHmrRetention(retention);
+	}
 	if (TEARDOWN_DEPTH === 0) {
 		TEARDOWN_HANDLER = findTryHandler(block.parentBlock) ?? rendererRegionTryHandler(block);
 		TEARDOWN_BLOCK = block;
@@ -17016,7 +17134,7 @@ function promoteHmrBlockRange(block: Block): void {
  * closures publish on the refresh even when their authored dependency arrays
  * are unchanged. This is called only from HMR.update(), never a normal render.
  */
-function resetHmrBlock(block: Block): void {
+function resetHmrBlock(block: Block, detachDom = true): void {
 	if (TEARDOWN_DEPTH === 0) {
 		TEARDOWN_HANDLER = findTryHandler(block.parentBlock) ?? rendererRegionTryHandler(block);
 		TEARDOWN_BLOCK = block;
@@ -17048,13 +17166,14 @@ function resetHmrBlock(block: Block): void {
 				}
 			}
 
-			unmountScopeChildrenAndSlotsOnly(block, true);
-			removeRange(
-				block.startMarker !== null
-					? getNextSibling(block.startMarker)
-					: getFirstChild(block.parentNode),
-				block.endMarker,
-			);
+			unmountScopeChildrenAndSlotsOnly(block, detachDom);
+			if (detachDom)
+				removeRange(
+					block.startMarker !== null
+						? getNextSibling(block.startMarker)
+						: getFirstChild(block.parentNode),
+					block.endMarker,
+				);
 
 			block.children = null;
 			block.cleanups = preserved;
@@ -17257,11 +17376,12 @@ function remountPublisherHydration(lease: NativePublisherHydration): void {
 		releasePreservedHydrateActivation(state);
 		discardOffscreenCapture(preserved.capture);
 	}
+	const remounting = lease.remounting;
 	lease.remounting = true;
 	try {
 		unmountBlock(state.block);
 	} finally {
-		lease.remounting = false;
+		lease.remounting = remounting;
 	}
 	const oldOwner = lease.owner;
 	retireRendererSignalOwner(oldOwner);
@@ -17316,6 +17436,18 @@ function remountPublisherHydration(lease: NativePublisherHydration): void {
 	scheduleRender(state.parentBlock);
 }
 
+function reconcilePublisherMemberships(lease: NativePublisherHydration): void {
+	if (lease.closed) return;
+	// The native transaction has finished using its captured proofs. Release
+	// removed blocks now, including trees whose layout effects are disconnected.
+	// A surviving component admits its committed generation when it mounts again.
+	for (const [component, membership] of lease.releases) {
+		if (membership.blocks.size !== 0) continue;
+		membership.release();
+		lease.releases.delete(component);
+	}
+}
+
 function admitNativePublisherComponent(component: HmrWrapper, scope: Scope): void {
 	const owner = scope.block.idState.dataOwner;
 	if (owner === undefined || nativePublisherHydrations === undefined) return;
@@ -17360,6 +17492,14 @@ function admitNativePublisherComponent(component: HmrWrapper, scope: Scope): voi
 				lease.ingress = undefined;
 			},
 			remount: () => remountPublisherHydration(lease),
+			holdUpdate: () => {
+				const remounting = lease.remounting;
+				lease.remounting = true;
+				return () => {
+					lease.remounting = remounting;
+					if (!remounting) reconcilePublisherMemberships(lease);
+				};
+			},
 		});
 		membership = { release: driver.admit(component, proof), proof, blocks: new Set(), buildId };
 		if (signalBuildId !== undefined) lease.admittedBuilds.add(signalBuildId);
@@ -19519,7 +19659,7 @@ export function preparePublisherBoundaryReplacement(
 						if (
 							ownerLease === undefined ||
 							ownerLease.publisherKey !== lease.publisherKey ||
-							ownerLease.documentAuthority !== lease.documentAuthority ||
+							ownerLease.documentId !== lease.documentId ||
 							!blockIsAncestor(ownerLease.state.block, block)
 						)
 							throw new TypeError(formatClientError(363));
@@ -19544,8 +19684,9 @@ export function externalSnapshotBoundary<P>(
 		(!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > EXTERNAL_SNAPSHOT_MAX_TIMEOUT_MS)
 	)
 		throw new TypeError(formatClientError(358));
+	const component = options.component;
 	if (
-		typeof options.component !== 'function' ||
+		typeof component !== 'function' ||
 		typeof options.snapshot !== 'function' ||
 		(options.contextKeys !== undefined &&
 			(!Array.isArray(options.contextKeys) ||
@@ -19593,7 +19734,7 @@ export function externalSnapshotBoundary<P>(
 			Hydrate(
 				{
 					when: { _t: 'load' },
-					children: createElement(options.component, props),
+					children: createElement(component, props),
 					__external: descriptor,
 				} as InternalHydrateProps,
 				scope,
@@ -19628,7 +19769,7 @@ export function externalSnapshotBoundary<P>(
 								JSON.stringify(['octane:external', authority.publisherBuildId, state.boundaryId]),
 								documentId,
 								bridge,
-								getNativeHotOwnerDriver()?.getComponentBuild(options.component, true),
+								getNativeHotOwnerDriver()?.getComponentBuild(component, true),
 							);
 						} catch (error) {
 							bridge?.dispose();
@@ -37051,17 +37192,36 @@ function componentSlotImpl(
 			const before = state.anchor
 				? domNode(state.anchor).previousSibling
 				: (STAGED_DOM ? STAGED_DOM.view(domParent) : domParent).lastChild;
-			const b = createBlock(
-				'dynamic',
-				parentBlock,
-				domParent,
-				null,
-				state.anchor,
-				body,
-				renderProps,
-				undefined,
-				outputHandler,
-			);
+			const retained =
+				process.env.NODE_ENV !== 'production' && HMR_RETENTION_ROOTS
+					? takeRetainedHmrBlock(parentScope, slotKey, identity, nextKey)
+					: null;
+			const b =
+				retained ??
+				createBlock(
+					'dynamic',
+					parentBlock,
+					domParent,
+					null,
+					state.anchor,
+					body,
+					renderProps,
+					undefined,
+					outputHandler,
+				);
+			if (retained !== null) {
+				b.parentBlock = parentBlock;
+				if (parentBlock.memoInChain && !b.memoInChain) promoteMemoAncestry(b);
+				b.exclusiveMarkers = false;
+				b.parentNode = domParent;
+				b.startMarker = state.singleRoot ? null : state.start;
+				b.endMarker = state.singleRoot ? state.anchor : state.end;
+				b.body = body;
+				b.props = renderProps;
+				b.outputHandler = outputHandler;
+				b.$$ctxCache = null;
+				b.$$ctxCacheOwner = null;
+			}
 			if (signalInstanceKey !== undefined) stampSignalInstanceKey(b, signalInstanceKey);
 			if (
 				typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' &&
@@ -37122,17 +37282,36 @@ function componentSlotImpl(
 			else if (positionalRoot && !replaced)
 				hydration!.slotMismatch(parentScope, slotKey, 'a component range', hydrationCursor);
 		} else {
-			const b = createBlock(
-				'dynamic',
-				parentBlock,
-				domParent,
-				state.start,
-				state.end,
-				body,
-				renderProps,
-				undefined,
-				outputHandler,
-			);
+			const retained =
+				process.env.NODE_ENV !== 'production' && HMR_RETENTION_ROOTS
+					? takeRetainedHmrBlock(parentScope, slotKey, identity, nextKey)
+					: null;
+			const b =
+				retained ??
+				createBlock(
+					'dynamic',
+					parentBlock,
+					domParent,
+					state.start,
+					state.end,
+					body,
+					renderProps,
+					undefined,
+					outputHandler,
+				);
+			if (retained !== null) {
+				b.parentBlock = parentBlock;
+				if (parentBlock.memoInChain && !b.memoInChain) promoteMemoAncestry(b);
+				b.exclusiveMarkers = false;
+				b.parentNode = domParent;
+				b.startMarker = state.singleRoot ? null : state.start;
+				b.endMarker = state.singleRoot ? state.anchor : state.end;
+				b.body = body;
+				b.props = renderProps;
+				b.outputHandler = outputHandler;
+				b.$$ctxCache = null;
+				b.$$ctxCacheOwner = null;
+			}
 			if (signalInstanceKey !== undefined) stampSignalInstanceKey(b, signalInstanceKey);
 			if (
 				typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' &&
@@ -37169,7 +37348,32 @@ function componentSlotImpl(
 		if (state.block.props !== renderProps)
 			journalRootProperty(state.block, 'props', state.block.props);
 		state.block.props = renderProps;
-		renderBlock(state.block);
+		if (state.singleRoot && state.block.startMarker === null) {
+			// An initial suspension can leave the root's insertion range unfinished.
+			// Its retry must claim the inserted node before HMR or deletion uses it.
+			const before = state.anchor
+				? domNode(state.anchor).previousSibling
+				: (STAGED_DOM ? STAGED_DOM.view(domParent) : domParent).lastChild;
+			if (ROOT_RENDER_TRANSACTION !== null && !ROOT_RENDER_ROLLBACK) {
+				journalRootRange(domParent, before, state.anchor);
+				// A completed retry caches its newly inserted template. Rollback
+				// removes that DOM, so the next attempt must mount the template again.
+				journalRootProperty(state.block.slots, 0, state.block.slots[0]);
+			}
+			try {
+				renderBlock(state.block);
+			} finally {
+				const last = state.anchor
+					? domNode(state.anchor).previousSibling
+					: (STAGED_DOM ? STAGED_DOM.view(domParent) : domParent).lastChild;
+				if (last !== null && last !== before) {
+					journalRootProperty(state.block, 'startMarker', state.block.startMarker);
+					journalRootProperty(state.block, 'endMarker', state.block.endMarker);
+					state.block.startMarker = last;
+					state.block.endMarker = last;
+				}
+			}
+		} else renderBlock(state.block);
 	}
 	// Hydration: advance the cursor PAST this component's adopted range so the next
 	// sibling adopts from the right node. The body itself doesn't reliably leave the
@@ -42658,6 +42862,250 @@ export function memo<P>(
 
 export const HMR: unique symbol = Symbol.for('octane.hmr');
 
+// Retain actual component lifetimes across a parent's compiled-template reset.
+// Copying hook maps would leave setters and subscriptions bound to dead scopes.
+// This cache exists only during development refresh; ordinary renders allocate none.
+interface HmrRetainedBlock {
+	path: unknown[];
+	block: Block;
+}
+interface HmrRetention {
+	root: Block;
+	entries: HmrRetainedBlock[];
+	claimed: HmrRetainedBlock[];
+}
+let HMR_RETENTION_ROOTS: WeakMap<Block, HmrRetention> | null = null;
+let HMR_ACTIVE_RETENTIONS = 0;
+let HMR_RETAINED_BLOCKS: WeakMap<Block, HmrRetention> | null = null;
+let HMR_RESTART_PRIMARIES: WeakSet<Block> | null = null;
+const HMR_COMPONENT_IDENTITY = /* @__PURE__ */ Symbol.for('octane.hmr.identity');
+
+function hmrRetentionPath(scope: Scope, root: Scope): unknown[] | null {
+	const path = signalRetryPath(scope, root);
+	if (path === null) return null;
+	return path.map((token) => {
+		if (typeof token !== 'function') return token;
+		// Canonical exported wrappers retain their actual function identity. A
+		// private helper needs the compiler's authored identity across evaluations.
+		if ((token as any)[HMR] !== undefined) return token;
+		return (token as any)[HMR_COMPONENT_IDENTITY] ?? token;
+	});
+}
+
+function retainHmrDescendants(root: Block): void {
+	const existing = HMR_RETENTION_ROOTS?.get(root);
+	const entries = existing?.entries ?? [];
+	const fresh: HmrRetainedBlock[] = [];
+	const visit = (scope: Scope): void => {
+		if (scope.block.idState !== root.idState) return;
+		// A child already refreshing owns its descendants' paths relative to
+		// itself. Keep that pool intact instead of competing for them here.
+		const nested = scope === scope.block ? HMR_RETENTION_ROOTS?.get(scope.block) : undefined;
+		if (nested !== undefined) reparkHmrClaims(scope.block);
+		let body = scope.block.body;
+		while (body && (body as any)[MEMO_OWNER] === body) body = (body as any).type;
+		if (scope === scope.block && (body as any)[HMR] !== undefined) {
+			const path = hmrRetentionPath(scope, root);
+			if (path !== null) {
+				// A second save can revisit a claimed original in a pending primary.
+				// Keep one record per lifetime so settling cannot dispose its duplicate.
+				if (entries.some((entry) => entry.block === scope.block)) return;
+				// A nested refresh becomes this descendant's only retention owner.
+				// An ancestor may already have claimed it in its pending primary.
+				for (let parent = root.parentBlock; parent !== null; parent = parent.parentBlock) {
+					const ancestor = HMR_RETENTION_ROOTS?.get(parent);
+					if (ancestor === undefined) continue;
+					const claimed = ancestor.claimed.findIndex((entry) => entry.block === scope.block);
+					if (claimed !== -1) ancestor.claimed.splice(claimed, 1);
+					const parked = ancestor.entries.findIndex((entry) => entry.block === scope.block);
+					if (parked !== -1) ancestor.entries.splice(parked, 1);
+				}
+				const claimedIndex =
+					existing?.claimed.findIndex((entry) => entry.block === scope.block) ?? -1;
+				const entry =
+					claimedIndex === -1
+						? { path, block: scope.block }
+						: existing!.claimed.splice(claimedIndex, 1)[0];
+				entry.path = path;
+				entries.push(entry);
+				fresh.push(entry);
+			}
+		}
+		if (nested === undefined) forEachSubtreeChild(scope, visit);
+	};
+	forEachSubtreeChild(root, visit);
+	if (entries.length === 0) return;
+	const retention: HmrRetention = existing ?? { root, entries, claimed: [] };
+	if (existing === undefined) HMR_ACTIVE_RETENTIONS++;
+	(HMR_RETENTION_ROOTS ??= new WeakMap()).set(root, retention);
+	HMR_RETAINED_BLOCKS ??= new WeakMap();
+	for (const entry of fresh) HMR_RETAINED_BLOCKS.set(entry.block, retention);
+	// Descendants relinquish their compiled DOM, not their lifetime. The parent
+	// removes that DOM in one sweep, including borrowed and self-marked ranges.
+	for (let i = fresh.length - 1; i >= 0; i--) resetHmrBlock(fresh[i].block, false);
+}
+
+function findHmrRetention(block: Block): HmrRetention | undefined {
+	for (let parent: Block | null = block; parent !== null; parent = parent.parentBlock) {
+		const retention = HMR_RETENTION_ROOTS!.get(parent);
+		if (retention !== undefined) return retention;
+	}
+}
+
+function takeRetainedHmrBlock(
+	parent: Scope,
+	slot: number,
+	component: ComponentBody | string,
+	key: unknown,
+): Block | null {
+	if (!HMR_RETENTION_ROOTS) return null;
+	const nearest = findHmrRetention(parent.block);
+	if (nearest === undefined) return null;
+	let ancestor: Block | null = parent.block;
+	while (ancestor !== null) {
+		const retention = findHmrRetention(ancestor);
+		if (retention === undefined) return null;
+		ancestor = retention.root.parentBlock;
+		const path = hmrRetentionPath(parent, retention.root);
+		if (path === null) continue;
+		path.push('slot', slot, 'componentSlotSlot', undefined, component, key);
+		for (let i = 0; i < retention.entries.length; i++) {
+			const entry = retention.entries[i];
+			if (entry.path.length !== path.length || !entry.path.every((token, j) => token === path[j]))
+				continue;
+			if (retention !== nearest) {
+				const claimPath = hmrRetentionPath(parent, nearest.root);
+				if (claimPath === null) return null;
+				claimPath.push('slot', slot, 'componentSlotSlot', undefined, component, key);
+				// A nested refresh owns this claimed lifetime, including a later
+				// pending-primary restart. Older ancestor undos see it transferred.
+				entry.path = claimPath;
+			}
+			retention.entries.splice(i, 1);
+			nearest.claimed.push(entry);
+			HMR_RETAINED_BLOCKS!.delete(entry.block);
+			// Offscreen replacements carry their original retry coordinates. The
+			// claiming slot now owns this lifetime under a newly compiled parent.
+			const retryLocation = SIGNAL_RETRY_LOCATIONS.get(entry.block);
+			SIGNAL_RETRY_LOCATIONS.delete(entry.block);
+			if (isRecordingTransitionJournal()) {
+				journalUndo(() => {
+					if (HMR_RETENTION_ROOTS!.get(nearest.root) !== nearest || entry.block.disposed) return;
+					// A later nested refresh can transfer this lifetime to its own pool.
+					if (!nearest.claimed.includes(entry) && !nearest.entries.includes(entry)) return;
+					if (retryLocation === undefined) SIGNAL_RETRY_LOCATIONS.delete(entry.block);
+					else SIGNAL_RETRY_LOCATIONS.set(entry.block, retryLocation);
+					// A later sibling can abandon this claim. Park the actual lifetime
+					// before older parent-slot/creation undos tear down the failed tree.
+					if (parkHmrClaim(nearest, entry)) resetHmrBlock(entry.block, false);
+				});
+			}
+			return entry.block;
+		}
+	}
+	return null;
+}
+
+function parkHmrClaim(retention: HmrRetention, entry: HmrRetainedBlock): boolean {
+	const index = retention.claimed.indexOf(entry);
+	if (index === -1) return false;
+	retention.claimed.splice(index, 1);
+	if (entry.block.disposed) return false;
+	HMR_RETAINED_BLOCKS!.set(entry.block, retention);
+	retention.entries.push(entry);
+	return true;
+}
+
+function reparkHmrClaims(primary: Block): void {
+	const retention = findHmrRetention(primary);
+	if (retention === undefined) return;
+	const parked: HmrRetainedBlock[] = [];
+	for (const entry of retention.claimed.slice()) {
+		if (entry.block === primary || blockIsAncestorOf(primary, entry.block)) {
+			const nested = HMR_RETENTION_ROOTS!.get(entry.block);
+			if (nested !== undefined && nested !== retention) reparkHmrClaims(entry.block);
+			if (parkHmrClaim(retention, entry)) parked.push(entry);
+		}
+	}
+	if (parked.length !== 0 && isRecordingTransitionJournal()) {
+		journalUndo(() => {
+			if (HMR_RETENTION_ROOTS!.get(retention.root) !== retention) return;
+			// The restored primary's output was reset, not reversibly unmounted.
+			// Retry it through a fresh primary so restored slots cannot render a
+			// parked original in place or publish its old component coordinates.
+			(HMR_RESTART_PRIMARIES ??= new WeakSet()).add(primary);
+		});
+	}
+	// The old primary can tear down at commit, after the replacement has claimed
+	// these lifetimes. Remove its ownership edges now so that teardown cannot
+	// dispose a Block that has already moved into the replacement primary.
+	const detach = (scope: Scope): void => {
+		forEachSubtreeChild(scope, detach);
+		if (scope._slots === null) return;
+		for (const slot of scope._slots) {
+			const block = slot.block as Block | undefined;
+			if (block !== undefined && block !== null && HMR_RETAINED_BLOCKS!.has(block)) {
+				if (isRecordingTransitionJournal())
+					journalUndo(() => {
+						slot.block = block;
+					});
+				slot.block = null;
+			}
+		}
+	};
+	detach(primary);
+	// Mark every original lifetime before clearing ancestor output. Speculative
+	// components from the abandoned primary still receive ordinary teardown.
+	for (let i = parked.length - 1; i >= 0; i--) resetHmrBlock(parked[i].block, false);
+}
+
+function releaseHmrRetention(retention: HmrRetention): void {
+	if (HMR_RETENTION_ROOTS!.get(retention.root) !== retention) return;
+	HMR_RETENTION_ROOTS!.delete(retention.root);
+	HMR_ACTIVE_RETENTIONS--;
+	retention.claimed.length = 0;
+	const entries = retention.entries.splice(0);
+	for (const entry of entries) HMR_RETAINED_BLOCKS!.delete(entry.block);
+	for (const entry of entries) unmountBlock(entry.block, false);
+}
+
+function hmrRetentionPending(scope: Scope): boolean {
+	if ((scope as Block).rare?.trySlot?.pendingThenable != null) return true;
+	let pending = false;
+	forEachSubtreeChild(scope, (child) => {
+		if (!pending) pending = hmrRetentionPending(child);
+	});
+	return pending;
+}
+
+function settleHmrRetentionsAfterRootCommit(root: Block): void {
+	const visit = (scope: Scope): void => {
+		if (scope.block.idState !== root.idState) return;
+		if (scope === scope.block && HMR_RETENTION_ROOTS!.has(scope.block))
+			settleHmrRetentionAfterRender(scope.block);
+		forEachSubtreeChild(scope, visit);
+	};
+	// A successful root retry can memo-bail a refreshed owner. Its removed
+	// descendants still need the same accepted-commit cleanup as rendered owners.
+	visit(root);
+}
+
+function settleHmrRetentionAfterRender(block: Block): void {
+	const retention = findHmrRetention(block);
+	if (retention === undefined) return;
+	// Use the existing commit phase: a Suspense retry publishes its branch only
+	// after renderBlock returns. Unreached children remain eligible until then.
+	// An enclosing failed attempt may discard this action, so each completed
+	// render schedules its own. The record check makes committed repeats harmless.
+	enqueueEffectEventCommitAction(() => {
+		if (HMR_RETENTION_ROOTS!.get(retention.root) !== retention) return;
+		// A local boundary may finish while a later sibling still suspends the
+		// owning root request. Its next retry can restart this initial primary.
+		if (retention.root.idState.renderOwner?.wakeable != null) return;
+		if (!hmrRetentionPending(retention.root)) releaseHmrRetention(retention);
+	});
+}
+
 interface HmrWrapper {
 	readonly [HMR]?: HmrMeta;
 }
@@ -42702,6 +43150,7 @@ export function hmr<P>(fn: ComponentBody<P>): ComponentBody<P> {
 					meta.liveBlocks.delete(b);
 					continue;
 				}
+				if (HMR_RETAINED_BLOCKS?.has(b)) continue;
 				if (!hasResettableHmrRange(b)) return false;
 			}
 			meta.fn = nextFn;
@@ -42722,6 +43171,8 @@ export function hmr<P>(fn: ComponentBody<P>): ComponentBody<P> {
 					continue;
 				}
 				b.body = wrapper as unknown as ComponentBody<any>;
+				if (HMR_RETAINED_BLOCKS?.has(b)) continue;
+				retainHmrDescendants(b);
 				if (typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' && __OCTANE_PROFILE_ENABLED__)
 					__profileSchedule(b, 'hmr');
 				promoteHmrBlockRange(b);
@@ -44139,17 +44590,33 @@ function createTryBody(state: TrySlot, start: Node, end: Node): Block {
 function restartUncommittedTry(state: TrySlot): Block | null {
 	HIDDEN_REVEAL_ACTIONS?.delete(state);
 	const old = state.tryBlock!;
+	if (process.env.NODE_ENV !== 'production') HMR_RESTART_PRIMARIES?.delete(old);
 	const refs: SuspenseRefEntry[] = [];
 	collectVisibleSubtreeRefs(old, refs);
 	showTryBlock(state);
+	if (process.env.NODE_ENV !== 'production' && HMR_RETENTION_ROOTS) reparkHmrClaims(old);
 	state.tryBlock = null;
 	// Like a retry of a discarded hydration attempt; see supersedeSignalRetryOwners.
 	if (signalDocumentEnabled || state.idState.renderOwner?.signalOwner !== undefined)
 		handOverSignalRetryScope(old, old, state);
-	supersedeSignalRetryOwners(state);
+	supersedeSignalRetryOwners(state, old);
 	// Neither these refs nor the primary's captured effects ever committed.
-	// Its hook registrations still need real teardown (e.g. transition listeners).
-	withRefDetachSuppression(refs, () => unmountBlock(old));
+	// Its hook registrations still need real teardown (e.g. transition listeners),
+	// but a later root suspension must restore this partial primary intact.
+	withRefDetachSuppression(refs, () => {
+		const transaction = ROOT_RENDER_TRANSACTION;
+		if (
+			transaction !== null &&
+			!transaction.aborted &&
+			!ROOT_RENDER_ROLLBACK &&
+			old.idState.renderOwner === transaction.owner &&
+			!isCreatedInRootRender(transaction, old)
+		) {
+			deferRootTeardown(transaction, old, old.exclusiveMarkers, true, (scope, detachDom) =>
+				unmountBlock(scope.block, detachDom),
+			);
+		} else unmountBlock(old);
+	});
 	if (state.parentBlock.disposed || state.tryBlock !== null || state.branch !== 2) return null;
 	return mountHiddenTryBody(state);
 }
@@ -45879,8 +46346,8 @@ function attemptHiddenReveal(
  * sibling suspends the root. The journal restores the hidden display and the
  * fallback's deferred unmount, so the boundary record must return with them.
  * Otherwise it treats the re-hidden primary as visible and orphans the fallback.
- * A restart disposes an uncommitted primary for good; the restored record then
- * names a disposed primary, which the next render or retry replaces.
+ * A restart defers the old primary's teardown, so rollback can restore the same
+ * partial DOM and hook registrations with this record.
  */
 function journalRootReveal(state: TrySlot): void {
 	journalObjectOnce(state);
@@ -45934,7 +46401,10 @@ function attemptHiddenRevealInner(
 	}
 	if (ROOT_RENDER_TRANSACTION !== null && !ROOT_RENDER_ROLLBACK) journalRootReveal(state);
 	const effectDeps = snapshotSubtreeEffectDeps(tryBlock);
-	if (reason === 'parent' && !RESUME_REPLAY && !state.hasResolved) {
+	if (
+		(reason === 'parent' && !RESUME_REPLAY && !state.hasResolved) ||
+		(process.env.NODE_ENV !== 'production' && HMR_RESTART_PRIMARIES?.has(tryBlock))
+	) {
 		// A completed speculative retry still is not a mount. New props must
 		// initialize state/ref/memo/reducer hooks from the current inputs. Keep
 		// promise replays and updates from inside the primary intact: discarding

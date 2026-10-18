@@ -1,16 +1,27 @@
 import { describe, it, expect, vi } from 'vitest';
 import { renderToString } from 'octane/server';
+import * as Signals from 'octane/signals';
+import * as ClientSignals from 'octane/signals/client';
 import {
 	hmr,
 	HMR,
 	useState,
 	flushSync,
 	hydrateRoot,
+	createRoot,
+	componentSlot,
 	type ComponentBody,
 	type Scope,
 } from '../src/index.js';
 import { mount } from './_helpers';
-import { loadCompiledFixtureSource } from './_server-fixture';
+import { loadCompiledFixtureSource, loadPlainHookFixtureSource } from './_server-fixture';
+import { drainProducers } from './_fixtures/signals-async-controls';
+import {
+	admitHotSignalPublisher,
+	createNativeHotSignalOwnerProof,
+	type HotSignalExecutionFrame,
+	type HotSignalRuntime,
+} from '../src/signals/hot-declarations.js';
 
 /**
  * Runtime tests for the `hmr(...)` wrapper. The focused unit cases use direct
@@ -139,26 +150,33 @@ async function compileHmrModule(
  * export to its canonical wrapper and invalidates when one declines.
  * `accepted` reports whether the latest evaluation is its own update boundary.
  */
-function webpackHotModule(filename: string) {
+function webpackHotModule(
+	filename: string,
+	compileOptions: Record<string, unknown> = {},
+	runtimeModules: Record<string, Record<string, unknown>> = {},
+) {
 	const data: Record<string, unknown> = {};
 	let dispose: ((data: Record<string, unknown>) => void) | undefined;
 	const module = {
 		accepted: false,
 		invalidated: false,
-		load(source: string): Promise<ComponentBody<any>> {
+		load(source: string, exportName = 'App'): ComponentBody<any> {
 			dispose?.(data);
 			dispose = undefined;
 			module.accepted = false;
-			return compileHmrComponent(
-				source,
-				'App',
-				filename,
-				{},
-				{
-					hmr: 'webpack',
-					hot: {
+			return loadCompiledFixtureSource(source, {
+				id: filename,
+				mode: 'client',
+				compileOptions: { hmr: 'webpack', ...compileOptions },
+				runtimeModules: {
+					'octane/signals': Signals,
+					'octane/signals/client': ClientSignals,
+					...runtimeModules,
+				},
+				importMeta: {
+					webpackHot: {
 						data,
-						dispose(callback) {
+						dispose(callback: (value: Record<string, unknown>) => void) {
 							dispose = callback;
 						},
 						accept() {
@@ -169,13 +187,1433 @@ function webpackHotModule(filename: string) {
 						},
 					},
 				},
-			);
+			})[exportName];
 		},
 	};
 	return module;
 }
 
 describe('hmr — runtime wrapper', () => {
+	it.each([
+		{
+			name: 'named block component',
+			declaration: 'export function Counter() @{ BODY }',
+			exported: 'Counter',
+		},
+		{
+			name: 'component alias captured after canonical initialization',
+			declaration:
+				'export function Counter() @{ BODY } const Alias = Counter; export default Alias;',
+			exported: 'default',
+		},
+		{
+			name: 'named return-JSX component',
+			declaration: 'export function Counter() { BODY }',
+			exported: 'Counter',
+			returned: true,
+		},
+		{
+			name: 'anonymous default component',
+			declaration: 'export default function() @{ BODY }',
+			exported: 'default',
+		},
+		{
+			name: 'private component captured by an immutable memo alias',
+			declaration:
+				"import { memo } from 'octane'; function Counter() @{ BODY } const Alias = Counter; export default memo(Alias);",
+			exported: 'default',
+			memoized: true,
+		},
+		{
+			name: 'aliased native memo import',
+			declaration:
+				"import { memo as wrap } from 'octane'; function Counter() @{ BODY } const Memo = wrap(Counter); export default Memo;",
+			exported: 'default',
+			memoized: true,
+		},
+		{
+			name: 'namespace native memo import',
+			declaration:
+				"import * as Octane from 'octane'; function Counter() @{ BODY } const Memo = Octane.memo(Counter); export default Memo;",
+			exported: 'default',
+			memoized: true,
+		},
+		{
+			name: 'authored names resembling compiler temporaries',
+			declaration:
+				'const _$hotSignalModule = 1, _$__hotSignalModule = 2, _$__registerHotSignalComponent = 3, _$__remountHotSignalComponent = 4; export function Counter() @{ BODY }',
+			exported: 'Counter',
+		},
+	])(
+		'webpack module replacement preserves signal state through $name',
+		async ({ name, declaration, exported, returned, memoized }) => {
+			const source = (version: number) => {
+				const button = `<button onClick={() => count$.set(count$.get() + 1)}>{'v${version}:' + count$.get() as string}</button>`;
+				return (
+					`import { useSignal$ } from 'octane/signals/client'; ` +
+					declaration.replace(
+						'BODY',
+						`const count$ = useSignal$(0); ${returned ? 'return ' : ''}${button}${returned ? ';' : ''}`,
+					)
+				);
+			};
+			const hot = webpackHotModule(`/src/hot-signal-${name.replaceAll(' ', '-')}.tsrx`, {
+				dev: true,
+			});
+			const initial = await hot.load(source(1), exported);
+			const r = mount(initial);
+			try {
+				expect(hot.accepted).toBe(true);
+				r.click('button');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v1:2');
+				for (const version of [2, 3]) {
+					const updated = await hot.load(source(version), exported);
+					flushSync(() => {});
+					// memo() creates an outer wrapper on each evaluation. Its public
+					// type still captures the same canonical, stateful component.
+					if (memoized)
+						expect((updated as ComponentBody<any> & { type: ComponentBody<any> }).type).toBe(
+							(initial as ComponentBody<any> & { type: ComponentBody<any> }).type,
+						);
+					else expect(updated).toBe(initial);
+					expect(hot.accepted).toBe(true);
+					expect(hot.invalidated).toBe(false);
+					expect(r.find('button').textContent).toBe(`v${version}:${version}`);
+					r.click('button');
+					expect(r.find('button').textContent).toBe(`v${version}:${version + 1}`);
+				}
+			} finally {
+				r.unmount();
+			}
+		},
+	);
+
+	it.each([
+		{
+			name: 'conditional local components',
+			before: '',
+			local: 'const Child = props.open ? Up : Down;',
+			after: 'function Up() @{ <p>child:VERSION</p> } function Down() @{ <p>closed</p> }',
+		},
+		{
+			name: 'helper declared after its caller',
+			before: 'const labels = { Helper: true }; void labels.Helper;',
+			local: 'const Child = Helper;',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'helper declared before its caller',
+			before: 'function Helper() @{ <p>child:VERSION</p> }',
+			local: 'const Child = Helper;',
+			after: '',
+		},
+	])(
+		'self-accepts deferred component references through $name',
+		({ name, before, local, after }) => {
+			const source = (version: number) => `import { useState } from 'octane';
+${before.replaceAll('VERSION', String(version))}
+export function App(props) @{ const [count, setCount] = useState(0); ${local}
+<section><button onClick={() => setCount(count + 1)}>{'v${version}:' + count as string}</button><Child /></section> }
+${after.replaceAll('VERSION', String(version))}`;
+			const hot = webpackHotModule(`/src/deferred-${name.replaceAll(' ', '-')}.tsrx`, {
+				dev: true,
+			});
+			const initial = hot.load(source(1));
+			const r = mount(initial, { open: true });
+			try {
+				expect(hot.accepted).toBe(true);
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v1:1');
+				expect(r.find('p').textContent).toBe('child:1');
+				expect(hot.load(source(2))).toBe(initial);
+				flushSync(() => {});
+				expect(hot.accepted).toBe(true);
+				expect(hot.invalidated).toBe(false);
+				expect(r.find('button').textContent).toBe('v2:1');
+				expect(r.find('p').textContent).toBe('child:2');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v2:2');
+			} finally {
+				r.unmount();
+			}
+		},
+	);
+
+	it('retains state when an earlier exported component passes a later component as a prop', () => {
+		const source = (version: number) => `import { useSignal$ } from 'octane/signals/client';
+export function App() @{ <Slot component={Counter} /> }
+function Slot(props) @{ const Child = props.component; <Child /> }
+export function Counter() @{ const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{'v${version}:' + count$.get() as string}</button> }`;
+		const hot = webpackHotModule('/src/deferred-component-prop.tsrx', { dev: true });
+		const initial = hot.load(source(1));
+		const r = mount(initial);
+		try {
+			expect(hot.accepted).toBe(true);
+			r.click('button');
+			r.click('button');
+			expect(r.find('button').textContent).toBe('v1:2');
+			expect(hot.load(source(2))).toBe(initial);
+			flushSync(() => {});
+			expect(hot.accepted).toBe(true);
+			expect(hot.invalidated).toBe(false);
+			expect(r.find('button').textContent).toBe('v2:2');
+			r.click('button');
+			expect(r.find('button').textContent).toBe('v2:3');
+		} finally {
+			r.unmount();
+		}
+	});
+
+	it.each(['state', 'signal'] as const)(
+		'retains %s state across ancestor edits after replacing a mounted child',
+		(kind) => {
+			const source = (version: number) => `import { useState } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function App(props) @{ <main><Slot component={props.counter ? Counter : Placeholder} /><aside>host:v${version}</aside></main> }
+function Slot(props) @{ const Child = props.component; <Child /> }
+export function Placeholder() @{ <p>placeholder</p> }
+export function Counter() @{ ${kind === 'state' ? 'const [count, setCount] = useState(0);' : 'const count$ = useSignal$(0);'} <button onClick={() => ${kind === 'state' ? 'setCount(count + 1)' : 'count$.set(count$.get() + 1)'}}>{'v${version}:' + ${kind === 'state' ? 'count' : 'count$.get()'} as string}</button> }`;
+			const hot = webpackHotModule(`/src/retained-replaced-${kind}-child.tsrx`, { dev: true });
+			const initial = hot.load(source(1));
+			const owner = Signals.createScope({ scopeKey: `retained-replaced-${kind}-child` });
+			const container = document.createElement('div');
+			document.body.appendChild(container);
+			const root = createRoot(container, { signalOwner: owner });
+			const click = () => flushSync(() => container.querySelector('button')!.click());
+			try {
+				flushSync(() => root.render(initial, { counter: false }));
+				expect(container.querySelector('p')!.textContent).toBe('placeholder');
+				flushSync(() => root.render(initial, { counter: true }));
+				expect(container.querySelector('p')).toBeNull();
+				click();
+				click();
+				expect(container.querySelector('button')!.textContent).toBe('v1:2');
+				for (const version of [2, 3]) {
+					expect(hot.load(source(version))).toBe(initial);
+					flushSync(() => {});
+					expect(hot.invalidated).toBe(false);
+					expect(container.querySelector('aside')!.textContent).toBe(`host:v${version}`);
+					expect(container.querySelector('button')!.textContent).toBe(`v${version}:${version}`);
+					click();
+					expect(container.querySelector('button')!.textContent).toBe(`v${version}:${version + 1}`);
+				}
+			} finally {
+				root.unmount();
+				container.remove();
+				owner.dispose();
+			}
+		},
+	);
+
+	it.each(['state', 'signal'] as const)(
+		'retains independent keyed descendants with %s hooks and retires removed children',
+		(kind) => {
+			const source = (version: number) => `import { useState } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function App(props) @{ <section>@for (const label of props.labels; key label) { <Slot component={Counter} label={label} revision={props.revision} /> }</section> }
+function Slot(props) @{ const Child = props.component; <Child label={props.label} key={props.revision} /> }
+export function Counter(props) @{ ${kind === 'state' ? 'const [count, setCount] = useState(0);' : 'const count$ = useSignal$(0);'} <button data-label={props.label} onClick={() => ${kind === 'state' ? 'setCount(count + 1)' : 'count$.set(count$.get() + 1)'}}>{'v${version}:' + ${kind === 'state' ? 'count' : 'count$.get()'} as string}</button> }`;
+			const hot = webpackHotModule(`/src/retained-${kind}-siblings.tsrx`, { dev: true });
+			const initial = hot.load(source(1));
+			const r = mount(initial, { labels: ['a', 'b'], revision: 0 });
+			try {
+				r.click('[data-label="a"]');
+				r.click('[data-label="a"]');
+				r.click('[data-label="b"]');
+				expect(hot.load(source(2))).toBe(initial);
+				flushSync(() => {});
+				expect(hot.invalidated).toBe(false);
+				expect(r.find('[data-label="a"]').textContent).toBe('v2:2');
+				expect(r.find('[data-label="b"]').textContent).toBe('v2:1');
+				r.update(initial, { labels: ['b', 'a'], revision: 0 });
+				expect(r.findAll('button').map((button) => button.textContent)).toEqual(['v2:1', 'v2:2']);
+				r.update(initial, { labels: ['b'], revision: 0 });
+				expect(hot.load(source(3))).toBe(initial);
+				flushSync(() => {});
+				expect(r.findAll('button').map((button) => button.textContent)).toEqual(['v3:1']);
+				r.update(initial, { labels: ['b', 'a'], revision: 0 });
+				expect(r.find('[data-label="a"]').textContent).toBe('v3:0');
+				r.update(initial, { labels: ['b', 'a'], revision: 1 });
+				expect(r.findAll('button').map((button) => button.textContent)).toEqual(['v3:0', 'v3:0']);
+				r.click('[data-label="b"]');
+				expect(r.find('[data-label="b"]').textContent).toBe('v3:1');
+			} finally {
+				r.unmount();
+			}
+		},
+	);
+
+	it('retires retained descendants when the refreshed owner unmounts before rendering', () => {
+		const source = (version: number) => `import { useState } from 'octane';
+export function App() @{ <Counter /> }
+export function Counter() @{ const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{'v${version}:' + count as string}</button> }`;
+		const hot = webpackHotModule('/src/retained-aborted-owner.tsrx', { dev: true });
+		const initial = hot.load(source(1));
+		const r = mount(initial);
+		r.click('button');
+		expect(r.find('button').textContent).toBe('v1:1');
+		hot.load(source(2));
+		r.unmount();
+		flushSync(() => {});
+		const fresh = mount(initial);
+		try {
+			expect(fresh.find('button').textContent).toBe('v2:0');
+			fresh.click('button');
+			expect(fresh.find('button').textContent).toBe('v2:1');
+		} finally {
+			fresh.unmount();
+		}
+	});
+
+	it('retains an unreached descendant while a refreshed Suspense boundary waits', async () => {
+		const source = (version: number) => `import { use, useState } from 'octane';
+export function App(props) @{ @try { const ready = use(props.ready); <Slot component={Counter} /> } @pending { <p>pending</p> } }
+function Slot(props) @{ const Child = props.component; <Child /> }
+export function Counter() @{ const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{'v${version}:' + count as string}</button> }`;
+		const hot = webpackHotModule('/src/retained-suspense-descendant.tsrx', { dev: true });
+		const initial = hot.load(source(1));
+		const ready = Promise.resolve(true);
+		await ready;
+		const r = mount(initial, { ready });
+		let resolve!: (value: boolean) => void;
+		const pending = new Promise<boolean>((done) => {
+			resolve = done;
+		});
+		try {
+			await Promise.resolve();
+			flushSync(() => {});
+			r.click('button');
+			r.click('button');
+			r.update(initial, { ready: pending });
+			expect(hot.load(source(2))).toBe(initial);
+			flushSync(() => {});
+			expect(r.find('p').textContent).toBe('pending');
+			resolve(true);
+			await pending;
+			await Promise.resolve();
+			flushSync(() => {});
+			expect(hot.invalidated).toBe(false);
+			expect(r.find('button').textContent).toBe('v2:2');
+			r.click('button');
+			expect(r.find('button').textContent).toBe('v2:3');
+		} finally {
+			resolve(true);
+			r.unmount();
+		}
+	});
+
+	it.each(['suspend', 'error'] as const)(
+		'releases unmatched retained hooks after a later sibling causes %s recovery',
+		async (failure) => {
+			const source = (version: number, removed: boolean) => `import { use } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function App(props) @{ @try { <><Counter label="kept" capture={props.capture} /><Gate gate={props.gate} />${removed ? '<Counter label="removed" capture={props.capture} />' : ''}</> } @pending { <p>pending</p> } @catch (error, reset) { <div><p>failed</p><button data-retry onClick={() => reset()}>retry</button></div> } }
+function Gate(props) @{ if (props.gate.failure) throw props.gate.failure; const ready = use(props.gate.ready); <span>ready</span> }
+export function Counter(props) @{ const count$ = useSignal$(0); props.capture(props.label, count$); <button data-label={props.label} onClick={() => count$.set(count$.get() + 1)}>{'v${version}:' + count$.get() as string}</button> }`;
+			const hot = webpackHotModule(`/src/retained-later-${failure}.tsrx`, { dev: true });
+			const initial = hot.load(source(1, true));
+			const ready = Promise.resolve(true);
+			await ready;
+			let resolve!: (value: boolean) => void;
+			const pending = new Promise<boolean>((done) => {
+				resolve = done;
+			});
+			const gate: { ready: Promise<boolean>; failure?: Error } = { ready };
+			const signals = new Map<string, ClientSignals.WritableSignal<number>>();
+			const props = {
+				gate,
+				capture: (label: string, count: ClientSignals.WritableSignal<number>) => {
+					signals.set(label, count);
+				},
+			};
+			const r = mount(initial, props);
+			try {
+				await Promise.resolve();
+				flushSync(() => {});
+				r.click('[data-label="removed"]');
+				r.click('[data-label="removed"]');
+				const removed = signals.get('removed')!;
+				if (failure === 'suspend') gate.ready = pending;
+				else gate.failure = new Error('later sibling failed');
+				expect(hot.load(source(2, false))).toBe(initial);
+				flushSync(() => {});
+				expect(r.find('p').textContent).toBe(failure === 'suspend' ? 'pending' : 'failed');
+				if (failure === 'suspend') {
+					expect(removed.get()).toBe(2);
+					resolve(true);
+					await pending;
+					await Promise.resolve();
+				} else gate.failure = undefined;
+				r.update(initial, props);
+				if (failure === 'error') r.click('[data-retry]');
+				flushSync(() => {});
+				expect(r.findAll('button').map((button) => button.textContent)).toEqual(['v2:0']);
+				// The removed hook's local signal owner must really be disposed,
+				// rather than remaining parked after an abandoned commit callback.
+				expect(() => removed.get()).toThrow(/disposed/i);
+				expect(hot.load(source(3, true))).toBe(initial);
+				flushSync(() => {});
+				expect(hot.invalidated).toBe(false);
+				expect(r.find('[data-label="removed"]').textContent).toBe('v3:0');
+			} finally {
+				resolve(true);
+				r.unmount();
+			}
+		},
+	);
+
+	it.each([
+		{ failure: 'suspend', hook: 'state', saves: 1 },
+		{ failure: 'error', hook: 'state', saves: 1 },
+		{ failure: 'suspend', hook: 'signal', saves: 1 },
+		{ failure: 'error', hook: 'signal', saves: 1 },
+		{ failure: 'suspend', hook: 'state', saves: 2 },
+		{ failure: 'suspend', hook: 'signal', saves: 2 },
+	] as const)(
+		'reconciles claimed child $hook state when a later sibling causes $failure recovery after $saves saves',
+		async ({ failure, hook, saves }) => {
+			const counter =
+				hook === 'state'
+					? 'const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{PREFIX + count as string}</button>'
+					: 'const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{PREFIX + count$.get() as string}</button>';
+			const source = (version: number) => `import { use, useState } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function App(props) @{ @try { <><Counter /><Gate gate={props.gate} /></> } @pending { <p>pending</p> } @catch (error, reset) { <div><p>failed</p><button data-retry onClick={() => reset()}>retry</button></div> } }
+function Gate(props) @{ if (props.gate.failure) throw props.gate.failure; const ready = use(props.gate.ready); <span>ready</span> }
+export function Counter() @{ ${counter.replace('PREFIX', `'v${version}:'`)} }`;
+			const hot = webpackHotModule(`/src/retained-claimed-later-${failure}-${hook}-${saves}.tsrx`, {
+				dev: true,
+			});
+			const initial = hot.load(source(1));
+			const ready = Promise.resolve(true);
+			await ready;
+			let resolve!: (value: boolean) => void;
+			const pending = new Promise<boolean>((done) => {
+				resolve = done;
+			});
+			const gate: { ready: Promise<boolean>; failure?: Error } = { ready };
+			const r = mount(initial, { gate });
+			try {
+				await Promise.resolve();
+				flushSync(() => {});
+				r.click('button');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v1:2');
+				if (failure === 'suspend') gate.ready = pending;
+				else gate.failure = new Error('later sibling failed');
+				expect(hot.load(source(2))).toBe(initial);
+				flushSync(() => {});
+				expect(r.find('p').textContent).toBe(failure === 'suspend' ? 'pending' : 'failed');
+				if (saves === 2) {
+					expect(hot.load(source(3))).toBe(initial);
+					flushSync(() => {});
+					expect(r.find('p').textContent).toBe('pending');
+				}
+				if (failure === 'suspend') {
+					resolve(true);
+					await pending;
+					await Promise.resolve();
+				} else gate.failure = undefined;
+				r.update(initial, { gate });
+				if (failure === 'error') r.click('[data-retry]');
+				flushSync(() => {});
+				expect(hot.invalidated).toBe(false);
+				// A native catch reset remounts its primary; Suspense retries keep it.
+				expect(r.find('button').textContent).toBe(`v${saves + 1}:${failure === 'error' ? 0 : 2}`);
+				r.click('button');
+				expect(r.find('button').textContent).toBe(`v${saves + 1}:${failure === 'error' ? 1 : 3}`);
+			} finally {
+				resolve(true);
+				r.unmount();
+			}
+		},
+	);
+
+	it.each(['state', 'signal'] as const)(
+		'keeps retained %s state live after a pending restart rolls back at the root',
+		async (hook) => {
+			const counter =
+				hook === 'state'
+					? 'const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{PREFIX + count as string}</button>'
+					: 'const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{PREFIX + count$.get() as string}</button>';
+			const source = (version: number) => `import { use, useState } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function App(props) @{ <main>@try { <><Counter /><Gate wait={props.inner.wait} revision={props.revision} /></> } @pending { <p>inner pending</p> }<Gate wait={props.outer} revision={props.revision} /></main> }
+function Gate(props) @{ if (props.wait) use(props.wait); <span>ready</span> }
+export function Counter() @{ ${counter.replace('PREFIX', `'v${version}:'`)} }`;
+			const hot = webpackHotModule(`/src/retained-root-rollback-${hook}.tsrx`, { dev: true });
+			const App = hot.load(source(1));
+			let resolveInner!: (value: boolean) => void;
+			let resolveOuter!: (value: boolean) => void;
+			const innerWait = new Promise<boolean>((done) => {
+				resolveInner = done;
+			});
+			const outerWait = new Promise<boolean>((done) => {
+				resolveOuter = done;
+			});
+			const inner: { wait: Promise<boolean> | null } = { wait: null };
+			const r = mount(App, { inner, outer: null, revision: 0 });
+			try {
+				r.click('button');
+				r.click('button');
+				inner.wait = innerWait;
+				expect(hot.load(source(2))).toBe(App);
+				flushSync(() => {});
+				expect(r.find('p').textContent).toBe('inner pending');
+				// Restart the refreshed initial primary, then abandon that root render.
+				r.update(App, { inner, outer: outerWait, revision: 1 });
+				expect(r.find('p').textContent).toBe('inner pending');
+				resolveInner(true);
+				await innerWait;
+				await Promise.resolve();
+				flushSync(() => {});
+				resolveOuter(true);
+				await outerWait;
+				await Promise.resolve();
+				flushSync(() => {});
+				expect(r.find('button').textContent).toBe('v2:2');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v2:3');
+			} finally {
+				resolveInner(true);
+				resolveOuter(true);
+				r.unmount();
+			}
+		},
+	);
+
+	it.each(['state', 'signal'] as const)(
+		'queues retained %s updates without rendering into a pending owner',
+		async (hook) => {
+			const counter =
+				hook === 'state'
+					? 'const [count, setCount] = useState(0); props.capture(() => setCount(count + 1)); <button onClick={() => setCount(count + 1)}>{PREFIX + count as string}</button>'
+					: 'const count$ = useSignal$(0); props.capture(() => count$.set(count$.get() + 1)); <button onClick={() => count$.set(count$.get() + 1)}>{PREFIX + count$.get() as string}</button>';
+			const source = (version: number) => `import { use, useState } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function App(props) @{ @try { <><Gate wait={props.gate.wait} /><Counter capture={props.capture} /></> } @pending { <p>pending</p> } }
+function Gate(props) @{ if (props.wait) use(props.wait); <span>ready</span> }
+export function Counter(props) @{ ${counter.replace('PREFIX', `'v${version}:'`)} }`;
+			const hot = webpackHotModule(`/src/retained-pending-update-${hook}.tsrx`, { dev: true });
+			const App = hot.load(source(1));
+			let resolve!: (value: boolean) => void;
+			const pending = new Promise<boolean>((done) => {
+				resolve = done;
+			});
+			const gate: { wait: Promise<boolean> | null } = { wait: null };
+			let increment!: () => void;
+			const capture = (next: () => void) => {
+				increment = next;
+			};
+			const r = mount(App, { gate, capture });
+			try {
+				r.click('button');
+				r.click('button');
+				gate.wait = pending;
+				expect(hot.load(source(2))).toBe(App);
+				flushSync(() => {});
+				expect(r.find('p').textContent).toBe('pending');
+				increment();
+				flushSync(() => {});
+				expect(r.findAll('button')).toEqual([]);
+				expect(r.find('p').textContent).toBe('pending');
+				resolve(true);
+				await pending;
+				await Promise.resolve();
+				r.update(App, { gate, capture });
+				expect(r.find('button').textContent).toBe('v2:3');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v2:4');
+			} finally {
+				resolve(true);
+				r.unmount();
+			}
+		},
+	);
+
+	it.each(['state', 'signal'] as const)(
+		'keeps nested retained %s state when its parent is hot-replaced while pending',
+		async (hook) => {
+			const counter =
+				hook === 'state'
+					? 'const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{PREFIX + count as string}</button>'
+					: 'const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{PREFIX + count$.get() as string}</button>';
+			const childSource = (version: number) => `import { use, useState } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function Child(props) @{ @try { <><Counter /><Gate wait={props.gate.wait} /></> } @pending { <p>child pending</p> } }
+function Gate(props) @{ if (props.wait) use(props.wait); <span>ready</span> }
+export function Counter() @{ ${counter.replace('PREFIX', `'v${version}:'`)} }`;
+			const childHot = webpackHotModule(`/src/nested-retained-child-${hook}.tsrx`, { dev: true });
+			const Child = childHot.load(childSource(1), 'Child');
+			const parentHot = webpackHotModule(
+				`/src/nested-retained-parent-${hook}.tsrx`,
+				{ dev: true },
+				{ './child': { Child } },
+			);
+			const parentSource = (version: number) => `import { Child } from './child';
+export function App(props) @{ <main><Child gate={props.gate} /><aside>parent v${version}</aside></main> }`;
+			const App = parentHot.load(parentSource(1));
+			let resolve!: (value: boolean) => void;
+			const pending = new Promise<boolean>((done) => {
+				resolve = done;
+			});
+			const gate: { wait: Promise<boolean> | null } = { wait: null };
+			const r = mount(App, { gate });
+			try {
+				r.click('button');
+				r.click('button');
+				gate.wait = pending;
+				expect(childHot.load(childSource(2), 'Child')).toBe(Child);
+				flushSync(() => {});
+				expect(r.find('p').textContent).toBe('child pending');
+				expect(parentHot.load(parentSource(2))).toBe(App);
+				flushSync(() => {});
+				expect(r.find('p').textContent).toBe('child pending');
+				expect(r.find('aside').textContent).toBe('parent v2');
+				resolve(true);
+				await pending;
+				await Promise.resolve();
+				r.update(App, { gate });
+				expect(r.find('button').textContent).toBe('v2:2');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v2:3');
+			} finally {
+				resolve(true);
+				r.unmount();
+			}
+		},
+	);
+
+	it.each(['state', 'signal'] as const)(
+		'keeps nested retained %s state after editing its parent before its pending child',
+		async (hook) => {
+			const counter =
+				hook === 'state'
+					? 'const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{PREFIX + count as string}</button>'
+					: 'const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{PREFIX + count$.get() as string}</button>';
+			const childSource = (version: number) => `import { use, useState } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function Child(props) @{ @try { <><Counter /><Gate wait={props.gate.wait} /></> } @pending { <p>child pending</p> } }
+function Gate(props) @{ if (props.wait) use(props.wait); <span>child ready</span> }
+export function Counter() @{ ${counter.replace('PREFIX', `'v${version}:'`)} }`;
+			const childHot = webpackHotModule(`/src/parent-first-retained-child-${hook}.tsrx`, {
+				dev: true,
+			});
+			const Child = childHot.load(childSource(1), 'Child');
+			const parentHot = webpackHotModule(
+				`/src/parent-first-retained-parent-${hook}.tsrx`,
+				{ dev: true },
+				{ './child': { Child } },
+			);
+			const parentSource = (version: number) => `import { use } from 'octane';
+import { Child } from './child';
+function Gate(props) @{ if (props.wait) use(props.wait); <span>parent ready</span> }
+export function App(props) @{ <main>@try { <><Child gate={props.childGate} /><Gate wait={props.parentGate.wait} revision={props.revision} /></> } @pending { <p data-parent-pending>parent pending</p> }<aside>parent v${version}</aside></main> }`;
+			const App = parentHot.load(parentSource(1));
+			let resolveParent!: (value: boolean) => void;
+			let resolveChild!: (value: boolean) => void;
+			const parentPending = new Promise<boolean>((done) => {
+				resolveParent = done;
+			});
+			const childPending = new Promise<boolean>((done) => {
+				resolveChild = done;
+			});
+			const parentGate: { wait: Promise<boolean> | null } = { wait: null };
+			const childGate: { wait: Promise<boolean> | null } = { wait: null };
+			const r = mount(App, { parentGate, childGate, revision: 0 });
+			try {
+				r.click('button');
+				r.click('button');
+				parentGate.wait = parentPending;
+				expect(parentHot.load(parentSource(2))).toBe(App);
+				flushSync(() => {});
+				expect(r.find('[data-parent-pending]').textContent).toBe('parent pending');
+				childGate.wait = childPending;
+				expect(childHot.load(childSource(2), 'Child')).toBe(Child);
+				flushSync(() => {});
+				r.update(App, { parentGate, childGate, revision: 1 });
+				expect(r.find('[data-parent-pending]').textContent).toBe('parent pending');
+				expect(r.find('aside').textContent).toBe('parent v2');
+				resolveChild(true);
+				await childPending;
+				await Promise.resolve();
+				flushSync(() => {});
+				expect(r.find('[data-parent-pending]').textContent).toBe('parent pending');
+				resolveParent(true);
+				await parentPending;
+				await Promise.resolve();
+				flushSync(() => {});
+				expect(r.find('button').textContent).toBe('v2:2');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v2:3');
+			} finally {
+				resolveParent(true);
+				resolveChild(true);
+				r.unmount();
+			}
+		},
+	);
+
+	it.each(['state', 'signal'] as const)(
+		'retains an unreached %s child through nested pending owner edits',
+		async (hook) => {
+			const counter =
+				hook === 'state'
+					? 'const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{PREFIX + count as string}</button>'
+					: 'const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{PREFIX + count$.get() as string}</button>';
+			const childSource = (version: number) => `import { use, useState } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function Child(props) @{ <section><Title />@try { <><Gate wait={props.gate.wait} /><Counter /></> } @pending { <p>child pending</p> }</section> }
+export function Title() @{ const [count, setCount] = useState(0); <h2 onClick={() => setCount(count + 1)}>{'child v${version}:' + count as string}</h2> }
+function Gate(props) @{ if (props.wait) use(props.wait); <span>ready</span> }
+export function Counter() @{ ${counter.replace('PREFIX', `'v${version}:'`)} }`;
+			const childHot = webpackHotModule(`/src/unreached-nested-child-${hook}.tsrx`, { dev: true });
+			const Child = childHot.load(childSource(1), 'Child');
+			const parentHot = webpackHotModule(
+				`/src/unreached-nested-parent-${hook}.tsrx`,
+				{ dev: true },
+				{ './child': { Child } },
+			);
+			const parentSource = (version: number) => `import { Child } from './child';
+export function App(props) @{ <main><Child gate={props.gate} /><aside>parent v${version}</aside></main> }`;
+			const App = parentHot.load(parentSource(1));
+			let resolve!: (value: boolean) => void;
+			const pending = new Promise<boolean>((done) => {
+				resolve = done;
+			});
+			const gate: { wait: Promise<boolean> | null } = { wait: null };
+			const r = mount(App, { gate });
+			try {
+				r.click('h2');
+				expect(r.find('h2').textContent).toBe('child v1:1');
+				r.click('button');
+				r.click('button');
+				gate.wait = pending;
+				expect(parentHot.load(parentSource(2))).toBe(App);
+				flushSync(() => {});
+				expect(r.find('p').textContent).toBe('child pending');
+				expect(r.find('aside').textContent).toBe('parent v2');
+				expect(childHot.load(childSource(2), 'Child')).toBe(Child);
+				flushSync(() => {});
+				expect(r.find('h2').textContent).toBe('child v2:1');
+				expect(r.find('p').textContent).toBe('child pending');
+				resolve(true);
+				await pending;
+				await Promise.resolve();
+				flushSync(() => {});
+				expect(r.find('h2').textContent).toBe('child v2:1');
+				expect(r.find('button').textContent).toBe('v2:2');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v2:3');
+			} finally {
+				resolve(true);
+				r.unmount();
+			}
+		},
+	);
+
+	it.each(['state', 'signal'] as const)(
+		'retains an outer-pool %s child after a later sibling suspends and restarts',
+		async (hook) => {
+			const counter =
+				hook === 'state'
+					? 'const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{PREFIX + count as string}</button>'
+					: 'const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{PREFIX + count$.get() as string}</button>';
+			const childSource = (version: number) => `import { use, useState } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function Child(props) @{ <section data-revision={props.revision}><Title />@try { <><Gate wait={props.gate.wait} /><Counter /><LateGate wait={props.gate.later} /></> } @pending { <p>child pending</p> }</section> }
+export function Title() @{ const [count, setCount] = useState(0); <h2 onClick={() => setCount(count + 1)}>{'child v${version}:' + count as string}</h2> }
+function Gate(props) @{ if (props.wait) use(props.wait); <span>ready</span> }
+function LateGate(props) @{ if (props.wait) use(props.wait); <span>later ready</span> }
+export function Counter() @{ ${counter.replace('PREFIX', `'v${version}:'`)} }`;
+			const childHot = webpackHotModule(`/src/outer-pool-later-sibling-child-${hook}.tsrx`, {
+				dev: true,
+			});
+			const Child = childHot.load(childSource(1), 'Child');
+			const parentHot = webpackHotModule(
+				`/src/outer-pool-later-sibling-parent-${hook}.tsrx`,
+				{ dev: true },
+				{ './child': { Child } },
+			);
+			const parentSource = (version: number) => `import { Child } from './child';
+export function App(props) @{ <main><Child gate={props.gate} revision={props.revision} /><aside>parent v${version}</aside></main> }`;
+			const App = parentHot.load(parentSource(1));
+			let resolve!: (value: boolean) => void;
+			const pending = new Promise<boolean>((done) => {
+				resolve = done;
+			});
+			let resolveLater!: (value: boolean) => void;
+			const laterPending = new Promise<boolean>((done) => {
+				resolveLater = done;
+			});
+			const gate: { wait: Promise<boolean> | null; later: Promise<boolean> | null } = {
+				wait: null,
+				later: null,
+			};
+			const r = mount(App, { gate, revision: 0 });
+			try {
+				r.click('h2');
+				expect(r.find('h2').textContent).toBe('child v1:1');
+				r.click('button');
+				r.click('button');
+				gate.wait = pending;
+				expect(parentHot.load(parentSource(2))).toBe(App);
+				flushSync(() => {});
+				expect(r.find('p').textContent).toBe('child pending');
+				expect(r.find('aside').textContent).toBe('parent v2');
+				expect(childHot.load(childSource(2), 'Child')).toBe(Child);
+				flushSync(() => {});
+				expect(r.find('h2').textContent).toBe('child v2:1');
+				expect(r.find('p').textContent).toBe('child pending');
+				gate.later = laterPending;
+				resolve(true);
+				await pending;
+				await Promise.resolve();
+				flushSync(() => {});
+				expect(r.find('h2').textContent).toBe('child v2:1');
+				expect(r.find('p').textContent).toBe('child pending');
+				r.update(App, { gate, revision: 1 });
+				expect(r.find('section').getAttribute('data-revision')).toBe('1');
+				expect(r.find('h2').textContent).toBe('child v2:1');
+				expect(r.find('p').textContent).toBe('child pending');
+				resolveLater(true);
+				await laterPending;
+				await Promise.resolve();
+				flushSync(() => {});
+				expect(r.find('h2').textContent).toBe('child v2:1');
+				expect(r.find('button').textContent).toBe('v2:2');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v2:3');
+			} finally {
+				resolve(true);
+				resolveLater(true);
+				r.unmount();
+			}
+		},
+	);
+
+	it('retires a removed child signal after a pending root completes with a memoized owner', async () => {
+		const source = (visible: boolean) => `import { useSignal$ } from 'octane/signals/client';
+export function Widget(props) @{ <section>${visible ? '<Counter capture={props.capture} />' : 'removed'}</section> }
+export function Counter(props) @{ const count$ = useSignal$(0); props.capture(count$); <button onClick={() => count$.set(count$.get() + 1)}>{count$.get() as string}</button> }`;
+		const hot = webpackHotModule('/src/retained-memo-owner-removal.tsrx', { dev: true });
+		const Widget = hot.load(source(true), 'Widget');
+		const Host = await compileHmrComponent(
+			`import { memo, use } from 'octane'; import { Widget } from './widget';
+const MemoWidget = memo(Widget);
+function Gate(props) @{ if (props.wait) use(props.wait); <aside>ready</aside> }
+export function App(props) @{ <main><MemoWidget capture={props.capture} /><Gate wait={props.wait} /></main> }`,
+			'App',
+			'/src/retained-memo-owner-host.tsrx',
+			{ './widget': { Widget } },
+		);
+		let count!: ClientSignals.WritableSignal<number>;
+		const capture = (next: ClientSignals.WritableSignal<number>) => {
+			count = next;
+		};
+		let resolve!: (value: boolean) => void;
+		const pending = new Promise<boolean>((done) => {
+			resolve = done;
+		});
+		const r = mount(Host, { capture, wait: null });
+		try {
+			r.click('button');
+			r.click('button');
+			r.update(Host, { capture, wait: pending });
+			expect(hot.load(source(false), 'Widget')).toBe(Widget);
+			flushSync(() => {});
+			expect(r.find('section').textContent).toBe('removed');
+			expect(r.findAll('button')).toEqual([]);
+			expect(count.get()).toBe(2);
+			resolve(true);
+			await pending;
+			await Promise.resolve();
+			flushSync(() => {});
+			expect(r.find('aside').textContent).toBe('ready');
+			expect(r.find('section').textContent).toBe('removed');
+			expect(() => count.get()).toThrow(/disposed/i);
+		} finally {
+			resolve(true);
+			r.unmount();
+		}
+	});
+
+	it('keeps parked state alive when its owner removal rolls back', async () => {
+		const childSource = (version: number) => `import { use } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function Child(props) @{ @try { <><Gate wait={props.gate.wait} /><Counter capture={props.capture} /></> } @pending { <p>child pending</p> } }
+function Gate(props) @{ if (props.wait) use(props.wait); <span>ready</span> }
+export function Counter(props) @{ const count$ = useSignal$(0); props.capture(count$); <button onClick={() => count$.set(count$.get() + 1)}>{'v${version}:' + count$.get() as string}</button> }`;
+		const childHot = webpackHotModule('/src/retained-rolled-back-removal.tsrx', { dev: true });
+		const Child = childHot.load(childSource(1), 'Child');
+		const App = await compileHmrComponent(
+			`import { use } from 'octane'; import { Child } from './child';
+function Gate(props) @{ if (props.wait) use(props.wait); <span>outer ready</span> }
+export function App(props) @{ <main>@if (props.show) { <Child gate={props.gate} capture={props.capture} /> }<Gate wait={props.outer} /></main> }`,
+			'App',
+			'/src/retained-removal-host.tsrx',
+			{ './child': { Child } },
+		);
+		let resolve!: (value: boolean) => void;
+		let resolveOuter!: (value: boolean) => void;
+		const pending = new Promise<boolean>((done) => {
+			resolve = done;
+		});
+		const outerWait = new Promise<boolean>((done) => {
+			resolveOuter = done;
+		});
+		const gate: { wait: Promise<boolean> | null } = { wait: null };
+		let count!: ClientSignals.WritableSignal<number>;
+		const capture = (next: ClientSignals.WritableSignal<number>) => {
+			count = next;
+		};
+		const r = mount(App, { show: true, gate, capture, outer: null });
+		try {
+			r.click('button');
+			r.click('button');
+			gate.wait = pending;
+			expect(childHot.load(childSource(2), 'Child')).toBe(Child);
+			flushSync(() => {});
+			expect(r.find('p').textContent).toBe('child pending');
+			r.update(App, { show: false, gate, capture, outer: outerWait });
+			expect(r.find('p').textContent).toBe('child pending');
+			expect(count.get()).toBe(2);
+			// Cancel the suspended removal request; the visible owner never unmounted.
+			r.update(App, { show: true, gate, capture, outer: null });
+			resolve(true);
+			await pending;
+			await Promise.resolve();
+			flushSync(() => {});
+			expect(r.find('button').textContent).toBe('v2:2');
+			r.click('button');
+			expect(r.find('button').textContent).toBe('v2:3');
+		} finally {
+			resolve(true);
+			resolveOuter(true);
+			r.unmount();
+		}
+	});
+
+	it('remounts ordinary caught primary state through the native reset capability', async () => {
+		const App = await compileHmrComponent(`import { useState } from 'octane';
+export function App(props) @{ @try { <><Counter /><Gate failure={props.failure} /></> } @catch (error, reset) { <div><p>failed</p><button data-retry onClick={() => reset()}>retry</button></div> } }
+function Gate(props) @{ if (props.failure) throw new Error('later sibling failed'); <span>ready</span> }
+function Counter() @{ const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{'count:' + count as string}</button> }`);
+		const r = mount(App, { failure: false });
+		try {
+			r.click('button');
+			r.click('button');
+			expect(r.find('button').textContent).toBe('count:2');
+			r.update(App, { failure: true });
+			expect(r.find('p').textContent).toBe('failed');
+			r.update(App, { failure: false });
+			expect(r.find('p').textContent).toBe('failed');
+			r.click('[data-retry]');
+			expect(r.find('button').textContent).toBe('count:0');
+			r.click('button');
+			expect(r.find('button').textContent).toBe('count:1');
+		} finally {
+			r.unmount();
+		}
+	});
+
+	it('replaces retained children after their helper changes from a borrowed range to a fragment', async () => {
+		const children = await compileHmrModule(
+			`import { useState } from 'octane';
+export function Counter() @{ const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{'count:' + count as string}</button> }
+export function Alternate() @{ <button>alternate</button> }`,
+			['Counter', 'Alternate'],
+			'/src/retained-range-children.tsrx',
+		);
+		// Keep the invocation coordinate fixed while switching the compiler's
+		// range hint. A source-level fragment edit also shifts template slot IDs,
+		// which would test a different component identity instead of marker reuse.
+		const slotBody =
+			(fragment: boolean): ComponentBody<{ component: ComponentBody<any> }> =>
+			(props, scope) => {
+				const block = scope.block;
+				let span = scope.slots[1] as HTMLSpanElement | undefined;
+				if (fragment && span === undefined) {
+					span = document.createElement('span');
+					span.textContent = 'inside';
+					block.parentNode.insertBefore(span, block.endMarker);
+					scope.slots[1] = span;
+				}
+				componentSlot(
+					scope,
+					0,
+					block.parentNode,
+					props.component,
+					{},
+					'c:retained-range-child',
+					fragment ? span : block.endMarker,
+					false,
+					!fragment,
+				);
+			};
+		const Slot = hmr(slotBody(false));
+		const App = await compileHmrComponent(
+			`import { Slot, Counter, Alternate } from './children';
+export function App(props) @{ <section>@if (props.visible) { <Slot component={props.alternate ? Alternate : Counter} /> }<aside>outside</aside></section> }`,
+			'App',
+			'/src/retained-borrowed-range-shape.tsrx',
+			{ './children': { ...children, Slot } },
+		);
+		const visibleHtml = (html: string) => html.replace(/<!--[\s\S]*?-->/g, '');
+		const r = mount(App, { visible: true, alternate: false });
+		try {
+			r.click('button');
+			r.click('button');
+			flushSync(() => {
+				expect((Slot as any)[HMR].update(slotBody(true))).toBe(true);
+			});
+			expect(r.find('button').textContent).toBe('count:2');
+			const fragmentLayout = visibleHtml(r.html()).replace('count:2', 'child');
+			r.update(App, { visible: true, alternate: true });
+			expect(r.findAll('button').map((button) => button.textContent)).toEqual(['alternate']);
+			expect(visibleHtml(r.html()).replace('alternate', 'child')).toBe(fragmentLayout);
+			expect(r.find('span').textContent).toBe('inside');
+			expect(r.find('aside').textContent).toBe('outside');
+			r.update(App, { visible: true, alternate: false });
+			expect(r.findAll('button').map((button) => button.textContent)).toEqual(['count:0']);
+			r.update(App, { visible: false, alternate: false });
+			expect(r.findAll('button')).toEqual([]);
+			expect(r.findAll('span')).toEqual([]);
+			expect(r.find('aside').textContent).toBe('outside');
+			const fresh = mount(App, { visible: true, alternate: false });
+			try {
+				fresh.update(App, { visible: false, alternate: false });
+				expect(visibleHtml(r.html())).toBe(visibleHtml(fresh.html()));
+			} finally {
+				fresh.unmount();
+			}
+		} finally {
+			r.unmount();
+		}
+	});
+
+	it.each([
+		'const Initial = Counter; capture(Initial);',
+		'const Initial = (() => Counter)(); capture(Initial);',
+		'const Initial = read(); function read() { return Counter; } capture(Initial);',
+	])('propagates an early hoisted component capture to its importer: %s', (capture) => {
+		let captured: ComponentBody<any> | undefined;
+		const hot = webpackHotModule(
+			'/src/early-hoisted-capture.tsrx',
+			{ dev: true },
+			{
+				'./capture': {
+					capture: (component: ComponentBody<any>) => {
+						captured = component;
+					},
+				},
+			},
+		);
+		const source = (version: number) => `import { useSignal$ } from 'octane/signals/client';
+import { capture } from './capture';
+${capture}
+export function Counter() @{ const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{'v${version}:' + count$.get() as string}</button> }`;
+		const importer = () =>
+			loadCompiledFixtureSource(
+				`import { Widget } from './widget'; export function Host() @{ <section><Widget /><span>host</span></section> }`,
+				{
+					id: '/src/early-capture-importer.tsrx',
+					mode: 'client',
+					runtimeModules: { './widget': { Widget: captured } },
+				},
+			).Host as ComponentBody<any>;
+		hot.load(source(1), 'Counter');
+		expect(hot.accepted).toBe(false);
+		const r = mount(importer());
+		try {
+			r.click('button');
+			r.click('button');
+			expect(r.find('button').textContent).toBe('v1:2');
+			hot.load(source(2), 'Counter');
+			expect(hot.accepted).toBe(false);
+			// The raw pre-canonical alias cannot receive a safe component handoff.
+			// Its importer must execute again instead of self-accepting stale UI.
+			expect(r.find('button').textContent).toBe('v1:2');
+			r.update(importer());
+			expect(r.find('button').textContent).toBe('v2:0');
+			r.click('button');
+			expect(r.find('button').textContent).toBe('v2:1');
+		} finally {
+			r.unmount();
+		}
+	});
+
+	it.each([
+		{ declaration: 'export default memo(Counter);', exported: 'default' },
+		{
+			declaration:
+				'const Alias = Counter; const Wrapped = memo(Alias); export { Wrapped as default };',
+			exported: 'default',
+		},
+		{ declaration: 'export const Wrapped = memo(Counter);', exported: 'Wrapped' },
+	])(
+		'webpack propagates value exports instead of accepting a memo-only boundary: $declaration',
+		async ({ declaration, exported }) => {
+			const source = `import { memo } from 'octane'; function Counter() @{ <p>memo</p> } ${declaration}`;
+			const hot = webpackHotModule(`/src/memo-propagation-${exported}-${declaration.length}.tsrx`, {
+				dev: true,
+			});
+			await hot.load(source, exported);
+			expect(hot.accepted).toBe(true);
+			await hot.load(source + ` export const label = 'edited';`, exported);
+			expect(hot.accepted).toBe(false);
+		},
+	);
+
+	it.each([
+		{
+			name: 'unproven object export',
+			before: '',
+			after: 'export default { Counter };',
+			exported: 'default',
+			member: 'Counter',
+		},
+		{
+			name: 'escape before canonicalization',
+			before: 'const Captured = Counter;',
+			after: 'export default memo(Counter);',
+			exported: 'default',
+		},
+		{
+			name: 'reassigned component export',
+			before: '',
+			after: 'let Public = Counter; Public = Counter; export { Public };',
+			exported: 'Public',
+		},
+		{
+			name: 'dynamic streamed query recipe',
+			before:
+				"const kind = 'stream'; const feed$ = query$(() => count$.get(), async function* (count) { yield count; }, { key: 'feed', kind });",
+			after: 'export { Counter };',
+			exported: 'Counter',
+		},
+		{
+			name: 'top-level await',
+			before: 'await Promise.resolve();',
+			after: 'export { Counter };',
+			exported: 'Counter',
+		},
+		{
+			name: 'HMR disabled',
+			before: '',
+			after: 'export { Counter };',
+			exported: 'Counter',
+			options: { hmr: false as const },
+		},
+		{
+			name: 'production compiler mode',
+			before: '',
+			after: 'export { Counter };',
+			exported: 'Counter',
+			options: { hmr: false as const, dev: false },
+		},
+		{
+			name: 'bundler-neutral HMR compiler mode',
+			before: '',
+			after: 'export { Counter };',
+			exported: 'Counter',
+			options: { hmr: true as const, dev: true },
+		},
+		{
+			name: 'vite compiler mode',
+			before: '',
+			after: 'export { Counter };',
+			exported: 'Counter',
+			options: { hmr: 'vite' as const },
+		},
+	])(
+		'executes fenced $name as a fresh module without claiming hot admission',
+		async ({ name, before, after, exported, member, options }) => {
+			const [{ compile }, signals] = await Promise.all([
+				import('octane/compiler'),
+				import('octane/signals'),
+			]);
+			const id = `/src/fenced-${name.replaceAll(' ', '-')}.tsrx`;
+			const source = `import { memo } from 'octane'; import { signal$, query$ } from 'octane/signals'; const count$ = signal$(1); ${before}
+function Counter() @{ <button onClick={() => count$.set(count$.get() + 1)}>{count$.get() as string}</button> } ${after}`;
+			const compileOptions = { hmr: 'webpack' as const, dev: true, ...options };
+			expect(compile(source, id, compileOptions).hotSignalModule).toBeUndefined();
+			const globals = globalThis as Record<symbol, unknown>;
+			const executionKey = Symbol.for('octane.hot-signals.execution');
+			const previous = globals[executionKey];
+			const runtime: HotSignalRuntime = {
+				modules: new Map(),
+				features: new Set(['fenced']),
+				executed: new Set(['fenced']),
+				buildId: 'unadmitted',
+				generationChanged: false,
+			};
+			try {
+				for (const edited of [false, true]) {
+					let accepted = false;
+					// The module has no admitted recipe. Erroneous stamped output must fail
+					// this real runtime fence rather than silently enrolling its declarations.
+					globals[executionKey] = {
+						runtime,
+						executableId: 'fenced',
+						buildId: runtime.buildId,
+						manifests: [],
+						hot: true,
+						requiresAdmission: true,
+					} satisfies HotSignalExecutionFrame;
+					const namespace = await loadCompiledFixtureSource(
+						source + (edited ? '\n// edited module' : ''),
+						{
+							id,
+							mode: 'client',
+							async: true,
+							compileOptions,
+							runtimeModules: { 'octane/signals': signals },
+							importMeta: {
+								webpackHot: {
+									data: undefined,
+									dispose() {},
+									accept() {
+										accepted = true;
+									},
+									invalidate() {
+										throw new Error(
+											'A fresh fenced module cannot invalidate a mounted predecessor',
+										);
+									},
+								},
+								hot: { data: undefined, dispose() {}, accept() {}, invalidate() {} },
+							},
+						},
+					);
+					delete globals[executionKey];
+					const component = member ? namespace[exported][member] : namespace[exported];
+					const owner = signals.createScope({ scopeKey: `${id}:document:${edited}` });
+					const container = document.createElement('div');
+					document.body.appendChild(container);
+					const root = createRoot(container, { signalOwner: owner });
+					try {
+						flushSync(() => root.render(component));
+						const button = container.querySelector('button')!;
+						expect(button.textContent).toBe('1');
+						flushSync(() => button.click());
+						expect(button.textContent).toBe('2');
+						if (name === 'unproven object export') expect(accepted).toBe(false);
+					} finally {
+						root.unmount();
+						container.remove();
+						owner.dispose();
+					}
+				}
+			} finally {
+				if (previous === undefined) delete globals[executionKey];
+				else globals[executionKey] = previous;
+			}
+		},
+	);
+
+	it('executes server signal output without claiming a client hot module', async () => {
+		const [{ compile }, signals] = await Promise.all([
+			import('octane/compiler'),
+			import('octane/signals'),
+		]);
+		const source = `import {signal$} from 'octane/signals'; const count$ = signal$(1); export function Counter() @{ <button>{count$.get() as string}</button> }`;
+		const id = '/src/server-hot-signal.tsrx';
+		const options = { hmr: 'webpack' as const, dev: true, mode: 'server' as const };
+		expect(compile(source, id, options).hotSignalModule).toBeUndefined();
+		const globals = globalThis as Record<symbol, unknown>;
+		const executionKey = Symbol.for('octane.hot-signals.execution');
+		const previous = globals[executionKey];
+		const runtime: HotSignalRuntime = {
+			modules: new Map(),
+			features: new Set(['server']),
+			executed: new Set(['server']),
+			buildId: 'unadmitted',
+			generationChanged: false,
+		};
+		try {
+			for (const suffix of ['', '\n// reload']) {
+				globals[executionKey] = {
+					runtime,
+					executableId: 'server',
+					buildId: runtime.buildId,
+					manifests: [],
+					hot: true,
+					requiresAdmission: true,
+				} satisfies HotSignalExecutionFrame;
+				const { Counter } = loadCompiledFixtureSource(source + suffix, {
+					id,
+					mode: 'server',
+					compileOptions: options,
+					runtimeModules: { 'octane/signals': signals },
+				});
+				delete globals[executionKey];
+				expect(renderToString(Counter).html).toContain('<button>1</button>');
+			}
+		} finally {
+			if (previous === undefined) delete globals[executionKey];
+			else globals[executionKey] = previous;
+		}
+	});
+
+	it.each([false, true])(
+		'retries a suspended single root after a rolled-back reveal before hot replacement (boundary initially committed: %s)',
+		async (committed) => {
+			const source = (version: number) => `import { use } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+export function Widget(props) @{ const count$ = useSignal$(0); if (props.wait) use(props.wait); <button onClick={() => count$.set(count$.get() + 1)}>{'v${version}:' + count$.get() as string}</button> }`;
+			const hot = webpackHotModule('/src/rolled-back-hot-single-root.tsrx', { dev: true });
+			const initial = hot.load(source(1), 'Widget');
+			const { App } = loadCompiledFixtureSource(
+				`import { Suspense, use } from 'octane'; import { Widget } from './widget';
+function Gate(props) @{ if (props.wait) use(props.wait); <i>gate</i> }
+export function App(props) @{ <main><Suspense fallback={<p>pending</p>}><section>@if (props.show) { <><Widget wait={props.wait} /><i>row</i></> }<span>host</span></section></Suspense><Gate wait={props.gate} /></main> }`,
+				{
+					id: '/src/rolled-back-hot-host.tsrx',
+					mode: 'client',
+					runtimeModules: { './widget': { Widget: initial } },
+				},
+			);
+			const never = new Promise<never>(() => {});
+			const r = mount(App, { show: !committed, wait: committed ? null : never, gate: null });
+			try {
+				if (committed) r.update(App, { show: true, wait: never, gate: null });
+				expect(r.find('p').textContent).toBe('pending');
+				const pending = r.html();
+				// Widget finishes its first insertion, then Gate suspends the root.
+				// The discarded insertion must not remain the widget's live range.
+				r.update(App, { show: true, wait: null, gate: never });
+				expect(r.html()).toBe(pending);
+				r.update(App, { show: true, wait: null, gate: null });
+				expect(r.findAll('p')).toHaveLength(0);
+				expect(r.find('button').textContent).toBe('v1:0');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v1:1');
+				expect(hot.load(source(2), 'Widget')).toBe(initial);
+				flushSync(() => {});
+				expect(hot.accepted).toBe(true);
+				expect(hot.invalidated).toBe(false);
+				expect(r.find('button').textContent).toBe('v2:1');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v2:2');
+			} finally {
+				r.unmount();
+			}
+		},
+	);
+
+	it('retains admitted module signal state while rebinding derived and query producers', async () => {
+		const [{ compile }, { createScope }] = await Promise.all([
+			import('octane/compiler'),
+			import('octane/signals'),
+		]);
+		const filename = '/remote/HotCounter.tsrx';
+		const source = (version: number) => `import { signal$, derived$, query$ } from 'octane/signals';
+const count$ = signal$(${version === 1 ? 1 : 9});
+const total$ = derived$(() => count$.get() * ${version + 1}, { key: 'total' });
+const result$ = query$(() => count$.get(), async count => count + ${version * 100}, { key: 'result', kind: 'promise' });
+export function App() @{ <button onClick={() => count$.set(count$.get() + 1)}>{count$.get() + ':' + total$.get() + ':' + result$.get() as string}</button> }`;
+		const runtime: HotSignalRuntime = {
+			modules: new Map(),
+			features: new Set(['counter']),
+			executed: new Set(['counter']),
+			buildId: 'build:1',
+			generationChanged: false,
+		};
+		const hot = webpackHotModule(filename, { dev: true });
+		const globals = globalThis as Record<symbol, any>;
+		const executionKey = Symbol.for('octane.hot-signals.execution');
+		const bridgeKey = Symbol.for('octane.hot-signals.bridge');
+		const previous = globals[executionKey];
+		const load = (version: number) => {
+			const manifest = compile(source(version), filename, {
+				hmr: 'webpack',
+				dev: true,
+			}).hotSignalModule!;
+			expect(manifest.declarations.map(({ kind }) => kind)).toEqual(['signal', 'derived', 'async']);
+			runtime.buildId = `build:${version}`;
+			runtime.modules.set('counter', [manifest]);
+			const frame: HotSignalExecutionFrame = {
+				runtime,
+				executableId: 'counter',
+				buildId: runtime.buildId,
+				manifests: [manifest],
+				hot: version > 1,
+				requiresAdmission: true,
+			};
+			globals[executionKey] = frame;
+			try {
+				if (frame.hot) frame.transaction = globals[bridgeKey].beforeFactory(frame);
+				const component = hot.load(source(version));
+				globals[bridgeKey].afterFactory(frame);
+				return component;
+			} catch (error) {
+				globals[bridgeKey]?.abortFactory(frame);
+				throw error;
+			} finally {
+				delete globals[executionKey];
+			}
+		};
+		const owner = createScope({ scopeKey: 'hot-counter' });
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const root = createRoot(container, { signalOwner: owner });
+		let release: (() => void) | undefined;
+		try {
+			const initial = await load(1);
+			const { App } = loadCompiledFixtureSource(
+				`import { Suspense } from 'octane'; import { Widget } from './widget'; export function App() @{ <Suspense fallback={<p>pending</p>}><section><Widget /><p>host</p></section></Suspense> }`,
+				{
+					id: '/src/HotHost.tsrx',
+					mode: 'client',
+					runtimeModules: { './widget': { Widget: initial } },
+				},
+			);
+			flushSync(() => root.render(App));
+			release = admitHotSignalPublisher(
+				initial,
+				createNativeHotSignalOwnerProof({
+					publisherKey: 'hot/counter',
+					documentId: 'hot-counter-document',
+					ownerKey: owner.scopeKey,
+					buildId: runtime.buildId,
+					currentOwner: () => owner,
+					acceptsComponent: (candidate) => candidate === initial,
+					suspendIngress() {},
+					rotateIngress() {},
+					remount() {
+						throw new Error('Compatible signal recipes must retain their owner');
+					},
+				}),
+			);
+			await drainProducers();
+			flushSync(() => {});
+			expect(container.querySelector('button')!.textContent).toBe('1:2:101');
+			flushSync(() => container.querySelector('button')!.click());
+			await drainProducers();
+			flushSync(() => {});
+			expect(container.querySelector('button')!.textContent).toBe('2:4:102');
+			expect(await load(2)).toBe(initial);
+			await drainProducers();
+			flushSync(() => {});
+			expect(hot.accepted).toBe(true);
+			expect(hot.invalidated).toBe(false);
+			expect(container.querySelector('button')!.textContent).toBe('2:6:202');
+			flushSync(() => container.querySelector('button')!.click());
+			await drainProducers();
+			flushSync(() => {});
+			expect(container.querySelector('button')!.textContent).toBe('3:9:203');
+		} finally {
+			release?.();
+			root.unmount();
+			container.remove();
+			owner.dispose();
+			if (previous === undefined) delete globals[executionKey];
+			else globals[executionKey] = previous;
+		}
+	});
+
 	it.each([
 		{ dialect: 'vite', name: 'App', declaration: 'function App(props)' },
 		{ dialect: 'webpack', name: 'App', declaration: 'function App(props)' },
@@ -1153,17 +2591,25 @@ describe('hmr — runtime wrapper', () => {
 
 	it('preserves hook state across update() — stable Symbol.for keys', () => {
 		// Both bodies use the SAME hook symbol (simulating the compiler's
-		// `Symbol.for('octane:file.tsrx:Foo.useState#0')`-stable emit).
-		const HOOK_SYM = Symbol.for('octane:hmr.test.ts:Counter.useState#0');
-		const v1: ComponentBody<any> = ((_props: any, scope: Scope, _extra: any) => {
+		// `Symbol.for('octane:file.tsrx:Foo.useState#0')`-stable emit). The manual
+		// provider transform keeps the test host from adding different call-site
+		// identities to these deliberately hand-written component bodies.
+		const { v1, v2 } = loadPlainHookFixtureSource<{
+			v1: ComponentBody<any>;
+			v2: ComponentBody<any>;
+		}>(
+			`import { useState } from 'octane';
+import { clearBlockRange } from './range';
+const HOOK_SYM = Symbol.for('octane:hmr.test.ts:Counter.useState#0');
+export const v1 = (_props: any, scope: any, _extra: any) => {
 			const [n] = useState(0, HOOK_SYM as any);
 			clearBlockRange(scope);
 			const root = document.createElement('span');
 			root.className = 'leaf';
 			root.textContent = 'v1:' + n;
 			scope.block.parentNode.insertBefore(root, scope.block.endMarker);
-		}) as ComponentBody<any>;
-		const v2: ComponentBody<any> = ((_props: any, scope: Scope, _extra: any) => {
+		};
+export const v2 = (_props: any, scope: any, _extra: any) => {
 			const [n, setN] = useState(0, HOOK_SYM as any);
 			clearBlockRange(scope);
 			const root = document.createElement('button');
@@ -1172,7 +2618,14 @@ describe('hmr — runtime wrapper', () => {
 			root.textContent = 'v2:' + n;
 			root.onclick = () => setN((c: number) => c + 1);
 			scope.block.parentNode.insertBefore(root, scope.block.endMarker);
-		}) as ComponentBody<any>;
+		};`,
+			{
+				id: '/src/manual-hmr-state.ts',
+				inlineHookMemo: false,
+				manualSlots: true,
+				runtimeModules: { './range': { clearBlockRange } },
+			},
+		);
 
 		const Counter = hmr(v1);
 		const r = mount(Counter);

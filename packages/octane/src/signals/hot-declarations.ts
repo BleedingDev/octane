@@ -65,6 +65,8 @@ export interface NativeHotSignalOwner {
 	rotateIngress(buildId: string): void;
 	/** Retire the old native owner synchronously; remount only this boundary. */
 	remount(): void;
+	/** Hold native memberships until the returned handoff/recovery cleanup runs. */
+	holdUpdate?(): () => void;
 }
 
 interface ProofState {
@@ -109,6 +111,7 @@ interface Transaction {
 	readonly cold: Set<ProofState>;
 	readonly owners: Map<ProofState, SignalOwnerIdentity>;
 	readonly remountedOwners: Set<SignalOwnerIdentity>;
+	readonly updates: Map<SignalOwnerIdentity, () => void>;
 	readonly bodies: Map<object, object>;
 	readonly builds: Map<ProofState, string>;
 	readonly generation: string;
@@ -133,6 +136,7 @@ const componentBindings = new WeakMap<ModuleState, Map<string, object>>();
 interface PublisherReplacement {
 	readonly previous: Set<ModuleState>;
 	readonly owners: Map<ProofState, SignalOwnerIdentity>;
+	readonly updates: Map<SignalOwnerIdentity, () => void>;
 	readonly transactions: Transaction[];
 	readonly bodies: Map<object, object>;
 	readonly canUpdate: (component: object, body: object) => boolean;
@@ -663,6 +667,32 @@ export function __registerHotSignalComponent(
 	}
 }
 
+function holdNativeUpdates(
+	authorities: Map<ProofState, SignalOwnerIdentity>,
+	updates: Map<SignalOwnerIdentity, () => void>,
+): void {
+	// Synchronous nested factories settle in reverse call order, restoring the
+	// outer hold before its final membership reconciliation.
+	for (const [proof, owner] of authorities) {
+		if (proof.native.holdUpdate !== undefined && !updates.has(owner))
+			updates.set(owner, proof.native.holdUpdate());
+	}
+}
+
+function settleNativeUpdates(updates: Map<SignalOwnerIdentity, () => void>): void {
+	const errors: unknown[] = [];
+	for (const [owner, settle] of updates) {
+		updates.delete(owner);
+		try {
+			settle();
+		} catch (error) {
+			errors.push(error);
+		}
+	}
+	if (errors.length > 1) throw new AggregateError(errors, formatClientError(363));
+	if (errors.length) throw errors[0];
+}
+
 function remountProof(transaction: Transaction, proof: ProofState): void {
 	if (transaction.cold.has(proof)) return;
 	const oldOwner = transaction.owners.get(proof);
@@ -768,6 +798,7 @@ function beginReplacementFactory(frame: HotSignalExecutionFrame): object {
 		cold: new Set(),
 		owners: new Map(),
 		remountedOwners: new Set(),
+		updates: new Map(),
 		bodies: new Map(),
 		builds: new Map(),
 		generation: `${frame.buildId}:${frame.executableId}`,
@@ -837,14 +868,20 @@ export function prepareNativePublisherReplacement(
 ): { readonly commitStarted: boolean; execute<T>(factory: () => T): T } {
 	const root = components.get(component);
 	const authority = proofs.get(token);
-	if (!root?.runtime || !authority || !root.admissions.has(authority)) fail();
+	if (
+		!root?.runtime ||
+		!authority ||
+		!root.admissions.has(authority) ||
+		!authority.native.acceptsComponent(component)
+	)
+		fail();
 	validateModule(root);
 	const owners = new Set<SignalOwnerIdentity>();
 	for (const proof of root.admissions) {
+		if (!proof.native.acceptsComponent(component)) continue;
 		if (
 			proof.native.publisherKey !== authority.native.publisherKey ||
-			proof.native.documentId !== authority.native.documentId ||
-			!proof.native.acceptsComponent(component)
+			proof.native.documentId !== authority.native.documentId
 		)
 			fail();
 		const owner = admittedOwner(proof);
@@ -894,6 +931,7 @@ export function prepareNativePublisherReplacement(
 			const replacement: PublisherReplacement = {
 				previous,
 				owners: captured,
+				updates: new Map(),
 				transactions: [],
 				bodies: new Map(),
 				canUpdate,
@@ -904,6 +942,7 @@ export function prepareNativePublisherReplacement(
 			attempted = replacement;
 			publisherReplacement = replacement;
 			try {
+				holdNativeUpdates(replacement.owners, replacement.updates);
 				const result = factory();
 				if (
 					result !== null &&
@@ -930,6 +969,7 @@ export function prepareNativePublisherReplacement(
 				throw error;
 			} finally {
 				publisherReplacement = undefined;
+				settleNativeUpdates(replacement.updates);
 			}
 		},
 	});
@@ -1086,6 +1126,7 @@ function beforeFactory(frame: HotSignalExecutionFrame): object | undefined {
 		cold: new Set(),
 		owners: new Map(),
 		remountedOwners: new Set(),
+		updates: new Map(),
 		bodies: new Map(),
 		builds: new Map(),
 		generation: `${frame.buildId}:${frame.executableId}`,
@@ -1107,6 +1148,7 @@ function beforeFactory(frame: HotSignalExecutionFrame): object | undefined {
 			transaction.owners.set(proof, owner);
 			transaction.builds.set(proof, proof.buildId);
 		}
+		holdNativeUpdates(transaction.owners, transaction.updates);
 		for (const proof of transaction.proofs) {
 			const owner = admittedOwner(proof);
 			proof.native.suspendIngress();
@@ -1213,6 +1255,7 @@ function afterFactory(frame: HotSignalExecutionFrame): void {
 	}
 	if (replacement !== undefined) return;
 	finishFactory(transaction);
+	settleNativeUpdates(transaction.updates);
 }
 
 function finishFactory(transaction: Transaction): void {
@@ -1321,6 +1364,7 @@ function abortFactory(frame: HotSignalExecutionFrame): boolean {
 	restoreBodies();
 	valid &&= restored.size === transaction.bodies.size;
 	abortResults.set(frame, valid);
+	if (replacement === undefined) settleNativeUpdates(transaction.updates);
 	return valid;
 }
 

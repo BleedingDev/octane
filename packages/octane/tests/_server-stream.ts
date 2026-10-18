@@ -173,13 +173,18 @@ export function activateStreamedMarkup(
 			} else {
 				if (target === null) throw new TypeError('Streamed markup requires its document global');
 				// jsdom iframe eval otherwise resolves document against the ambient test realm.
-				// This path supports bootstrap/mailbox scripts with explicit globals, not legacy
-				// reveal scripts whose bare global names require the ambient execution path.
-				new Function('globalThis', 'window', 'document', code).call(
+				// Reveal instructions use bare global calls. Bind those callbacks to the
+				// owning window as well as the explicit bootstrap/mailbox globals.
+				const reveals = ['$OCTRC', '$OCTRX', '$OCTRH'] as const;
+				new Function('globalThis', 'window', 'document', ...reveals, code).call(
 					target,
 					target,
 					target,
 					ownerDocument,
+					...reveals.map((name) => {
+						const callback = target[name];
+						return typeof callback === 'function' ? callback.bind(target) : callback;
+					}),
 				);
 			}
 		}

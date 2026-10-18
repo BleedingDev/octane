@@ -63,6 +63,24 @@ export function App(props) {
  return <Theme value={props.theme}><main><header data-host="before">host before</header><Suspense fallback={<aside data-fallback="remote">waiting</aside>}><Remote label={props.label} initial={props.initial} resourceUrl={props.resourceUrl} activityMode={props.activityMode}/></Suspense><footer data-host="after">host after</footer></main></Theme>;
 }`;
 
+it.each(['$OCTRC', '$OCTRX', '$OCTRH'])('activates %s in its own browser document', (reveal) => {
+	const frame = document.createElement('iframe');
+	const parentButton = document.createElement('button');
+	parentButton.textContent = 'parent retained';
+	document.body.append(parentButton, frame);
+	const ownerDocument = frame.contentDocument!;
+	try {
+		ownerDocument.body.innerHTML = `<button>pending</button><script>window.${reveal}=function(){document.querySelector('button').textContent=this===window&&globalThis===window?'revealed':'wrong realm';};</script><script>${reveal}();</script>`;
+		activateStreamedMarkup(ownerDocument.body);
+		expect(ownerDocument.querySelector('button')!.textContent).toBe('revealed');
+		expect(parentButton.textContent).toBe('parent retained');
+		expect(ownerDocument.querySelector('script')).toBeNull();
+	} finally {
+		frame.remove();
+		parentButton.remove();
+	}
+});
+
 it.each([null, false] as const)(
 	'removes an empty server class for live publisher context %s',
 	async (theme) => {
@@ -254,8 +272,12 @@ it.each(
 			onError: (error) => serverErrors.push(error),
 		});
 		stream.pipe(collector.destination);
-		const container = document.createElement('div');
-		document.body.append(container);
+		// A retired stream cannot be reinstalled into the same browser document.
+		const hostFrame = document.createElement('iframe');
+		document.body.append(hostFrame);
+		const ownerDocument = hostFrame.contentDocument!;
+		const container = ownerDocument.createElement('div');
+		ownerDocument.body.append(container);
 		let root: ReturnType<typeof Client.hydrateRoot> | undefined;
 		let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 		try {
@@ -280,8 +302,8 @@ it.each(
 			expect(container.querySelector('[data-fallback]')).toBeNull();
 			input.value = 'typed before hydration';
 			if (scenario === 'structural mismatch')
-				publisher!.replaceWith(document.createElement('article'));
-			hydration = bootstrapStreamedSignalHydration(identity);
+				publisher!.replaceWith(ownerDocument.createElement('article'));
+			hydration = bootstrapStreamedSignalHydration({ ...identity, document: ownerDocument });
 			await Client.act(() => {
 				root = Client.hydrateRoot(container, clientHost.App, clientProps, {
 					signalOwner: hydration!.signalOwner,
@@ -374,9 +396,7 @@ it.each(
 			hydration?.dispose();
 			stream.abort();
 			container.remove();
-			resetStreamRuntimeGlobals();
-			Reflect.deleteProperty(globalThis, '__octaneStreamedSignalSelections');
-			Reflect.deleteProperty(globalThis, '__octaneStreamedRenderer');
+			hostFrame.remove();
 		}
 	},
 );

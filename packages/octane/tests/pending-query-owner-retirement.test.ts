@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { createRoot, flushSync, hydrateRoot, type Root } from 'octane';
+import { createRoot, flushSync, hydrateRoot, startTransition, type Root } from 'octane';
 import { prerender } from 'octane/static';
 import * as signals from 'octane/signals';
 import { act } from './_helpers.js';
@@ -380,6 +380,339 @@ export function App(props: Props) @{
 			expect(container.querySelector('section')?.textContent).toBe('outer result');
 		} finally {
 			root.unmount();
+			container.remove();
+		}
+	},
+);
+
+it.each(['reveal', 'dispose'] as const)(
+	'keeps pending signal and query owners after a root restart rolls back (%s)',
+	async (finish) => {
+		const { App } = loadCompiledFixtureSource(
+			`import { use } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+import { query$ } from 'octane/signals';
+function Counter(props) @{
+	const count$ = useSignal$(3);
+	props.capture(count$);
+	<button onClick={() => count$.set(count$.get() + 1)}>{String(count$.get())}</button>
+}
+function Field(props) @{
+	const value$ = query$(() => props.id, props.load);
+	<output>{value$}</output>
+}
+function Gate(props) @{ if (props.wait) use(props.wait); <span>ready</span> }
+export function App(props) @{
+	<main>
+		@try {
+			<section data-revision={props.revision}>
+				<Counter capture={props.capture}/>
+				<Field id={props.id} load={props.load}/>
+			</section>
+		} @pending { <p>pending</p> }
+		<Gate wait={props.outer}/>
+	</main>
+}`,
+			{
+				id: '/pending-query-root-rollback.tsrx',
+				mode: 'client',
+				compileOptions: { dev: false, hmr: false },
+				runtimeModules: {
+					'octane/signals': signals,
+					'octane/signals/client': await import('octane/signals/client'),
+				},
+			},
+		);
+		const captured = new Set<{ get(): number; set(value: number): void }>();
+		const { pending, load } = requests();
+		let releaseOuter!: () => void;
+		const outer = new Promise<void>((resolve) => {
+			releaseOuter = resolve;
+		});
+		const props = {
+			revision: 0,
+			id: 'same',
+			load,
+			outer: null as Promise<void> | null,
+			capture: (value: { get(): number; set(value: number): void }) => captured.add(value),
+		};
+		const container = document.createElement('div');
+		document.body.append(container);
+		const root = createRoot(container);
+		let unmounted = false;
+		try {
+			await act(() => root.render(App, props));
+			expect(container.querySelector('p')?.textContent).toBe('pending');
+			expect(pending.map(({ id }) => id)).toEqual(['same']);
+			const request = pending[0]!;
+			const original = [...captured][0]!;
+			await act(() => original.set(8));
+			expect(original.get()).toBe(8);
+			const fallback = container.querySelector('p');
+
+			// The inner initial primary restarts before the later sibling suspends
+			// the root. The committed pending tree must remain live after rollback.
+			await act(() => root.render(App, { ...props, revision: 1, outer }));
+			expect(container.querySelector('p')).toBe(fallback);
+			expect(original.get()).toBe(8);
+			expect(request.signal.aborted).toBe(false);
+
+			// Cancel the abandoned new inputs. This control tests restoration of the
+			// committed primary, rather than promising state across a real restart.
+			await act(() => root.render(App, props));
+			expect(original.get()).toBe(8);
+			expect(request.signal.aborted).toBe(false);
+			if (finish === 'reveal') {
+				await act(() => request.resolve('accepted'));
+				expect(container.querySelector('output')?.textContent).toBe('accepted');
+				expect(container.querySelector('button')?.textContent).toBe('8');
+				await act(() => (container.querySelector('button') as HTMLButtonElement).click());
+				expect(container.querySelector('button')?.textContent).toBe('9');
+				expect(pending).toHaveLength(1);
+			}
+			root.unmount();
+			unmounted = true;
+			if (finish === 'dispose') expect(request.signal.aborted).toBe(true);
+			for (const value of captured) expect(() => value.get()).toThrow(/disposed/i);
+		} finally {
+			if (!unmounted) root.unmount();
+			releaseOuter();
+			for (const request of pending) request.resolve('cleanup');
+			container.remove();
+		}
+	},
+);
+
+it('retires root retry query and signal owners after an uncaught retry error', async () => {
+	const { App } = loadCompiledFixtureSource(
+		`import { useSignal$ } from 'octane/signals/client';
+import { query$ } from 'octane/signals';
+function Counter(props) @{
+	const count$ = useSignal$(3);
+	props.capture(count$);
+	<button>{String(count$.get())}</button>
+}
+function Field(props) @{
+	const value$ = query$(() => props.id, props.load);
+	@if (props.read) { <output>{value$}</output> }
+}
+function Failure(props) @{ if (props.fail) throw new Error('retry failed'); <span>ready</span> }
+export function App(props) @{
+	<main>
+		<Counter capture={props.capture}/>
+		<Field id="same" load={props.load} read={props.read}/>
+		<Failure fail={props.fail}/>
+	</main>
+}`,
+		{
+			id: '/root-retry-query-uncaught-error.tsrx',
+			mode: 'client',
+			compileOptions: { dev: false, hmr: false },
+			runtimeModules: {
+				'octane/signals': signals,
+				'octane/signals/client': await import('octane/signals/client'),
+			},
+		},
+	);
+	const captured = new Set<{ get(): number }>();
+	const { pending, load } = requests();
+	const props = {
+		load,
+		read: true,
+		fail: false,
+		capture: (value: { get(): number }) => captured.add(value),
+	};
+	const container = document.createElement('div');
+	document.body.append(container);
+	const root = createRoot(container);
+	let unmounted = false;
+	try {
+		await act(() => root.render(App, props));
+		expect(pending.map(({ id }) => id)).toEqual(['same']);
+		// The retry claims the same query but does not read its pending result.
+		// A later ordinary error discards that retry without retaining a wakeable.
+		await expect(
+			act(() => root.render(App, { ...props, read: false, fail: true })),
+		).rejects.toThrow('retry failed');
+		root.unmount();
+		unmounted = true;
+		expect(pending[0]!.signal.aborted).toBe(true);
+		for (const value of captured) expect(() => value.get()).toThrow(/disposed/i);
+	} finally {
+		if (!unmounted) root.unmount();
+		for (const request of pending) request.resolve('cleanup');
+		container.remove();
+	}
+});
+
+it('keeps pending owners live while an enclosing transition is held, then retires them on unmount', async () => {
+	const { App } = loadCompiledFixtureSource(
+		`import { use, useState } from 'octane';
+import { useSignal$ } from 'octane/signals/client';
+import { query$ } from 'octane/signals';
+function Counter(props) @{
+	const count$ = useSignal$(3);
+	props.capture(count$);
+	<button>{String(count$.get())}</button>
+}
+function Field(props) @{
+	const value$ = query$(() => props.id, props.load);
+	<output>{value$}</output>
+}
+function Gate(props) @{ if (props.wait) use(props.wait); <span>ready</span> }
+export function App(props) @{
+	const [view, setView] = useState(props.initialView);
+	props.bind(setView);
+	<main>
+		@try {
+			<article>
+				@try {
+					<section data-revision={view.revision}>
+						<Counter capture={props.capture}/>
+						<Field id="same" load={props.load}/>
+					</section>
+				} @pending { <p>inner pending</p> }
+				<Gate wait={view.outer}/>
+			</article>
+		} @pending { <aside>outer pending</aside> }
+	</main>
+}`,
+		{
+			id: '/nested-query-transition-hold.tsrx',
+			mode: 'client',
+			compileOptions: { dev: false, hmr: false },
+			runtimeModules: {
+				'octane/signals': signals,
+				'octane/signals/client': await import('octane/signals/client'),
+			},
+		},
+	);
+	const captured = new Set<{ get(): number; set(value: number): void }>();
+	const { pending, load } = requests();
+	let releaseOuter!: () => void;
+	const outer = new Promise<void>((resolve) => {
+		releaseOuter = resolve;
+	});
+	type View = { revision: number; outer: Promise<void> | null };
+	let setView!: (view: View) => void;
+	const props = {
+		load,
+		initialView: { revision: 0, outer: null } as View,
+		bind: (update: (view: View) => void) => {
+			setView = update;
+		},
+		capture: (value: { get(): number; set(value: number): void }) => captured.add(value),
+	};
+	const container = document.createElement('div');
+	document.body.append(container);
+	const root = createRoot(container);
+	let unmounted = false;
+	try {
+		await act(() => root.render(App, props));
+		expect(container.querySelector('p')?.textContent).toBe('inner pending');
+		expect(pending.map(({ id }) => id)).toEqual(['same']);
+		const request = pending[0]!;
+		const original = [...captured][0]!;
+		await act(() => original.set(8));
+		const article = container.querySelector('article');
+		const fallback = container.querySelector('p');
+
+		// The suspended transition keeps the previous visible tree. Its pending
+		// primary must remain live until the held attempt is cancelled.
+		await act(() => startTransition(() => setView({ revision: 1, outer })));
+		expect(container.querySelector('article')).toBe(article);
+		expect(container.querySelector('p')).toBe(fallback);
+		expect(container.querySelector('aside')).toBeNull();
+		expect(original.get()).toBe(8);
+		expect(request.signal.aborted).toBe(false);
+
+		// Unmount cancels both pending presentations and all escaped handles.
+		root.unmount();
+		unmounted = true;
+		expect(request.signal.aborted).toBe(true);
+		for (const value of captured) expect(() => value.get()).toThrow(/disposed/i);
+	} finally {
+		if (!unmounted) root.unmount();
+		releaseOuter();
+		for (const request of pending) request.resolve('cleanup');
+		container.remove();
+	}
+});
+
+it.each(['signal$', 'useSignal$'])(
+	'retires restarted %s owners when an earlier deletion unmounts the root',
+	async (createSignal) => {
+		const { App } = loadCompiledFixtureSource(
+			`import { useLayoutEffect } from 'octane';
+import { query$, signal$ } from 'octane/signals';
+import { useSignal$ } from 'octane/signals/client';
+function Cleanup(props) @{
+	useLayoutEffect(() => () => props.onDelete(), []);
+	<i>cleanup owner</i>
+}
+function Counter(props) @{
+	const count$ = ${createSignal}(3);
+	props.capture({ get$: () => count$.get() });
+	<button>{String(count$.get())}</button>
+}
+function Field(props) @{
+	const value$ = query$(() => props.id, props.load);
+	<output>{value$}</output>
+}
+export function App(props) @{
+	<main>
+		@if (props.showCleanup) { <Cleanup onDelete={props.onDelete}/> }
+		@try {
+			<section data-revision={props.revision}>
+				<Counter capture={props.capture}/>
+				<Field id="same" load={props.load}/>
+			</section>
+		} @pending { <p>pending</p> }
+	</main>
+}`,
+			{
+				id: '/query-restart-deletion-unmount.tsrx',
+				mode: 'client',
+				compileOptions: { dev: false, hmr: false },
+				runtimeModules: {
+					'octane/signals': signals,
+					'octane/signals/client': await import('octane/signals/client'),
+				},
+			},
+		);
+		const captured = new Set<{ get$(): number }>();
+		const { pending, load } = requests();
+		const container = document.createElement('div');
+		document.body.append(container);
+		const root = createRoot(container);
+		let deletionCleanups = 0;
+		const props = {
+			load,
+			revision: 0,
+			showCleanup: true,
+			capture: (value: { get$(): number }) => captured.add(value),
+			onDelete: () => {
+				deletionCleanups++;
+				root.unmount();
+			},
+		};
+		try {
+			await act(() => root.render(App, props));
+			expect(container.querySelector('p')?.textContent).toBe('pending');
+			expect(pending.map(({ id }) => id)).toEqual(['same']);
+			const original = [...captured][0]!;
+			expect(original.get$()).toBe(3);
+			// Deleting the earlier sibling queues its cleanup before the pending
+			// primary restarts. That cleanup unmounts the accepted new tree.
+			await act(() => root.render(App, { ...props, showCleanup: false, revision: 1 }));
+			expect(deletionCleanups).toBe(1);
+			expect(container.textContent).toBe('');
+			expect(pending).toHaveLength(1);
+			expect(pending[0]!.signal.aborted).toBe(true);
+			for (const value of captured) expect(() => value.get$()).toThrow(/disposed/i);
+		} finally {
+			root.unmount();
+			for (const request of pending) request.resolve('cleanup');
 			container.remove();
 		}
 	},
