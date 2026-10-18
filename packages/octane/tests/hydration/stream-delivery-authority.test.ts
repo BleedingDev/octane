@@ -1,3 +1,4 @@
+import { activateStreamedMarkup } from '../_server-stream.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
 	installStreamedRendererGlobal,
@@ -13,6 +14,19 @@ import type {
 	StreamFrameIdentity,
 	StreamedRendererFrame,
 } from '../../src/streamed-signals-protocol.js';
+
+function runScript(html: string, realm: Record<string, unknown>, ownerDocument: Document) {
+	const container = ownerDocument.createElement('div');
+	container.innerHTML = html;
+	const scripts = Array.from(container.querySelectorAll('script')).filter(
+		(script) =>
+			script.type !== 'application/json' &&
+			!script.hasAttribute('src') &&
+			(script.textContent ?? '').trim() !== '',
+	);
+	expect(scripts).toHaveLength(1);
+	activateStreamedMarkup(container, { target: realm });
+}
 
 function identity(ownerKey: string, buildId = 'publisher'): StreamFrameIdentity {
 	return {
@@ -513,8 +527,7 @@ describe('streamed renderer authority leases', () => {
 				realm.document = ownerDocument;
 				delete realm.__octaneStreamedSignalSelections;
 				delete realm.__octaneStreamedRenderer;
-				const script = earlySignalBootstrapScript().match(/<script[^>]*>([\s\S]*)<\/script>/)![1];
-				new Function('globalThis', 'document', script)(realm, ownerDocument);
+				runScript(earlySignalBootstrapScript(), realm, ownerDocument);
 			};
 			initialize(firstDocument);
 			const first = boot(firstDocument);
@@ -708,13 +721,10 @@ describe('streamed renderer authority leases', () => {
 			announceSelection: true,
 		});
 		void injection.done.catch(() => {});
-		const announcement = injection.take().match(/<script[^>]*>([\s\S]*)<\/script>/)![1];
+		const announcement = injection.take();
 		injection.cancel(new Error('announcement captured'));
-		new Function('globalThis', 'document', announcement)(realm, document);
-		const lateScript = streamedRendererFrameScript(frame(identity('one'))).match(
-			/<script[^>]*>([\s\S]*)<\/script>/,
-		)![1];
-		new Function('globalThis', 'document', lateScript)(realm, document);
+		runScript(announcement, realm, document);
+		runScript(streamedRendererFrameScript(frame(identity('one'))), realm, document);
 		expect.soft(early.identities).toHaveLength(0);
 		expect.soft(ingress(realm).frames).toHaveLength(0);
 		expect(() => bootstrap()).toThrow(/already installed/);
@@ -770,11 +780,6 @@ describe('streamed renderer authority leases', () => {
 });
 
 describe('emitted pre-client authority mailboxes', () => {
-	function runScript(html: string, realm: Record<string, unknown>, ownerDocument: Document) {
-		const script = html.match(/<script[^>]*>([\s\S]*)<\/script>/)?.[1];
-		expect(script).toBeDefined();
-		new Function('globalThis', 'document', script!)(realm, ownerDocument);
-	}
 	function announce(owner: StreamFrameIdentity) {
 		const injection = createStreamedSignalInjection(owner, Promise.resolve('complete'), {
 			announceSelection: true,

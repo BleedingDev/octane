@@ -1,3 +1,4 @@
+import { activateStreamedMarkup } from '../_server-stream.js';
 import { bootstrapStreamedSignalHydration } from '../../src/hydration/streamed-signals.js';
 import { createSignalOwnerLifecycle } from '../../src/signals/facade.js';
 import { describe, expect, it } from 'vitest';
@@ -43,9 +44,10 @@ describe('native streamed authority', () => {
 		const queued = makeInput(foreignDocument, 'queued');
 		const later = makeInput(foreignDocument, 'later');
 		const parentInput = makeInput(parentDocument, 'queued');
-		const script = earlySignalBootstrapScript().match(/<script[^>]*>([\s\S]*)<\/script>/)![1];
-		new Function('globalThis', 'document', script)(target, foreignDocument);
-		new Function('globalThis', 'document', script)(parentTarget, parentDocument);
+		foreignDocument.head.innerHTML = earlySignalBootstrapScript();
+		parentDocument.head.innerHTML = earlySignalBootstrapScript();
+		activateStreamedMarkup(foreignDocument.head);
+		activateStreamedMarkup(parentDocument.head);
 		const edit = (input: HTMLInputElement, value: string) => {
 			input.value = value;
 			input.dispatchEvent(new input.ownerDocument.defaultView!.Event('input', { bubbles: true }));
@@ -95,8 +97,8 @@ describe('native streamed authority', () => {
 		document.body.append(iframe);
 		const ownerDocument = iframe.contentDocument!;
 		const target = ownerDocument.defaultView as unknown as Record<string, unknown>;
-		const script = earlySignalBootstrapScript().match(/<script[^>]*>([\s\S]*)<\/script>/)![1];
-		new Function('globalThis', 'document', script)(target, ownerDocument);
+		ownerDocument.head.innerHTML = earlySignalBootstrapScript();
+		activateStreamedMarkup(ownerDocument.head);
 		const bridge = bootstrapStreamedSignalHydration({
 			buildId: 'target-only',
 			documentId: 'target-only',
@@ -118,8 +120,8 @@ describe('native streamed authority', () => {
 		document.body.append(iframe);
 		const foreignDocument = iframe.contentDocument!;
 		const target = foreignDocument.defaultView as unknown as Record<string, unknown>;
-		const script = earlySignalBootstrapScript().match(/<script[^>]*>([\s\S]*)<\/script>/)![1];
-		new Function('globalThis', 'document', script)(target, foreignDocument);
+		foreignDocument.head.innerHTML = earlySignalBootstrapScript();
+		activateStreamedMarkup(foreignDocument.head);
 		let bridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 		try {
 			expect(() => {

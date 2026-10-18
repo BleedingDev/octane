@@ -2102,11 +2102,7 @@ it.each(['ambient', 'iframe'] as const)(
 					},
 				)
 			).html;
-		for (const script of Array.from(container.querySelectorAll('script'))) {
-			if (script.type === 'application/json') continue;
-			new Function('globalThis', 'document', script.textContent!)(target, ownerDocument);
-			script.remove();
-		}
+		activateStreamedMarkup(container, { target });
 		const button = container.querySelector('button');
 		const bridge = bootstrapStreamedSignalHydration({
 			...identity,

@@ -362,15 +362,15 @@ export function mount(parent) { const root = createRoot(parent); root.render(Vie
 	}).code;
 }
 
-test('ordinary imports do not initialize native signals without tree shaking', async () => {
+test('ordinary imports do not initialize native signals without tree shaking', async (t) => {
 	const directory = path.resolve('packages/octane');
 	const result = await build({
 		stdin: {
 			contents: `import * as protocol from './src/signals/read-protocol.ts';
-export async function inspect() {
+export async function inspect(ownerDocument) {
  const ordinary = await import('./src/index.ts');
  let starts = 0;
- protocol.startEarlySignalHydration(() => starts++);
+ protocol.startEarlySignalHydration(ownerDocument, () => starts++);
  const before = {enabled: protocol.nativeSignalHydration, starts, createRoot: typeof ordinary.createRoot};
  await import('./src/signals/index.ts');
  return {before, nativeEnabled: protocol.nativeSignalHydration};
@@ -389,7 +389,9 @@ export async function inspect() {
 	const api = await import(
 		'data:text/javascript;base64,' + Buffer.from(result.outputFiles[0].text).toString('base64')
 	);
-	const resultState = await api.inspect();
+	const window = new Window();
+	t.after(() => window.close());
+	const resultState = await api.inspect(window.document);
 	assert.deepEqual(resultState.before, { enabled: false, starts: 0, createRoot: 'function' });
 	assert.equal(resultState.nativeEnabled, true, 'Actual signal opt-in must initialize the engine.');
 });

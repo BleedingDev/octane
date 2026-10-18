@@ -8,7 +8,7 @@ import * as ServerSignals from 'octane/signals/server';
 import { formatClientError } from '../../src/error-codes.client.generated.js';
 import { PUBLISHER_BOUNDARY_ATTR } from '../../src/publisher-boundary-protocol.js';
 import { loadCompiledFixtureSource } from '../_server-fixture.js';
-import { resetStreamRuntimeGlobals } from '../_server-stream.js';
+import { activateStreamedMarkup, resetStreamRuntimeGlobals } from '../_server-stream.js';
 
 const publisherKey = 'document-bound-publisher';
 const documentRealms = ['ambient', 'iframe'] as const;
@@ -87,16 +87,8 @@ describe('native publisher document authority', () => {
 		let bridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 		try {
 			documentA.head.innerHTML = Server.earlySignalBootstrapScript();
-			for (const parent of [documentA.head, containerA]) {
-				for (const script of Array.from(parent.querySelectorAll('script'))) {
-					if (script.type === 'application/json') continue;
-					new Function('globalThis', 'document', script.textContent!)(
-						documentA.defaultView ?? globalThis,
-						documentA,
-					);
-					script.remove();
-				}
-			}
+			activateStreamedMarkup(documentA.head);
+			activateStreamedMarkup(containerA);
 			bridge = bootstrapStreamedSignalHydration({
 				...streamedSignals,
 				document: documentA,

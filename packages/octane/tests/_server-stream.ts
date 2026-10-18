@@ -144,6 +144,8 @@ export async function collectReadableStream(
 export interface ActivateStreamedMarkupOptions {
 	/** Remove executed inline scripts, matching the established hydration fixtures. */
 	removeScripts?: boolean;
+	/** Explicit transport global for a viewless document's emitted bootstrap. */
+	target?: Record<string, unknown>;
 }
 
 /**
@@ -152,18 +154,34 @@ export interface ActivateStreamedMarkupOptions {
  * `innerHTML` in jsdom are inert, so streaming-to-hydration tests opt in here.
  */
 export function activateStreamedMarkup(
-	container: ParentNode,
+	container: ParentNode & Node,
 	options: ActivateStreamedMarkupOptions = {},
 ): void {
+	const ownerDocument =
+		container.nodeType === 9 ? (container as Document) : container.ownerDocument!;
+	const target = options.target ?? ownerDocument.defaultView;
 	const removeScripts = options.removeScripts ?? true;
 	for (const script of Array.from(container.querySelectorAll('script'))) {
 		const type = script.getAttribute('type');
 		if (type === 'application/json' || script.hasAttribute('src')) continue;
 		const code = script.textContent ?? '';
 		if (code !== '') {
-			// Indirect eval runs in the jsdom window global, like an inline script.
-			// eslint-disable-next-line no-eval
-			(0, eval)(code);
+			if (ownerDocument === document && options.target === undefined) {
+				// Preserve the ambient jsdom execution path used by existing hydration cases.
+				// eslint-disable-next-line no-eval
+				(0, eval)(code);
+			} else {
+				if (target === null) throw new TypeError('Streamed markup requires its document global');
+				// jsdom iframe eval otherwise resolves document against the ambient test realm.
+				// This path supports bootstrap/mailbox scripts with explicit globals, not legacy
+				// reveal scripts whose bare global names require the ambient execution path.
+				new Function('globalThis', 'window', 'document', code).call(
+					target,
+					target,
+					target,
+					ownerDocument,
+				);
+			}
 		}
 		if (removeScripts) script.remove();
 	}

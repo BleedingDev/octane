@@ -1,4 +1,4 @@
-import { expect, it, vi } from 'vitest';
+import { expect, it, onTestFinished, vi } from 'vitest';
 import { compile } from 'octane/compiler';
 import { flushSync } from '../../src/index.js';
 import { prerender } from '../../src/runtime.server.js';
@@ -56,8 +56,13 @@ it.each(Object.keys(sources) as (keyof typeof sources)[])(
 			'client',
 			{ './actions': { fetchValue: browserFetch }, ...runtimeModules },
 		);
-		const host = document.createElement('div');
-		document.body.append(host);
+		// Each response owns a fresh Document; retired tuples stay fenced in the old one.
+		const frame = document.createElement('iframe');
+		document.body.append(frame);
+		onTestFinished(() => frame.remove());
+		const ownerDocument = frame.contentDocument!;
+		const host = ownerDocument.createElement('div');
+		ownerDocument.body.append(host);
 		let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 		let cleanup: (() => void) | undefined;
 		try {
@@ -74,6 +79,7 @@ it.each(Object.keys(sources) as (keyof typeof sources)[])(
 			const output = host.querySelector('output')!;
 			expect(output.textContent).toBe('server result');
 			hydration = bootstrapStreamedSignalHydration({
+				document: ownerDocument,
 				buildId: 'island-query-build',
 				documentId: 'island-query-document',
 			});
