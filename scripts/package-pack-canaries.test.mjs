@@ -8,7 +8,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, test } from 'node:test';
 import { NATIVE_TSC } from './octane-tsc/native.mjs';
-import { selectPackedPackages } from './package-pack-selection.mjs';
+import {
+	selectPackedPackages,
+	parsePackagePackArguments,
+	readExternalPackageArchives,
+	applyExternalPackageArchives,
+} from './package-pack-selection.mjs';
 import { getWorkspacePackages } from './workspace-packages.mjs';
 import {
 	createPackedJavascriptConsumerManifest,
@@ -151,6 +156,198 @@ describe('packed package selection', () => {
 });
 
 const repositoryRequire = createRequire(import.meta.url);
+
+describe('external package archives', () => {
+	const core = '@tanstack/router-core';
+	const manifests = new Map([
+		['octane', {}],
+		['@octanejs/tanstack-router', { peerDependencies: { octane: '*', [core]: '1.171.38' } }],
+		['@octanejs/tanstack-start', { dependencies: { '@octanejs/tanstack-router': '0.2.10' } }],
+	]);
+	const args = [
+		'--external-package',
+		`${core}=/absolute/core.tgz`,
+		'--package',
+		'@octanejs/tanstack-router',
+	];
+
+	test('accepts explicit archives with selection in either argument order', () => {
+		for (const input of [args, [...args.slice(2), ...args.slice(0, 2)]]) {
+			assert.deepEqual(parsePackagePackArguments(input), {
+				packageName: '@octanejs/tanstack-router',
+				externalPackages: new Map([[core, '/absolute/core.tgz']]),
+			});
+			assert.equal(
+				selectPackedPackages(input, getWorkspacePackages(), []).some(
+					(pkg) => pkg.name === '@octanejs/tanstack-router',
+				),
+				true,
+			);
+		}
+	});
+
+	test('rejects missing, duplicate, unfocused, non-local and unknown archive options', () => {
+		for (const input of [
+			['--package', '@octanejs/tanstack-router', '--external-package'],
+			[...args, ...args.slice(0, 2)],
+			args.slice(0, 2),
+			['--package', '@octanejs/tanstack-router', '--external-package', `${core}=relative.tgz`],
+			[
+				'--package',
+				'@octanejs/tanstack-router',
+				'--external-package',
+				`${core}=https://example.test/core.tgz`,
+			],
+			['--package', '@octanejs/tanstack-router', '--external-package', 'other=/absolute/core.tgz'],
+		])
+			assert.throws(() => parsePackagePackArguments(input));
+	});
+
+	function withArchive(manifest, run) {
+		const directory = mkdtempSync(path.join(tmpdir(), 'octane-external-archive-'));
+		try {
+			mkdirSync(path.join(directory, 'package'));
+			writeFileSync(path.join(directory, 'package/package.json'), JSON.stringify(manifest));
+			const archive = path.join(directory, 'core.tgz');
+			const result = spawnSync('tar', ['-czf', archive, '-C', directory, 'package'], {
+				encoding: 'utf8',
+			});
+			assert.equal(result.status, 0, result.stderr);
+			run(archive);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	}
+
+	test('reads the actual tar manifest and records the exact local archive bytes', () => {
+		withArchive({ name: core, version: '1.171.38' }, (archive) => {
+			const validated = readExternalPackageArchives(new Map([[core, archive]]), manifests).get(
+				core,
+			);
+			assert.equal(validated.path, realpathSync(archive));
+			assert.equal(validated.version, '1.171.38');
+			assert.equal(
+				validated.integrity,
+				`sha512-${createHash('sha512').update(fs.readFileSync(archive)).digest('base64')}`,
+			);
+		});
+	});
+
+	test('requests explicit gzip decompression when reading a tar manifest from stdin', () => {
+		withArchive({ name: core, version: '1.171.38' }, (archive) => {
+			const directory = path.join(path.dirname(archive), 'bin');
+			mkdirSync(directory);
+			const realTar = spawnSync('which', ['tar'], { encoding: 'utf8' });
+			assert.equal(realTar.status, 0, realTar.stderr);
+			const wrapper = path.join(directory, 'tar');
+			writeFileSync(
+				wrapper,
+				`#!/bin/sh\ncase "$1" in *z*) ;; *) echo 'stdin gzip requires explicit z' >&2; exit 64 ;; esac\nexec '${realTar.stdout.trim().replaceAll("'", "'\\''")}' "$@"\n`,
+			);
+			fs.chmodSync(wrapper, 0o755);
+			const originalPath = process.env.PATH;
+			try {
+				process.env.PATH = `${directory}${path.delimiter}${originalPath}`;
+				const candidate = readExternalPackageArchives(new Map([[core, archive]]), manifests).get(
+					core,
+				);
+				assert.equal(candidate.version, '1.171.38');
+			} finally {
+				process.env.PATH = originalPath;
+			}
+		});
+	});
+
+	test('consumer archive copies retain the verified bytes when the input is replaced', () => {
+		withArchive({ name: core, version: '1.171.38' }, (archive) => {
+			const directory = path.join(path.dirname(archive), 'accepted');
+			mkdirSync(directory);
+			const bytes = fs.readFileSync(archive);
+			const candidate = readExternalPackageArchives(
+				new Map([[core, archive]]),
+				manifests,
+				directory,
+			).get(core);
+			writeFileSync(archive, 'replaced');
+			assert.notEqual(candidate.path, archive);
+			assert.deepEqual(fs.readFileSync(candidate.path), bytes);
+			assert.equal(
+				candidate.integrity,
+				`sha512-${createHash('sha512').update(bytes).digest('base64')}`,
+			);
+		});
+	});
+
+	for (const manifest of [
+		{ name: 'other', version: '1.171.38' },
+		{ name: core, version: '1.171.37' },
+		{ name: core, version: '1.171.39' },
+		{ name: core, version: '^1.171.38' },
+	])
+		test(`rejects mismatched archive identity ${JSON.stringify(manifest)}`, () => {
+			withArchive(manifest, (archive) =>
+				assert.throws(() => readExternalPackageArchives(new Map([[core, archive]]), manifests)),
+			);
+		});
+
+	test('rejects nonexistent and unused archive inputs', () => {
+		assert.throws(() =>
+			readExternalPackageArchives(new Map([[core, '/missing/core.tgz']]), manifests),
+		);
+		withArchive({ name: core, version: '1.171.38' }, (archive) => {
+			assert.throws(
+				() => readExternalPackageArchives(new Map([[core, archive]]), new Map([['octane', {}]])),
+				/unused/,
+			);
+			assert.throws(
+				() =>
+					readExternalPackageArchives(
+						new Map([[core, archive]]),
+						new Map([['router', { peerDependencies: { [core]: '^1.171.38' } }]]),
+					),
+				/exact/,
+			);
+		});
+	});
+
+	test('injects the same direct request and override only into consumers with the actual native peer closure', () => {
+		const external = new Map([[core, { path: '/absolute/core.tgz', version: '1.171.38' }]]);
+		for (const root of ['@octanejs/tanstack-router', '@octanejs/tanstack-start']) {
+			const manifest = { dependencies: { [root]: 'file:/native.tgz', [core]: '1.171.38' } };
+			const archives = { [root]: 'file:/native.tgz' };
+			const prepared = applyExternalPackageArchives(manifest, archives, manifests, external);
+			assert.equal(prepared.manifest.dependencies[core], 'file:/absolute/core.tgz');
+			assert.equal(prepared.archiveSpecs[core], prepared.manifest.dependencies[core]);
+			assert.match(
+				renderPackedExampleWorkspace(prepared.archiveSpecs),
+				/"@tanstack\/router-core": "file:\/absolute\/core.tgz"/,
+			);
+			assert.equal(manifest.dependencies[core], '1.171.38');
+			assert.equal(archives[core], undefined);
+		}
+		const unrelated = { dependencies: { octane: 'file:/octane.tgz' } };
+		assert.equal(
+			applyExternalPackageArchives(unrelated, {}, manifests, external).manifest,
+			unrelated,
+		);
+		assert.equal(
+			applyExternalPackageArchives(unrelated, {}, manifests, new Map()).manifest,
+			unrelated,
+		);
+		const incompatible = new Map(manifests);
+		incompatible.set('@octanejs/tanstack-router', { peerDependencies: { [core]: '1.171.39' } });
+		assert.throws(
+			() =>
+				applyExternalPackageArchives(
+					{ dependencies: { '@octanejs/tanstack-router': 'file:/native.tgz' } },
+					{},
+					incompatible,
+					external,
+				),
+			/exact/,
+		);
+	});
+});
 
 describe('packed runtime consumer dependencies', () => {
 	const manifests = new Map([
