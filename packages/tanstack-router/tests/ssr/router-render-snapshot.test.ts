@@ -1,3 +1,4 @@
+import { parseHref } from '@tanstack/history';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'octane/server';
 import {
@@ -6,6 +7,7 @@ import {
 	createRootRoute,
 	createRoute,
 	createRouter,
+	createRouteMask,
 	redirect,
 } from '@octanejs/tanstack-router';
 import {
@@ -264,6 +266,78 @@ describe('native router context across server render boundaries', () => {
 		expect(host.state.matches).toEqual(matches);
 		for (let i = 0; i < matches.length; i++) expect(host.state.matches[i]).toBe(matches[i]);
 		expect(captureRouterRenderSnapshot(host)).toEqual(snapshot);
+	});
+
+	it('restores the internal route behind a distinct public mask across nested render boundaries', async () => {
+		const calls: string[] = [];
+		const root = createRootRoute();
+		const routeTree = root.addChildren([
+			createRoute({ getParentRoute: () => root, path: '/' }),
+			createRoute({
+				getParentRoute: () => root,
+				path: 'items/$itemId',
+				loader: ({ params }) => {
+					calls.push(params.itemId);
+					return { title: 'Private route contents' };
+				},
+			}),
+			createRoute({ getParentRoute: () => root, path: 'preview/$itemId' }),
+		]);
+		const routeMasks = [
+			createRouteMask({ routeTree, from: '/items/$itemId', to: '/preview/$itemId' }),
+		];
+		const { profile } = defaultProfile({
+			assertHost: (router) => expect(router.options.routeMasks).toBe(routeMasks),
+			routingOptions: () => ({ routeMasks }),
+		});
+		const host = createRouter({
+			routeTree,
+			routeMasks,
+			isServer: true,
+			origin: 'https://catalog.example',
+			history: createMemoryHistory({ initialEntries: ['/'] }),
+		});
+		hosts.add(host);
+		associateRouterRenderProfile(host, { id: profile.id, publicContext });
+		const target = host.buildLocation({
+			to: '/items/$itemId',
+			params: { itemId: '42' },
+			search: { view: 'full' },
+			hash: 'detail',
+			state: { request: 'masked-42' },
+		});
+		const masked = target.maskedLocation;
+		if (!masked) throw new Error('Native route mask was not applied');
+		host.history.replace(masked.publicHref, {
+			...masked.state,
+			__tempLocation: { ...parseHref(target.publicHref, undefined), state: target.state },
+		});
+		await host.load();
+		expect(host.history.location.href).toBe('/preview/42');
+		expect(host.state.location.pathname).toBe('/items/42');
+		const snapshot = captureRouterRenderSnapshot(host);
+		const first = await restore(wireCopy(snapshot));
+		const second = await restore(wireCopy(captureRouterRenderSnapshot(first)));
+		expect(snapshot.routing.publicHref).toBe('/preview/42');
+		expect(snapshot.routing.unmaskedHref).toBe('/items/42?view=full#detail');
+		for (const router of [first, second]) {
+			expect(publicMatches(router)).toEqual(publicMatches(host));
+			expect(router.history.location.href).toBe(host.history.location.href);
+			expect(router.state.location).toMatchObject({
+				pathname: '/items/42',
+				search: { view: 'full' },
+				hash: 'detail',
+				state: { request: 'masked-42' },
+				maskedLocation: { publicHref: snapshot.routing.publicHref },
+			});
+			expect(captureRouterRenderSnapshot(router)).toEqual(snapshot);
+		}
+		expect(calls).toEqual(['42']);
+		for (const unmaskedHref of [undefined, '/preview/42', '/items/99?view=full#detail']) {
+			await expect(
+				restore(wireCopy({ ...snapshot, routing: { ...snapshot.routing, unmaskedHref } })),
+			).rejects.toThrow(/restored native match identity, parameters or search differ/);
+		}
 	});
 
 	it('preserves a profile-owned localized URL rewrite through nested render boundaries', async () => {
@@ -903,6 +977,16 @@ describe('native router context across server render boundaries', () => {
 			{ ...snapshot, routing: { ...snapshot.routing, extra: true } },
 			{ ...snapshot, routing: { ...snapshot.routing, origin: 'https://catalog.example/private' } },
 			{ ...snapshot, routing: { ...snapshot.routing, publicHref: '//foreign.example/about' } },
+			{ ...snapshot, routing: { ...snapshot.routing, publicHref: '/\\foreign.example/about' } },
+			...[
+				null,
+				1,
+				'',
+				'about',
+				'https://foreign.example/about',
+				'//foreign.example/about',
+				'/\\foreign.example/about',
+			].map((unmaskedHref) => ({ ...snapshot, routing: { ...snapshot.routing, unmaskedHref } })),
 			{ ...snapshot, routing: { ...snapshot.routing, userState: { __TSR_index: 12 } } },
 			{ ...snapshot, publicContext: { value: undefined } },
 			{ ...snapshot, publicContext: { value: Number.NaN } },

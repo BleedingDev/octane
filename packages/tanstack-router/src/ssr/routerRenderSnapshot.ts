@@ -1,3 +1,4 @@
+import { parseHref } from '@tanstack/history';
 import type { AnyRoute, AnyRouteMatch, AnyRouter } from '@tanstack/router-core';
 import { defaultParseSearch, defaultStringifySearch } from '@tanstack/router-core';
 import { createMemoryHistory } from '../history';
@@ -27,6 +28,8 @@ export interface RouterRenderRouting {
 	readonly origin: string;
 	readonly basepath: string;
 	readonly publicHref: string;
+	/** The native unmasked URL before any profile-owned input rewrite. */
+	readonly unmaskedHref?: string;
 	readonly userState: RouterRenderJsonRecord;
 	readonly caseSensitive: boolean;
 	readonly trailingSlash: 'always' | 'never' | 'preserve';
@@ -317,6 +320,7 @@ function readSnapshot(value: unknown): RouterRenderSnapshot {
 		'origin',
 		'basepath',
 		'publicHref',
+		'unmaskedHref',
 		'userState',
 		'caseSensitive',
 		'trailingSlash',
@@ -325,13 +329,17 @@ function readSnapshot(value: unknown): RouterRenderSnapshot {
 	const origin = string(routing['origin']),
 		basepath = string(routing['basepath']),
 		publicHref = string(routing['publicHref']);
+	const unmaskedHref =
+		routing['unmaskedHref'] === undefined ? undefined : string(routing['unmaskedHref']);
 	const url = new URL(origin);
 	if (
 		!['http:', 'https:'].includes(url.protocol) ||
 		url.origin !== origin ||
 		!basepath.startsWith('/') ||
-		!publicHref.startsWith('/') ||
-		publicHref.startsWith('//')
+		[publicHref, ...(unmaskedHref === undefined ? [] : [unmaskedHref])].some(
+			(href) =>
+				!href.startsWith('/') || href.startsWith('//') || new URL(href, origin).origin !== origin,
+		)
 	)
 		throw invalid('invalid routing URL');
 	if (
@@ -386,6 +394,7 @@ function readSnapshot(value: unknown): RouterRenderSnapshot {
 			origin,
 			basepath,
 			publicHref,
+			...(unmaskedHref === undefined ? {} : { unmaskedHref }),
 			userState,
 			caseSensitive: routing['caseSensitive'],
 			trailingSlash,
@@ -556,6 +565,9 @@ export function captureRouterRenderSnapshot(router: AnyRouter): RouterRenderSnap
 			origin: router.options.origin ?? router.origin,
 			basepath: router.options.basepath ?? '/',
 			publicHref: location.publicHref,
+			...(router.state.location.maskedLocation
+				? { unmaskedHref: router.state.location.publicHref }
+				: {}),
 			userState,
 			caseSensitive: router.options.caseSensitive ?? false,
 			trailingSlash: router.options.trailingSlash ?? 'never',
@@ -715,7 +727,17 @@ export async function restoreRouterRenderSnapshot(
 		'pathParamsAllowedCharacters',
 	]);
 	const history = createMemoryHistory({ initialEntries: [snapshot.routing.publicHref] });
-	history.replace(snapshot.routing.publicHref, snapshot.routing.userState);
+	history.replace(snapshot.routing.publicHref, {
+		...snapshot.routing.userState,
+		...(snapshot.routing.unmaskedHref === undefined
+			? {}
+			: {
+					__tempLocation: parseHref(snapshot.routing.unmaskedHref, {
+						...history.location.state,
+						...snapshot.routing.userState,
+					}),
+				}),
+	});
 	let router: AnyRouter;
 	try {
 		router = createRouter({
@@ -766,8 +788,12 @@ export async function restoreRouterRenderSnapshot(
 			throw invalid('restored route geometry or matches differ');
 		const restoredPublic = (router.state.location.maskedLocation ?? router.state.location)
 			.publicHref;
-		if (restoredPublic !== snapshot.routing.publicHref)
-			throw invalid('restored public location differs');
+		if (
+			restoredPublic !== snapshot.routing.publicHref ||
+			router.state.location.publicHref !==
+				(snapshot.routing.unmaskedHref ?? snapshot.routing.publicHref)
+		)
+			throw invalid('restored public or unmasked location differs');
 		for (let i = 0; i < snapshot.matches.length; i++) {
 			const expected = snapshot.matches[i];
 			const actual: AnyRouteMatch | undefined = router.state.matches[i];

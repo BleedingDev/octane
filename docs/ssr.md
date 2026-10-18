@@ -305,10 +305,12 @@ serialize the router instance or its executable options as ordinary props.
 
 Capture requires router-core's server-load lifecycle to publish `pending`
 before running loaders and remain pending until every overlapping load settles.
-The currently pinned router-core 1.171.34 does not provide that contract. This
-feature must adopt the owning server-load fix before publication. It is tracked
-in [TanStack/router#8740](https://github.com/TanStack/router/pull/8740) and
-[BleedingDev/router#1](https://github.com/BleedingDev/router/pull/1).
+The workspace builds against a BleedingDev router-core 1.171.38 source archive
+containing that contract. The adapter's numeric npm peer, `1.171.38`, does not
+establish the required snapshot contract. The owning fix is tracked in
+[TanStack/router#8740](https://github.com/TanStack/router/pull/8740). Publication
+still requires accepted archives from the merged fork branch, their final
+adoption, and acceptance of the installed consumer.
 
 ### Leading list ranges on an owned SSR host
 
