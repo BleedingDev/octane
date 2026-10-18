@@ -13,7 +13,7 @@ const request = createExternalSnapshotRequest(
 	null,
 	[],
 );
-const response = { version: 1, request, html: '', styles: [], head: '' };
+const response = { version: 1, request, html: '', styles: [], sheets: [], head: '' };
 
 function nested(depth: number, tag: 'array' | 'object'): unknown {
 	let value: unknown = ['null'];
@@ -174,6 +174,7 @@ it('rejects deeply nested echoed requests before recursive copying', () => {
 			request: { ...request, props: nested(6000, 'array') },
 			html: '',
 			styles: [],
+			sheets: [],
 			head: '',
 		}),
 	).toThrow(TypeError);
@@ -346,4 +347,94 @@ it('admits escaped body strings above one MiB without treating their contents as
 	expect(decodeExternalSnapshot(JSON.stringify({ ...response, html: punctuation })).html).toBe(
 		punctuation,
 	);
+});
+
+describe.each(['object', 'JSON'] as const)('external sheet resources through %s', (mode) => {
+	const admit = (input: unknown) =>
+		decodeExternalSnapshot(mode === 'JSON' ? JSON.stringify(input) : input);
+	const sheet = {
+		href: '/shared.css',
+		precedence: 'federated',
+		html: '<link rel="stylesheet" href="/shared.css" nonce="host-nonce">',
+	};
+
+	it('requires a bounded unique native resource collection', () => {
+		const missing = { ...response };
+		Reflect.deleteProperty(missing, 'sheets');
+		expect(() => admit(missing)).toThrow(TypeError);
+		for (const sheets of [
+			null,
+			{},
+			[sheet, sheet],
+			[{ ...sheet, href: '' }],
+			[{ ...sheet, precedence: null }],
+			[{ ...sheet, html: undefined }],
+			[{ ...sheet, extra: true }],
+		])
+			expect(() => admit({ ...response, sheets })).toThrow(TypeError);
+		const sheets = Array.from({ length: 4096 }, (_, index) => ({
+			...sheet,
+			href: `/sheet-${index}.css`,
+		}));
+		expect(admit({ ...response, sheets }).sheets).toHaveLength(4096);
+		expect(() =>
+			admit({
+				...response,
+				sheets: [...sheets, { ...sheet, href: '/excess.css' }],
+			}),
+		).toThrow(TypeError);
+	});
+
+	it('shares the existing response content and metadata budgets', () => {
+		const html = 'x'.repeat(32 * MiB);
+		expect(admit({ ...response, sheets: [{ ...sheet, html }] }).sheets[0]!.html).toBe(html);
+		expect(() => admit({ ...response, head: 'x', sheets: [{ ...sheet, html }] })).toThrow(
+			TypeError,
+		);
+		expect(() =>
+			admit({
+				...response,
+				sheets: [{ ...sheet, href: 'x'.repeat(MiB + 1) }],
+			}),
+		).toThrow(TypeError);
+		expect(() =>
+			admit({
+				...response,
+				sheets: [{ ...sheet, precedence: 'x'.repeat(MiB + 1) }],
+			}),
+		).toThrow(TypeError);
+	});
+
+	it('freezes an admitted copy without retaining mutable resource metadata', () => {
+		const input = { ...response, sheets: [{ ...sheet }] };
+		const result = admit(input);
+		input.sheets[0]!.href = '/changed.css';
+		expect(result.sheets).toEqual([sheet]);
+		expect(Object.isFrozen(result.sheets)).toBe(true);
+		expect(Object.isFrozen(result.sheets[0])).toBe(true);
+	});
+});
+
+it('rejects resource getters and malformed resource arrays without executing accessors', () => {
+	const getter = vi.fn(() => '/shared.css');
+	const sheet = { href: '/shared.css', precedence: 'federated', html: '' };
+	Object.defineProperty(sheet, 'href', { enumerable: true, get: getter });
+	expect(() => decodeExternalSnapshot({ ...response, sheets: [sheet] })).toThrow(TypeError);
+	const sheets = [{ href: '/shared.css', precedence: '', html: '' }];
+	Object.defineProperty(sheets, '0', { enumerable: true, get: getter });
+	expect(() => decodeExternalSnapshot({ ...response, sheets })).toThrow(TypeError);
+	expect(() => decodeExternalSnapshot({ ...response, sheets: [,] })).toThrow(TypeError);
+	expect(() =>
+		decodeExternalSnapshot({
+			...response,
+			sheets: Object.assign([], { extra: true }),
+		}),
+	).toThrow(TypeError);
+	expect(() =>
+		decodeExternalSnapshot({
+			...response,
+			sheets: [Object.create({ href: '/shared.css' })],
+		}),
+	).toThrow(TypeError);
+	expect(getter).not.toHaveBeenCalled();
 });

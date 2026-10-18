@@ -9460,6 +9460,7 @@ function runFullFramedPass(
 	nonceAttr: string = '',
 	identifierPrefix: string = '',
 	markers: boolean = true,
+	projectHead?: (head: HeadBuffer) => string,
 ): FullPassResult {
 	// Compiled providers can enter directly, without constructing a descriptor.
 	registerServerRendererContextProvider(renderServerContextProvider);
@@ -9597,7 +9598,7 @@ function runFullFramedPass(
 	}
 	const result: FullPassResult = {
 		body,
-		head: headHtmlWithSheets(headBuf),
+		head: projectHead === undefined ? headHtmlWithSheets(headBuf) : projectHead(headBuf),
 		css,
 		serial,
 		suspended,
@@ -10188,6 +10189,7 @@ async function runBuffered(
 	options: RenderOptions | undefined,
 	nonceAttr: string,
 	resolved: ResolvedMap,
+	projectHead?: (head: HeadBuffer) => string,
 ): Promise<FullPassResult> {
 	const timeoutMs = options?.timeoutMs ?? SUSPENSE_TIMEOUT_MS;
 	const signal = options?.signal;
@@ -10203,7 +10205,15 @@ async function runBuffered(
 		let pass: FullPassResult;
 		try {
 			pass = withStream(null, () =>
-				runFullFramedPass(component, props, resolved, nonceAttr, identifierPrefix),
+				runFullFramedPass(
+					component,
+					props,
+					resolved,
+					nonceAttr,
+					identifierPrefix,
+					true,
+					projectHead,
+				),
 			);
 		} catch (err) {
 			options?.onError?.(err);
@@ -10389,6 +10399,7 @@ async function prerenderInternal(
 	props?: any,
 	options?: RenderOptions,
 	captureStyles?: (styles: Map<string, InjectedStyle>) => void,
+	projectHead?: (head: HeadBuffer) => string,
 ): Promise<RenderResult> {
 	let component: ServerComponent;
 	[component, props, options] = renderEntry(entryComponent, props, options);
@@ -10414,7 +10425,14 @@ async function prerenderInternal(
 	let resolved: ResolvedMap | undefined;
 	try {
 		resolved = newResolvedMap(renderOptions ?? null);
-		const pass = await runBuffered(component, props, renderOptions, nonceAttr, resolved);
+		const pass = await runBuffered(
+			component,
+			props,
+			renderOptions,
+			nonceAttr,
+			resolved,
+			projectHead,
+		);
 		if (injection !== undefined) {
 			try {
 				insertBufferedInjection(
@@ -10454,7 +10472,7 @@ export function prepareExternalSnapshotRequest(
 	return prepareSnapshotRequest(
 		wireRequest,
 		options,
-		(contexts, initialize) => {
+		(contexts, initialize, request) => {
 			const previous = CURRENT_SCOPE;
 			const scope = ssrScope(null);
 			scope.$$ctxValues = contexts;
@@ -10465,7 +10483,7 @@ export function prepareExternalSnapshotRequest(
 					if (!active || !isContext(context) || contexts.has(context))
 						throw new TypeError(formatServerError(348));
 					contexts.set(context, value);
-				});
+				}, request);
 				if (
 					initialized !== null &&
 					(typeof initialized === 'object' || typeof initialized === 'function') &&
@@ -10526,6 +10544,7 @@ export async function renderExternalSnapshot(
 		);
 	};
 	let styles: ExternalSnapshot['styles'] = [];
+	let sheets: ExternalSnapshot['sheets'] = [];
 	const result = await prerenderInternal(
 		entry,
 		undefined,
@@ -10548,6 +10567,13 @@ export async function renderExternalSnapshot(
 		(entries) => {
 			styles = [...entries].map(([id, sheet]) => ({ id, ...sheet }));
 		},
+		(head) => {
+			// Project native collections before folding: transported Float resources
+			// retain their href identity instead of becoming an opaque head string.
+			sheets =
+				head.sheets === null ? [] : [...head.sheets].map(([href, sheet]) => ({ href, ...sheet }));
+			return headHtmlWithSheets({ ...head, sheets: null });
+		},
 	);
 	signal.throwIfAborted();
 	return decodeExternalSnapshot({
@@ -10555,6 +10581,7 @@ export async function renderExternalSnapshot(
 		request,
 		html: result.html,
 		styles,
+		sheets,
 		head: result.head ?? '',
 	});
 }
@@ -10902,6 +10929,19 @@ export function externalSnapshotBoundary<P, C>(options: ExternalSnapshotBoundary
 					return (_props, _scope) => {
 						// Use the native resource channel so late external styles/head precede content.
 						for (const style of snapshot.styles) injectStyle(style.id, style.css, style.nonce);
+						const head = HEAD;
+						if (head !== null) {
+							for (const sheet of snapshot.sheets) {
+								const key = 'sheet:' + sheet.href;
+								if (head.hints.has(key)) continue;
+								head.replay = null;
+								head.hints.add(key);
+								(head.sheets ??= new Map()).set(sheet.href, {
+									precedence: sheet.precedence,
+									html: sheet.html,
+								});
+							}
+						}
 						if (snapshot.head !== '') emitHeadHint('external:' + request.ownerKey, snapshot.head);
 						return ssrHtml(snapshot.html);
 					};

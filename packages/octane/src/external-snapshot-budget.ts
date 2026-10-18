@@ -17,6 +17,7 @@ const MAX_WIRE_LENGTH = (MAX_STRINGS + MAX_STRING) * 6 + MAX_NODES * 128 + 64 * 
 const MAX_RESPONSE_BODY_STRINGS = 32 * 1024 * 1024;
 const MAX_RESPONSE_METADATA_STRINGS = 8 * 1024 * 1024;
 const MAX_RESPONSE_STYLES = 4096;
+const MAX_RESPONSE_SHEETS = 4096;
 
 interface JSONBudget {
 	readonly depth: number;
@@ -36,18 +37,19 @@ const REQUEST_JSON_BUDGET: JSONBudget = {
 
 const RESPONSE_JSON_BUDGET: JSONBudget = {
 	depth: MAX_RAW_DEPTH + 1,
-	nodes: MAX_RAW_NODES + MAX_RESPONSE_STYLES * 7 + 16,
+	nodes: MAX_RAW_NODES + (MAX_RESPONSE_STYLES + MAX_RESPONSE_SHEETS) * 7 + 16,
 	strings:
 		MAX_RAW_STRINGS +
 		MAX_RESPONSE_BODY_STRINGS +
 		MAX_RESPONSE_METADATA_STRINGS +
 		MAX_RESPONSE_STYLES * 11 +
+		MAX_RESPONSE_SHEETS * 20 +
 		64,
 	string: MAX_RESPONSE_BODY_STRINGS,
 	wire:
 		MAX_WIRE_LENGTH +
 		6 * (MAX_RESPONSE_BODY_STRINGS + MAX_RESPONSE_METADATA_STRINGS) +
-		MAX_RESPONSE_STYLES * 128 +
+		(MAX_RESPONSE_STYLES + MAX_RESPONSE_SHEETS) * 128 +
 		1024,
 };
 
@@ -369,7 +371,7 @@ export function snapshotExternalSnapshotResponse(
 		return result;
 	};
 	const field = (entry: Captured, name: string): unknown => entry.values[entry.keys.indexOf(name)];
-	const envelope = record(input, ['version', 'request', 'html', 'styles', 'head']);
+	const envelope = record(input, ['version', 'request', 'html', 'styles', 'sheets', 'head']);
 	if (field(envelope, 'version') !== 1) invalid();
 	const request = admitRequest(field(envelope, 'request'));
 	let bodyBytes = 0,
@@ -416,5 +418,36 @@ export function snapshotExternalSnapshotResponse(
 			}),
 		);
 	}
-	return Object.freeze({ version: 1, request, html, styles: Object.freeze(styles), head });
+	const sourceSheets = field(envelope, 'sheets');
+	if (!Array.isArray(sourceSheets)) invalid();
+	const sheetCount = Object.getOwnPropertyDescriptor(sourceSheets, 'length')?.value;
+	if (!Number.isInteger(sheetCount) || sheetCount < 0 || sheetCount > MAX_RESPONSE_SHEETS)
+		invalid();
+	if (Reflect.ownKeys(sourceSheets).length !== sheetCount + 1) invalid();
+	const hrefs = new Set<string>();
+	const sheets: { readonly href: string; readonly precedence: string; readonly html: string }[] =
+		[];
+	for (let i = 0; i < sheetCount; i++) {
+		const descriptor = Object.getOwnPropertyDescriptor(sourceSheets, String(i));
+		if (!descriptor?.enumerable || !('value' in descriptor)) invalid();
+		const sheet = record(descriptor.value, ['href', 'precedence', 'html']);
+		const href = metadata(field(sheet, 'href'));
+		if (href.length === 0 || hrefs.has(href)) invalid();
+		hrefs.add(href);
+		sheets.push(
+			Object.freeze({
+				href,
+				precedence: metadata(field(sheet, 'precedence')),
+				html: body(field(sheet, 'html')),
+			}),
+		);
+	}
+	return Object.freeze({
+		version: 1,
+		request,
+		html,
+		styles: Object.freeze(styles),
+		sheets: Object.freeze(sheets),
+		head,
+	});
 }

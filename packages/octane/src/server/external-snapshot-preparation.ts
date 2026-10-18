@@ -17,9 +17,13 @@ export interface ExternalSnapshotRenderOptions {
 	readonly signal?: AbortSignal;
 	readonly timeoutMs?: number;
 	readonly onError?: (error: unknown) => void;
-	/** Trusted endpoint-local providers, installed without adding component frames. */
+	/**
+	 * Trusted endpoint-local providers, installed after selected contexts are restored.
+	 * The second argument is the decoded, frozen request already checked against authority.
+	 */
 	readonly initializeContexts?: (
 		provide: <T>(context: Function & { readonly defaultValue: T }, value: T) => void,
+		request: ExternalSnapshotRequest,
 	) => void;
 }
 
@@ -165,6 +169,7 @@ export async function prepareExternalSnapshotRequest(
 	initialize: (
 		contexts: Map<Function, unknown>,
 		callback: NonNullable<ExternalSnapshotRenderOptions['initializeContexts']>,
+		request: ExternalSnapshotRequest,
 	) => void,
 	defaultTimeoutMs: number,
 ): Promise<PreparedExternalSnapshotRequest> {
@@ -249,7 +254,7 @@ export async function prepareExternalSnapshotRequest(
 			validating = false;
 		}
 		if (captured.initializeContexts !== undefined)
-			initialize(state.contexts, captured.initializeContexts);
+			initialize(state.contexts, captured.initializeContexts, request);
 		signal.throwIfAborted();
 		const handle = Object.freeze({ signal }) as PreparedExternalSnapshotRequest;
 		preparedRequests.set(handle, state);

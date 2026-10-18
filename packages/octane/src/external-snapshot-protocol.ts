@@ -41,6 +41,14 @@ export interface ExternalSnapshot {
 		readonly css: string;
 		readonly nonce?: string;
 	}[];
+	/** Native Float links and inline style resources, keyed by their shared href identity. */
+	readonly sheets: readonly {
+		readonly href: string;
+		readonly precedence: string;
+		/** Exact native resource serialization, including nonce and resource attributes. */
+		readonly html: string;
+	}[];
+	/** Non-resource head content; native sheet resources travel through sheets. */
 	readonly head: string;
 }
 

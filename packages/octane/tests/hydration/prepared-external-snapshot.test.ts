@@ -488,6 +488,61 @@ describe('prepared external publisher requests', () => {
 		expect(Server.useContext(Second)).toBe('second default');
 	});
 
+	it('passes the authenticated immutable request to endpoint context initialization', async () => {
+		register(First, 'first', String);
+		const Nonce = Server.createContext<string | undefined>(undefined);
+		const original = { ...request(['first']), nonce: 'authenticated-request-nonce' };
+		let admittedRequest: Server.ExternalSnapshotRequest | undefined;
+		const initializeContexts = vi.fn<
+			NonNullable<Server.ExternalSnapshotRenderOptions['initializeContexts']>
+		>((provide, admitted) => {
+			admittedRequest = admitted;
+			expect(Server.useContext(First)).toBe('first host');
+			expect(admitted).toEqual(original);
+			expect(admitted.nonce).toBe('authenticated-request-nonce');
+			for (const value of [
+				admitted,
+				admitted.authority,
+				admitted.props,
+				admitted.contexts,
+				admitted.contexts[0],
+				admitted.contexts[0]!.value,
+			])
+				expect(Object.isFrozen(value)).toBe(true);
+			expect(Reflect.set(admitted, 'ownerKey', 'different-owner')).toBe(false);
+			expect(Reflect.set(admitted, 'nonce', 'different-nonce')).toBe(false);
+			expect(Reflect.set(admitted.authority, 'publisherBuildId', 'different-build')).toBe(false);
+			provide(Nonce, admitted.nonce);
+		});
+		await expect(
+			Server.prepareExternalSnapshotRequest(
+				JSON.stringify({ ...original, authority: { ...authority, publisherBuildId: 'foreign' } }),
+				{ authority, initializeContexts },
+			),
+		).rejects.toThrow(TypeError);
+		expect(initializeContexts).not.toHaveBeenCalled();
+		const prepared = await Server.prepareExternalSnapshotRequest(JSON.stringify(original), {
+			authority,
+			initializeContexts,
+		});
+		try {
+			expect(initializeContexts).toHaveBeenCalledTimes(1);
+			const result = await Server.renderExternalSnapshot(
+				() =>
+					Server.createElement('output', {
+						children: Server.useContext(First) + ':' + Server.useContext(Nonce),
+					}),
+				prepared,
+			);
+			expect(result.html).toContain('first host:authenticated-request-nonce');
+			expect(result.request).toEqual(original);
+			expect(admittedRequest).toEqual(original);
+		} finally {
+			await Server.releasePreparedExternalSnapshotRequest(prepared);
+		}
+		expect(Server.useContext(Nonce)).toBeUndefined();
+	});
+
 	it.each([true, false])(
 		'initializes a public server context before a compiled expose imports with dev=%s',
 		async (dev) => {
