@@ -1214,6 +1214,9 @@ export function App(props) @{ <section>@if (props.visible) { <Slot component={pr
 		'const api = { read: () => null }; api.read = () => Counter; const Initial = api.read(); capture(Initial);',
 		'const api = { read: () => Counter }; const Initial = api["read"](); capture(Initial);',
 		'const api = { get component() { return Counter; } }; const Initial = api.component; capture(Initial);',
+		'const api = { get component() { return Counter; } }; const { component: Initial } = api; capture(Initial);',
+		'const api = { read: () => Counter }; const { read } = api; const Initial = read(); capture(Initial);',
+		'const api = { get component() { capture(Counter); return null; } }; const copy = { ...api };',
 		'const api = { nested: { read: () => Counter } }; const alias = api; const nested = alias.nested; const invoke = nested.read; const Initial = invoke(); capture(Initial);',
 		'const api = { nested: { get component() { return Counter; } } }; const alias = api.nested; const Initial = alias.component; capture(Initial);',
 	])('propagates an early hoisted component capture to its importer: %s', (capture) => {

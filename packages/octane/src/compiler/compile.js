@@ -9813,32 +9813,44 @@ function collectHotComponentExportFlows(input) {
 			return true;
 		if (aggregate && rootReference(node) && isIdentifierReference(node, parent, key, lexical)) {
 			const value = bindings.get(node.name)?.item.init ?? opaqueDeclarations.get(node.name);
-			if (value && !active.has(value))
-				return earlyCapture(
-					value,
-					position,
-					new Set([...active, value]),
-					undefined,
-					undefined,
-					true,
-				);
+			if (value && !active.has(value)) {
+				// Share visits for this aggregate query so diamonds cannot expand
+				// the same initializer once per path through the object graph.
+				active.add(value);
+				return earlyCapture(value, position, active, undefined, undefined, true);
+			}
 		}
-		// A member can be assigned a new closure after its initial object shape.
-		if (
-			node.type === 'AssignmentExpression' &&
-			node.left.type === 'MemberExpression' &&
-			earlyCapture(node.right, position ?? node.start, active, node, 'right', true)
-		)
-			return true;
 		// A local aggregate may expose an executing method/getter through aliases
-		// or rewritten properties. Inspect its reachable closures without trusting
-		// a selected property shape; unrelated early property reads also propagate.
+		// or rewritten properties, destructuring or spread. Inspect its reachable
+		// closures without trusting a selected property shape; unrelated early
+		// property reads and assigned closures also conservatively propagate.
+		const pattern = node.type === 'VariableDeclarator' ? node.id : node.left;
+		const destructuring = pattern?.type === 'ObjectPattern' || pattern?.type === 'ArrayPattern';
+		const aggregateKey =
+			node.type === 'MemberExpression'
+				? 'object'
+				: node.type === 'SpreadElement'
+					? 'argument'
+					: node.type === 'VariableDeclarator' && destructuring
+						? 'init'
+						: node.type === 'AssignmentExpression' &&
+							  (destructuring || node.left.type === 'MemberExpression')
+							? 'right'
+							: null;
 		if (
-			node.type === 'MemberExpression' &&
-			earlyCapture(node.object, position ?? node.start, active, node, 'object', true)
+			!aggregate &&
+			aggregateKey &&
+			earlyCapture(
+				node[aggregateKey],
+				position ?? node.start,
+				new Set(active),
+				node,
+				aggregateKey,
+				true,
+			)
 		)
 			return true;
-		if (node.type === 'CallExpression') {
+		if (!aggregate && node.type === 'CallExpression') {
 			let callee = unwrapTsExpr(node.callee);
 			const aliases = new Set();
 			while (rootReference(callee) && !aliases.has(callee.name)) {
