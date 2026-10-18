@@ -469,6 +469,7 @@ function bootstrapStreamedSignals<Receiver extends StreamedResultReceiver>(
 				signalOwner,
 				authority,
 				ownerDocument,
+				target,
 				() => lifecycle.retired,
 			);
 		} catch (error) {

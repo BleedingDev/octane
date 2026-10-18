@@ -19579,10 +19579,7 @@ export function publisherBoundary<P>(
 											documentId: parentAuthority.documentId,
 											document: state.wrapper.ownerDocument,
 											signalOwner: state.idState.dataOwner!,
-											target: state.wrapper.ownerDocument.defaultView as unknown as Record<
-												string,
-												unknown
-											>,
+											target: parentAuthority.target,
 										})
 									: undefined;
 							let release: (() => void) | undefined;
@@ -19763,7 +19760,9 @@ export function externalSnapshotBoundary<P>(
 									documentId,
 									document,
 									signalOwner: state.idState.dataOwner!,
-									target: document.defaultView as unknown as Record<string, unknown>,
+									target:
+										parentStreamedAuthority(state.parentBlock, document)?.target ??
+										(document.defaultView as unknown as Record<string, unknown>),
 								})
 							: undefined;
 						let leaveDocumentLifecycle: (() => void) | undefined;

@@ -19,6 +19,7 @@ import {
 } from '../../src/signals/early-values.js';
 
 describe('native streamed authority', () => {
+	const target = {};
 	it('claims iframe inline input history and captures later edits without consuming parent controls', () => {
 		const parentFrame = document.createElement('iframe');
 		document.body.append(parentFrame);
@@ -54,8 +55,8 @@ describe('native streamed authority', () => {
 		};
 		edit(queued, 'typed before activation');
 		edit(parentInput, 'parent edit');
-		const foreignQueue = (target.__octaneEarlySignalControls as { q: unknown[] }).q;
-		const parentQueue = (parentTarget.__octaneEarlySignalControls as { q: unknown[] }).q;
+		const foreignQueue = (target['__octaneEarlySignalControls'] as { q: unknown[] }).q;
+		const parentQueue = (parentTarget['__octaneEarlySignalControls'] as { q: unknown[] }).q;
 		expect(foreignQueue).toHaveLength(1);
 		expect(parentQueue).toHaveLength(1);
 		const bridge = bootstrapStreamedSignalHydration({
@@ -68,7 +69,7 @@ describe('native streamed authority', () => {
 		try {
 			expect(foreignQueue).toHaveLength(0);
 			expect(parentQueue).toHaveLength(1);
-			expect(parentTarget.__octanePublishSignalControl).toBeUndefined();
+			expect(parentTarget['__octanePublishSignalControl']).toBeUndefined();
 			const queued$ = __signalAt('g:queued', 'server', { key: 'queued' });
 			expect(runWithSignalOwner(owner, () => queued$.get())).toBe('typed before activation');
 			edit(later, 'typed after bootstrap before hydrate');
@@ -213,6 +214,7 @@ describe('native streamed authority', () => {
 				documentId: 'document',
 				ownerKey: owner.scopeKey,
 				document,
+				target,
 			});
 			lifecycle.freeze();
 			bridge.suspend();
@@ -232,11 +234,12 @@ describe('native streamed authority', () => {
 		const authority = { buildId: 'build', documentId: 'document', ownerKey: 'owner' };
 		const documentA = document.implementation.createHTMLDocument('Authority');
 		const documentB = document.implementation.createHTMLDocument('Authority');
-		const release = registerNativeStreamedAuthority(owner, authority, documentA);
+		const release = registerNativeStreamedAuthority(owner, authority, documentA, target);
 
 		const captured = getNativeStreamedAuthority(owner, documentA);
-		expect(captured).toEqual({ ...authority, document: documentA });
+		expect(captured).toEqual({ ...authority, document: documentA, target });
 		expect(captured?.document).toBe(documentA);
+		expect(captured?.target).toBe(target);
 		expect(Object.isFrozen(captured)).toBe(true);
 		expect(getNativeStreamedAuthority(owner, documentB)).toBeUndefined();
 		expect(getNativeStreamedAuthority(owner, document)).toBeUndefined();
@@ -249,16 +252,24 @@ describe('native streamed authority', () => {
 		const authority = { buildId: 'build', documentId: 'document', ownerKey: 'owner' };
 		const documentA = document.implementation.createHTMLDocument('Authority');
 		const documentB = document.implementation.createHTMLDocument('Authority');
-		const releaseFirst = registerNativeStreamedAuthority(owner, authority, documentA);
-		const releaseSecond = registerNativeStreamedAuthority(owner, { ...authority }, documentA);
+		const releaseFirst = registerNativeStreamedAuthority(owner, authority, documentA, target);
+		const releaseSecond = registerNativeStreamedAuthority(
+			owner,
+			{ ...authority },
+			documentA,
+			target,
+		);
 
-		expect(() => registerNativeStreamedAuthority(owner, authority, documentB)).toThrow(Error);
-		expect(() => registerNativeStreamedAuthority(owner, authority, documentB)).toThrow(
+		expect(() => registerNativeStreamedAuthority(owner, authority, documentB, target)).toThrow(
+			Error,
+		);
+		expect(() => registerNativeStreamedAuthority(owner, authority, documentB, target)).toThrow(
 			formatClientError(124),
 		);
 		expect(getNativeStreamedAuthority(owner, documentA)).toEqual({
 			...authority,
 			document: documentA,
+			target,
 		});
 		expect(getNativeStreamedAuthority(owner, documentA)?.document).toBe(documentA);
 		expect(getNativeStreamedAuthority(owner, documentB)).toBeUndefined();
@@ -266,22 +277,47 @@ describe('native streamed authority', () => {
 		expect(getNativeStreamedAuthority(owner, documentA)).toEqual({
 			...authority,
 			document: documentA,
+			target,
 		});
 		releaseSecond();
 		expect(getNativeStreamedAuthority(owner, documentA)).toBeUndefined();
 		expect(getNativeStreamedAuthority(owner, documentB)).toBeUndefined();
 
-		const releaseFresh = registerNativeStreamedAuthority(owner, authority, documentB);
+		const releaseFresh = registerNativeStreamedAuthority(owner, authority, documentB, target);
 		releaseFirst();
 		releaseSecond();
 		expect(getNativeStreamedAuthority(owner, documentA)).toBeUndefined();
 		expect(getNativeStreamedAuthority(owner, documentB)).toEqual({
 			...authority,
 			document: documentB,
+			target,
 		});
 		expect(getNativeStreamedAuthority(owner, documentB)?.document).toBe(documentB);
 		releaseFresh();
 		expect(getNativeStreamedAuthority(owner, documentB)).toBeUndefined();
+	});
+
+	it('rejects a conflicting transport until the captured transport leases release', () => {
+		const owner: SignalOwnerIdentity = { scopeKey: 'transport-owner' };
+		const authority = { buildId: 'build', documentId: 'document', ownerKey: owner.scopeKey };
+		const otherTarget = {};
+		const first = registerNativeStreamedAuthority(owner, authority, document, target);
+		const second = registerNativeStreamedAuthority(owner, authority, document, target);
+		const captured = getNativeStreamedAuthority(owner, document);
+		expect(captured?.target).toBe(target);
+		expect(() => registerNativeStreamedAuthority(owner, authority, document, otherTarget)).toThrow(
+			formatClientError(124),
+		);
+		first();
+		expect(getNativeStreamedAuthority(owner, document)).toBe(captured);
+		second();
+		expect(getNativeStreamedAuthority(owner, document)).toBeUndefined();
+		const fresh = registerNativeStreamedAuthority(owner, authority, document, otherTarget);
+		first();
+		second();
+		expect(getNativeStreamedAuthority(owner, document)?.target).toBe(otherTarget);
+		fresh();
+		expect(getNativeStreamedAuthority(owner, document)).toBeUndefined();
 	});
 
 	it('keeps authority separate for different owners at the same site', () => {
@@ -291,23 +327,36 @@ describe('native streamed authority', () => {
 		const secondAuthority = { buildId: 'build-b', documentId: 'document-b', ownerKey: 'owner' };
 
 		expect(getNativeStreamedAuthority(firstOwner, document)).toBeUndefined();
-		const releaseFirst = registerNativeStreamedAuthority(firstOwner, firstAuthority, document);
+		const releaseFirst = registerNativeStreamedAuthority(
+			firstOwner,
+			firstAuthority,
+			document,
+			target,
+		);
 		expect(getNativeStreamedAuthority(secondOwner, document)).toBeUndefined();
-		const releaseSecond = registerNativeStreamedAuthority(secondOwner, secondAuthority, document);
+		const releaseSecond = registerNativeStreamedAuthority(
+			secondOwner,
+			secondAuthority,
+			document,
+			target,
+		);
 
 		expect(getNativeStreamedAuthority(firstOwner, document)).toEqual({
 			...firstAuthority,
 			document,
+			target,
 		});
 		expect(getNativeStreamedAuthority(secondOwner, document)).toEqual({
 			...secondAuthority,
 			document,
+			target,
 		});
 		releaseFirst();
 		expect(getNativeStreamedAuthority(firstOwner, document)).toBeUndefined();
 		expect(getNativeStreamedAuthority(secondOwner, document)).toEqual({
 			...secondAuthority,
 			document,
+			target,
 		});
 		releaseSecond();
 		expect(getNativeStreamedAuthority(secondOwner, document)).toBeUndefined();
@@ -316,7 +365,7 @@ describe('native streamed authority', () => {
 	it('captures immutable authority before the caller changes its input', () => {
 		const owner: SignalOwnerIdentity = { scopeKey: 'owner' };
 		const authority = { buildId: 'build', documentId: 'document', ownerKey: 'owner' };
-		const release = registerNativeStreamedAuthority(owner, authority, document);
+		const release = registerNativeStreamedAuthority(owner, authority, document, target);
 		const captured = getNativeStreamedAuthority(owner, document);
 
 		expect(captured).not.toBe(authority);
@@ -330,6 +379,7 @@ describe('native streamed authority', () => {
 			documentId: 'document',
 			ownerKey: 'owner',
 			document,
+			target,
 		});
 		release();
 	});
@@ -341,9 +391,9 @@ describe('native streamed authority', () => {
 			documentId: 'd'.repeat(1024),
 			ownerKey: 'owner',
 		};
-		const release = registerNativeStreamedAuthority(owner, authority, document);
+		const release = registerNativeStreamedAuthority(owner, authority, document, target);
 
-		expect(getNativeStreamedAuthority(owner, document)).toEqual({ ...authority, document });
+		expect(getNativeStreamedAuthority(owner, document)).toEqual({ ...authority, document, target });
 		release();
 	});
 
@@ -360,14 +410,23 @@ describe('native streamed authority', () => {
 		])('rejects %s without disturbing an existing lease', (_description, value) => {
 			const owner: SignalOwnerIdentity = { scopeKey: 'owner' };
 			const authority = { buildId: 'build', documentId: 'document', ownerKey: 'owner' };
-			const release = registerNativeStreamedAuthority(owner, authority, document);
-			const invalid = { ...authority, [field]: value } as Omit<NativeStreamedAuthority, 'document'>;
+			const release = registerNativeStreamedAuthority(owner, authority, document, target);
+			const invalid = { ...authority, [field]: value } as Omit<
+				NativeStreamedAuthority,
+				'document' | 'target'
+			>;
 
-			expect(() => registerNativeStreamedAuthority(owner, invalid, document)).toThrow(TypeError);
-			expect(() => registerNativeStreamedAuthority(owner, invalid, document)).toThrow(
+			expect(() => registerNativeStreamedAuthority(owner, invalid, document, target)).toThrow(
+				TypeError,
+			);
+			expect(() => registerNativeStreamedAuthority(owner, invalid, document, target)).toThrow(
 				formatClientError(266),
 			);
-			expect(getNativeStreamedAuthority(owner, document)).toEqual({ ...authority, document });
+			expect(getNativeStreamedAuthority(owner, document)).toEqual({
+				...authority,
+				document,
+				target,
+			});
 			release();
 			expect(getNativeStreamedAuthority(owner, document)).toBeUndefined();
 		});
@@ -385,10 +444,12 @@ describe('native streamed authority', () => {
 			buildId: 'build',
 			documentId: 'document',
 			ownerKey: value,
-		} as Omit<NativeStreamedAuthority, 'document'>;
+		} as Omit<NativeStreamedAuthority, 'document' | 'target'>;
 
-		expect(() => registerNativeStreamedAuthority(owner, invalid, document)).toThrow(TypeError);
-		expect(() => registerNativeStreamedAuthority(owner, invalid, document)).toThrow(
+		expect(() => registerNativeStreamedAuthority(owner, invalid, document, target)).toThrow(
+			TypeError,
+		);
+		expect(() => registerNativeStreamedAuthority(owner, invalid, document, target)).toThrow(
 			formatClientError(266),
 		);
 		expect(getNativeStreamedAuthority(owner, document)).toBeUndefined();
@@ -398,8 +459,10 @@ describe('native streamed authority', () => {
 		const owner: SignalOwnerIdentity = { scopeKey: '' };
 		const authority = { buildId: 'build', documentId: 'document', ownerKey: '' };
 
-		expect(() => registerNativeStreamedAuthority(owner, authority, document)).toThrow(TypeError);
-		expect(() => registerNativeStreamedAuthority(owner, authority, document)).toThrow(
+		expect(() => registerNativeStreamedAuthority(owner, authority, document, target)).toThrow(
+			TypeError,
+		);
+		expect(() => registerNativeStreamedAuthority(owner, authority, document, target)).toThrow(
 			formatClientError(266),
 		);
 		expect(getNativeStreamedAuthority(owner, document)).toBeUndefined();
@@ -410,15 +473,28 @@ describe('native streamed authority', () => {
 		(order) => {
 			const owner: SignalOwnerIdentity = { scopeKey: 'owner' };
 			const authority = { buildId: 'build', documentId: 'document', ownerKey: 'owner' };
-			const releaseFirst = registerNativeStreamedAuthority(owner, authority, document);
-			const releaseSecond = registerNativeStreamedAuthority(owner, { ...authority }, document);
+			const releaseFirst = registerNativeStreamedAuthority(owner, authority, document, target);
+			const releaseSecond = registerNativeStreamedAuthority(
+				owner,
+				{ ...authority },
+				document,
+				target,
+			);
 			const releaseEarlier = order === 'first' ? releaseFirst : releaseSecond;
 			const releaseLater = order === 'first' ? releaseSecond : releaseFirst;
 
 			releaseEarlier();
-			expect(getNativeStreamedAuthority(owner, document)).toEqual({ ...authority, document });
+			expect(getNativeStreamedAuthority(owner, document)).toEqual({
+				...authority,
+				document,
+				target,
+			});
 			releaseEarlier();
-			expect(getNativeStreamedAuthority(owner, document)).toEqual({ ...authority, document });
+			expect(getNativeStreamedAuthority(owner, document)).toEqual({
+				...authority,
+				document,
+				target,
+			});
 			releaseLater();
 			expect(getNativeStreamedAuthority(owner, document)).toBeUndefined();
 			releaseLater();
@@ -431,8 +507,13 @@ describe('native streamed authority', () => {
 		(kind) => {
 			const owner: SignalOwnerIdentity = { scopeKey: 'owner' };
 			const authority = { buildId: 'build', documentId: 'document', ownerKey: 'owner' };
-			const releaseFirst = registerNativeStreamedAuthority(owner, authority, document);
-			const releaseSecond = registerNativeStreamedAuthority(owner, { ...authority }, document);
+			const releaseFirst = registerNativeStreamedAuthority(owner, authority, document, target);
+			const releaseSecond = registerNativeStreamedAuthority(
+				owner,
+				{ ...authority },
+				document,
+				target,
+			);
 			releaseFirst();
 			releaseSecond();
 			expect(getNativeStreamedAuthority(owner, document)).toBeUndefined();
@@ -441,10 +522,10 @@ describe('native streamed authority', () => {
 				...authority,
 				buildId: kind === 'matching' ? authority.buildId : 'fresh-build',
 			};
-			const releaseFresh = registerNativeStreamedAuthority(owner, fresh, document);
+			const releaseFresh = registerNativeStreamedAuthority(owner, fresh, document, target);
 			releaseFirst();
 			releaseSecond();
-			expect(getNativeStreamedAuthority(owner, document)).toEqual({ ...fresh, document });
+			expect(getNativeStreamedAuthority(owner, document)).toEqual({ ...fresh, document, target });
 			releaseFresh();
 			expect(getNativeStreamedAuthority(owner, document)).toBeUndefined();
 		},
@@ -455,18 +536,28 @@ describe('native streamed authority', () => {
 		(field) => {
 			const owner: SignalOwnerIdentity = { scopeKey: 'owner' };
 			const authority = { buildId: 'build', documentId: 'document', ownerKey: 'owner' };
-			const release = registerNativeStreamedAuthority(owner, authority, document);
+			const release = registerNativeStreamedAuthority(owner, authority, document, target);
 			const conflicting = { ...authority, [field]: 'conflicting' };
 
-			expect(() => registerNativeStreamedAuthority(owner, conflicting, document)).toThrow(Error);
-			expect(() => registerNativeStreamedAuthority(owner, conflicting, document)).toThrow(
+			expect(() => registerNativeStreamedAuthority(owner, conflicting, document, target)).toThrow(
+				Error,
+			);
+			expect(() => registerNativeStreamedAuthority(owner, conflicting, document, target)).toThrow(
 				formatClientError(124),
 			);
-			expect(getNativeStreamedAuthority(owner, document)).toEqual({ ...authority, document });
+			expect(getNativeStreamedAuthority(owner, document)).toEqual({
+				...authority,
+				document,
+				target,
+			});
 			release();
 			expect(getNativeStreamedAuthority(owner, document)).toBeUndefined();
-			const releaseFresh = registerNativeStreamedAuthority(owner, conflicting, document);
-			expect(getNativeStreamedAuthority(owner, document)).toEqual({ ...conflicting, document });
+			const releaseFresh = registerNativeStreamedAuthority(owner, conflicting, document, target);
+			expect(getNativeStreamedAuthority(owner, document)).toEqual({
+				...conflicting,
+				document,
+				target,
+			});
 			releaseFresh();
 		},
 	);

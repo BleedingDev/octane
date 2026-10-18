@@ -11,7 +11,7 @@ import { loadCompiledFixtureSource } from '../_server-fixture.js';
 import { activateStreamedMarkup, resetStreamRuntimeGlobals } from '../_server-stream.js';
 
 const publisherKey = 'document-bound-publisher';
-const documentRealms = ['ambient', 'iframe'] as const;
+const documentRealms = ['ambient', 'iframe', 'viewless'] as const;
 const streamedSignals = { buildId: 'publisher-document-build', documentId: 'publisher-document' };
 const source = `import {useId} from 'octane';
 import {useSignal$} from 'octane/signals/client';
@@ -25,7 +25,7 @@ export function Remote(props) {
 function pair() {
 	const common = {
 		id: '/publisher/DocumentAuthority.tsx',
-		compileOptions: { dev: process.env.OCTANE_TEST_COMPILE_MODE !== 'prod' },
+		compileOptions: { dev: process.env['OCTANE_TEST_COMPILE_MODE'] !== 'prod' },
 		runtimeModules: {
 			'octane/signals/client': ClientSignals,
 			'octane/signals/server': ServerSignals,
@@ -47,8 +47,8 @@ afterEach(() => {
 describe('native publisher document authority', () => {
 	it.each(documentRealms)('adopts DOM only in its bootstrapped %s document', (realm) => {
 		const modules = pair();
-		const ServerBoundary = Server.publisherBoundary(modules.server.Remote, { publisherKey });
-		const ClientBoundary = Client.publisherBoundary(modules.client.Remote, { publisherKey });
+		const ServerBoundary = Server.publisherBoundary(modules.server['Remote'], { publisherKey });
+		const ClientBoundary = Client.publisherBoundary(modules.client['Remote'], { publisherKey });
 		const result = Server.renderToString(
 			ServerBoundary,
 			{ initial: 7, onExecute() {} },
@@ -56,7 +56,11 @@ describe('native publisher document authority', () => {
 		);
 		const iframe = realm === 'iframe' ? document.createElement('iframe') : undefined;
 		if (iframe) document.body.append(iframe);
-		const documentA = iframe?.contentDocument ?? document;
+		const documentA =
+			realm === 'viewless'
+				? document.implementation.createHTMLDocument('Viewless native publisher')
+				: (iframe?.contentDocument ?? document);
+		const target = (documentA.defaultView as unknown as Record<string, unknown> | null) ?? {};
 		const documentB = documentA.implementation.createHTMLDocument('Copied native publisher');
 		const containerA = documentA.createElement('div');
 		const containerB = documentB.createElement('div');
@@ -87,12 +91,12 @@ describe('native publisher document authority', () => {
 		let bridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 		try {
 			documentA.head.innerHTML = Server.earlySignalBootstrapScript();
-			activateStreamedMarkup(documentA.head);
-			activateStreamedMarkup(containerA);
+			activateStreamedMarkup(documentA.head, { target });
+			activateStreamedMarkup(containerA, { target });
 			bridge = bootstrapStreamedSignalHydration({
 				...streamedSignals,
 				document: documentA,
-				target: documentA.defaultView as unknown as Record<string, unknown>,
+				target,
 			});
 			const authorityOptions = {
 				signalOwner: bridge.signalOwner,

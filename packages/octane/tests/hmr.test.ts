@@ -335,6 +335,32 @@ describe('hmr — runtime wrapper', () => {
 			local: 'const Child = expose``;',
 			after: 'function Helper() @{ <p>child:VERSION</p> }',
 		},
+		{
+			name: 'Reflect apply evaluated only during rendering',
+			before: 'function read() { return Helper; }',
+			local: 'const Child = Reflect.apply(read, null, []);',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'Reflect construct evaluated only during rendering',
+			before: 'function read() { return Helper; }',
+			local: 'const Child = Reflect.construct(read, []);',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'shadowed non-invoking Reflect methods',
+			before:
+				'const Reflect = { apply() { return null; }, construct() { return null; } }; function read() { return Helper; } Reflect.apply(read, null, []); Reflect.construct(read, []);',
+			local: 'const Child = Helper;',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'non-invoking Reflect descriptor inspection',
+			before:
+				'function read() { return Helper; } const registry = { read }; Reflect.getOwnPropertyDescriptor(registry, "read");',
+			local: 'const Child = Helper;',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
 	])(
 		'self-accepts deferred component references through $name',
 		({ name, before, local, after }) => {
@@ -1290,6 +1316,8 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 			'class H { get c() { return Counter; } constructor() { capture(this.c); } } new H();',
 			'function t() { capture(Counter); } t``;',
 			'function expose() { return Counter; } const Initial = (0, expose)(); capture(Initial);',
+			'function read() { return Counter; } const Initial = Reflect.apply(read, null, []); capture(Initial);',
+			'function read() { return Counter; } const Initial = Reflect.construct(read, []); capture(Initial);',
 		]
 			.map<{ capture: string; target?: string }>((capture) => ({ capture }))
 			.concat({

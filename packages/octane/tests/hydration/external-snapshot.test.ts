@@ -2060,7 +2060,7 @@ it.each(['unmount', 'retire', 'resume'] as const)(
 	},
 );
 
-it.each(['ambient', 'iframe'] as const)(
+it.each(['ambient', 'iframe', 'viewless'] as const)(
 	'joins streamed external publishers in their actual %s document',
 	async (realm) => {
 		const modules = pair(
@@ -2068,21 +2068,24 @@ it.each(['ambient', 'iframe'] as const)(
 			'/remote/ForeignDocument.tsx',
 			false,
 		);
-		const snapshot = transport(modules.server.Remote);
+		const snapshot = transport(modules.server['Remote']);
 		const server = Server.externalSnapshotBoundary({
 			authority,
-			component: modules.server.Remote,
+			component: modules.server['Remote'],
 			snapshot,
 		});
 		const client = Client.externalSnapshotBoundary({
 			authority,
-			component: modules.client.Remote,
+			component: modules.client['Remote'],
 			snapshot,
 		});
 		const iframe = realm === 'iframe' ? document.createElement('iframe') : undefined;
 		if (iframe) document.body.append(iframe);
-		const ownerDocument = iframe?.contentDocument ?? document;
-		const target = ownerDocument.defaultView as unknown as Record<string, unknown>;
+		const ownerDocument =
+			realm === 'viewless'
+				? document.implementation.createHTMLDocument('Viewless external publisher')
+				: (iframe?.contentDocument ?? document);
+		const target = (ownerDocument.defaultView as unknown as Record<string, unknown> | null) ?? {};
 		const container = ownerDocument.createElement('div');
 		ownerDocument.body.append(container);
 		const identity = {

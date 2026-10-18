@@ -15,6 +15,7 @@ export interface NativeStreamedAuthority {
 	readonly documentId: string;
 	readonly ownerKey: string;
 	readonly document: Document;
+	readonly target: Record<string, unknown>;
 }
 
 interface AuthorityRegistration {
@@ -32,8 +33,9 @@ function validKey(value: unknown): value is string {
 /** Called only after the native bootstrap has successfully claimed its authority. */
 export function registerNativeStreamedAuthority(
 	owner: SignalOwnerIdentity,
-	authority: Omit<NativeStreamedAuthority, 'document'>,
+	authority: Omit<NativeStreamedAuthority, 'document' | 'target'>,
 	document: Document,
+	target: Record<string, unknown>,
 	retired?: () => boolean,
 ): () => void {
 	if (
@@ -42,7 +44,9 @@ export function registerNativeStreamedAuthority(
 		authority === null ||
 		typeof authority !== 'object' ||
 		document === null ||
-		typeof document !== 'object'
+		typeof document !== 'object' ||
+		target === null ||
+		typeof target !== 'object'
 	)
 		throw new TypeError(formatClientError(266));
 	const { buildId, documentId, ownerKey } = authority;
@@ -58,7 +62,7 @@ export function registerNativeStreamedAuthority(
 	let entry = authorities.get(owner);
 	if (entry === undefined) {
 		entry = {
-			authority: Object.freeze({ buildId, documentId, ownerKey, document }),
+			authority: Object.freeze({ buildId, documentId, ownerKey, document, target }),
 			leases: 0,
 			retired,
 		};
@@ -67,7 +71,8 @@ export function registerNativeStreamedAuthority(
 		entry.authority.buildId !== buildId ||
 		entry.authority.documentId !== documentId ||
 		entry.authority.ownerKey !== ownerKey ||
-		entry.authority.document !== document
+		entry.authority.document !== document ||
+		entry.authority.target !== target
 	)
 		throw new Error(formatClientError(124));
 

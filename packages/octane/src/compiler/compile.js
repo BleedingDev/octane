@@ -9921,6 +9921,20 @@ function collectHotComponentExportFlows(input) {
 				} else break;
 			}
 			const callPosition = position ?? node.start;
+			// Reflect invokes its target argument, which ordinary member traversal
+			// does not enter. Only the unshadowed intrinsic has this call contract.
+			const reflect = unwrapTsExpr(callee?.object);
+			if (
+				(node.type === 'CallExpression' || node.type === 'OptionalCallExpression') &&
+				(callee?.type === 'MemberExpression' || callee?.type === 'OptionalMemberExpression') &&
+				reflect?.type === 'Identifier' &&
+				reflect.name === 'Reflect' &&
+				lexical.resolveBinding(lexical.nodeScopes.get(reflect) ?? lexical.rootScope, 'Reflect') ===
+					null &&
+				(staticMemberName(callee) === 'apply' || staticMemberName(callee) === 'construct') &&
+				earlyCapture(node.arguments, callPosition, new Set(), node, 'arguments', true)
+			)
+				return true;
 			if (
 				node.type === 'NewExpression' &&
 				(callee?.type === 'ClassDeclaration' || callee?.type === 'ClassExpression') &&
