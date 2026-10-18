@@ -1,6 +1,15 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import {
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	realpathSync,
+	statSync,
+	writeFileSync,
+} from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import semver from 'semver';
 import { findPackedWorkspaceDependencyClosure } from './package-pack-canaries.mjs';
@@ -58,6 +67,109 @@ function assertExternalPeerVersion(name, version, manifests) {
 		throw new Error(
 			`${name}@${version} must match every exact packed peer version: ${peers.join(', ')}`,
 		);
+	}
+}
+
+// The maintained host declares its released authority in the normal catalog.
+// Its committed lockfile supplies the exact bytes; numeric published peers stay
+// independent of that host choice.
+export function configuredPackageArchiveRequests(catalogs, lockfile, manifests) {
+	const name = '@tanstack/router-core';
+	const request = catalogs?.default?.[name];
+	if (typeof request === 'string' && semver.valid(request) === request) {
+		assertExternalPeerVersion(name, request, manifests);
+		return new Map();
+	}
+	if (
+		typeof request !== 'string' ||
+		!/^https:\/\/github\.com\/BleedingDev\/router\/releases\/download\/ultramodern-router-core-[a-f0-9]{12}\/tanstack-router-core-[0-9.]+\.tgz$/.test(
+			request,
+		)
+	)
+		throw new Error(`unsupported configured package authority: ${request}`);
+	const key = `  '${name}@${request}':\n`;
+	const resolutions = lockfile
+		.split(/(?:^|\n)packages:\n/)
+		.slice(1)
+		.flatMap((section) => section.split('\nsnapshots:\n')[0].split(key).slice(1));
+	if (resolutions.length !== 1) throw new Error(`${name}: require one locked package authority`);
+	const resolution = resolutions[0].split('\n\n')[0];
+	const match = resolution.match(
+		/^    resolution: \{integrity: (sha512-[A-Za-z0-9+/]+=*), tarball: ([^}]+)\}$/m,
+	);
+	if (!match || match[2] !== request)
+		throw new Error(`${name}: configured archive lacks locked integrity`);
+	const version = /\/tanstack-router-core-([0-9.]+)\.tgz$/.exec(request)[1];
+	assertExternalPeerVersion(name, version, manifests);
+	return new Map([[name, { request, version, integrity: match[1] }]]);
+}
+
+export function authenticateConfiguredPackageArchive(authority, bytes) {
+	const integrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
+	if (integrity !== authority.integrity)
+		throw new Error('configured package archive integrity mismatch');
+}
+
+export async function readConfiguredPackageArchives(authorities, manifests, directory) {
+	const result = new Map();
+	for (const [name, authority] of authorities) {
+		const response = await fetch(authority.request);
+		if (!response.ok) throw new Error(`${authority.request}: ${response.status}`);
+		const bytes = Buffer.from(await response.arrayBuffer());
+		authenticateConfiguredPackageArchive(authority, bytes);
+		const archive = path.join(directory, 'configured-router-core.tgz');
+		writeFileSync(archive, bytes, { flag: 'wx' });
+		const accepted = readExternalPackageArchives(new Map([[name, archive]]), manifests).get(name);
+		const expected = path.join(directory, 'configured-router-core');
+		mkdirSync(expected);
+		const entries = execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' }).trim().split('\n');
+		if (entries.some((entry) => !entry.startsWith('package/') || entry.split('/').includes('..')))
+			throw new Error('configured package archive contains an unsafe path');
+		execFileSync('tar', ['-xzf', archive, '-C', expected]);
+		result.set(name, { ...accepted, ...authority, expected: path.join(expected, 'package') });
+	}
+	return result;
+}
+
+export function verifyConfiguredPackageArchives(consumerDirectory, manifest, manifests, archives) {
+	const direct = createRequire(path.join(consumerDirectory, 'package.json'));
+	const roots = Object.keys({ ...manifest.dependencies, ...manifest.devDependencies }).filter(
+		(name) => manifests.has(name),
+	);
+	const closure = findPackedWorkspaceDependencyClosure(manifests, roots);
+	for (const [name, archive] of archives) {
+		if (
+			!archive.expected ||
+			!closure.some((root) => Object.hasOwn(manifests.get(root)?.peerDependencies ?? {}, name))
+		)
+			continue;
+		if (manifest.dependencies?.[name] !== archive.request)
+			throw new Error(`${name}: consumer must declare its configured archive directly`);
+		const installed = path.dirname(realpathSync(direct.resolve(`${name}/package.json`)));
+		const compare = (relative = '') => {
+			for (const entry of readdirSync(path.join(archive.expected, relative))) {
+				const file = path.join(relative, entry);
+				const expected = path.join(archive.expected, file);
+				if (lstatSync(expected).isDirectory()) compare(file);
+				else if (
+					!lstatSync(expected).isFile() ||
+					!lstatSync(path.join(installed, file)).isFile() ||
+					!readFileSync(expected).equals(readFileSync(path.join(installed, file)))
+				)
+					throw new Error(`${name}: installed archive bytes differ at ${file}`);
+			}
+		};
+		compare();
+		for (const root of closure) {
+			if (!Object.hasOwn(manifests.get(root)?.peerDependencies ?? {}, name)) continue;
+			const peer = createRequire(
+				realpathSync(path.join(consumerDirectory, 'node_modules', root, 'package.json')),
+			);
+			if (
+				realpathSync(peer.resolve(`${name}/package.json`)) !== path.join(installed, 'package.json')
+			)
+				throw new Error(`${root}: resolved a second ${name} authority`);
+		}
 	}
 }
 
@@ -119,11 +231,16 @@ export function applyExternalPackageArchives(
 		if (![...closure.values()].some((entry) => Object.hasOwn(entry.peerDependencies ?? {}, name)))
 			continue;
 		assertExternalPeerVersion(name, archive.version, closure);
-		requests[name] = `file:${archive.path}`;
+		requests[name] = archive.request ?? `file:${archive.path}`;
 	}
 	if (!Object.keys(requests).length) return { manifest, archiveSpecs };
 	return {
 		manifest: { ...manifest, dependencies: { ...manifest.dependencies, ...requests } },
-		archiveSpecs: { ...archiveSpecs, ...requests },
+		archiveSpecs: {
+			...archiveSpecs,
+			...Object.fromEntries(
+				Object.entries(requests).filter(([name]) => !externalArchives.get(name).request),
+			),
+		},
 	};
 }

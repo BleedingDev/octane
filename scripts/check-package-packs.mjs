@@ -6,6 +6,9 @@ import {
 	parsePackagePackArguments,
 	readExternalPackageArchives,
 	applyExternalPackageArchives,
+	configuredPackageArchiveRequests,
+	readConfiguredPackageArchives,
+	verifyConfiguredPackageArchives,
 } from './package-pack-selection.mjs';
 import { checkPackedValdiContract } from './check-packed-valdi-contract.mjs';
 import {
@@ -344,6 +347,15 @@ function writePackedConsumerManifest(consumerDirectory, manifest, archiveSpecs) 
 	);
 }
 
+function verifyPackedConsumerAuthorities(consumerDirectory) {
+	verifyConfiguredPackageArchives(
+		consumerDirectory,
+		JSON.parse(readFileSync(path.join(consumerDirectory, 'package.json'), 'utf8')),
+		packedManifests,
+		externalArchives,
+	);
+}
+
 function preparePackedExample(tempRoot, archives, canary) {
 	const sourceDirectory = path.join(REPO_ROOT, 'examples', canary.directory);
 	const consumerDirectory = path.join(tempRoot, `example-${canary.directory}`);
@@ -376,6 +388,7 @@ function preparePackedExample(tempRoot, archives, canary) {
 }
 
 function assertPackedExampleInstall(consumerDirectory, canary) {
+	verifyPackedConsumerAuthorities(consumerDirectory);
 	const consumerRequire = createRequire(path.join(consumerDirectory, 'package.json'));
 	const directRuntime = realpathSync(consumerRequire.resolve('octane'));
 	const resolvedPackages = new Map();
@@ -513,6 +526,7 @@ assert.deepEqual(renderToString(() => 'runtime-only'), { html: 'runtime-only', c
 		],
 		{ cwd: consumerDirectory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
 	);
+	verifyPackedConsumerAuthorities(consumerDirectory);
 	const consumerRequire = createRequire(path.join(consumerDirectory, 'package.json'));
 	const octaneRequire = createRequire(realpathSync(consumerRequire.resolve('octane')));
 	let compilerPeerFound = true;
@@ -970,6 +984,7 @@ export function renderProbe() {
 		},
 	);
 
+	verifyPackedConsumerAuthorities(consumerDirectory);
 	const consumerRequire = createRequire(path.join(consumerDirectory, 'package.json'));
 	const installedPostcss = consumerRequire('postcss/package.json').version;
 	console.log(`packed consumer resolved postcss ${installedPostcss}`);
@@ -1382,6 +1397,7 @@ function validatePackedTsrxConsumer(tempRoot, archives, packedFiles, packedManif
 		},
 	);
 
+	verifyPackedConsumerAuthorities(consumerDirectory);
 	const consumerRequire = createRequire(path.join(consumerDirectory, 'package.json'));
 	const directRuntime = realpathSync(consumerRequire.resolve('octane'));
 	for (const packageName of validatedPackages) {
@@ -1621,6 +1637,7 @@ async function validatePackedJavascriptConsumer(tempRoot, archives) {
 		},
 	);
 
+	verifyPackedConsumerAuthorities(consumerDirectory);
 	const consumerRequire = createRequire(path.join(consumerDirectory, 'package.json'));
 	const directRuntime = realpathSync(consumerRequire.resolve('octane'));
 	for (const packageName of PACKED_COMMONJS_CONSUMER_PACKAGES) {
@@ -2119,12 +2136,28 @@ const packedManifests = new Map();
 let rawTsrxFiles = 0;
 
 try {
-	externalArchives = readExternalPackageArchives(
+	const configuredAuthorities = configuredPackageArchiveRequests(
+		JSON.parse(
+			execFileSync('pnpm', ['config', 'get', 'catalogs', '--json'], {
+				cwd: REPO_ROOT,
+				encoding: 'utf8',
+			}),
+		),
+		readFileSync(path.join(REPO_ROOT, 'pnpm-lock.yaml'), 'utf8'),
+		new Map(packagesToPack.map((pkg) => [pkg.name, pkg.manifest])),
+	);
+	externalArchives = await readConfiguredPackageArchives(
+		configuredAuthorities,
+		new Map(packagesToPack.map((pkg) => [pkg.name, pkg.manifest])),
+		tempRoot,
+	);
+	const candidateArchives = readExternalPackageArchives(
 		packArguments.externalPackages,
 		new Map(packagesToPack.map((pkg) => [pkg.name, pkg.manifest])),
 		tempRoot,
 	);
-	for (const [name, archive] of externalArchives) {
+	for (const [name, archive] of candidateArchives) {
+		externalArchives.set(name, archive);
 		console.log(
 			`local external candidate ${name}@${archive.version}: ${archive.path} ${archive.integrity}; not publication evidence`,
 		);

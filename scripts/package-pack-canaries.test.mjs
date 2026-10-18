@@ -13,6 +13,9 @@ import {
 	parsePackagePackArguments,
 	readExternalPackageArchives,
 	applyExternalPackageArchives,
+	configuredPackageArchiveRequests,
+	authenticateConfiguredPackageArchive,
+	verifyConfiguredPackageArchives,
 } from './package-pack-selection.mjs';
 import { getWorkspacePackages } from './workspace-packages.mjs';
 import {
@@ -170,6 +173,168 @@ describe('external package archives', () => {
 		'--package',
 		'@octanejs/tanstack-router',
 	];
+	const request =
+		'https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0123456789ab/tanstack-router-core-1.171.38.tgz';
+	const bytes = Buffer.from('accepted package archive');
+	const integrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
+	const lockfile = `packages:\n  '${core}@${request}':\n    resolution: {integrity: ${integrity}, tarball: ${request}}\n\nsnapshots:\n  '${core}@${request}': {}`;
+
+	test('uses the configured released authority directly without changing packed peers or overriding transitive requests', () => {
+		const authorities = configuredPackageArchiveRequests(
+			{ default: { [core]: request } },
+			lockfile,
+			manifests,
+		);
+		assert.deepEqual(authorities.get(core), { request, version: '1.171.38', integrity });
+		assert.deepEqual(
+			configuredPackageArchiveRequests(
+				{ default: { [core]: request } },
+				`---\npackages:\n  pnpm@12.9.1: {}\n\nsnapshots:\n  pnpm@12.9.1: {}\n---\n${lockfile}`,
+				manifests,
+			),
+			authorities,
+		);
+		authenticateConfiguredPackageArchive(authorities.get(core), bytes);
+		const manifest = {
+			dependencies: { '@octanejs/tanstack-router': 'file:/router.tgz', [core]: '1.171.38' },
+		};
+		const prepared = applyExternalPackageArchives(manifest, {}, manifests, authorities);
+		assert.equal(prepared.manifest.dependencies[core], request);
+		assert.equal(prepared.archiveSpecs[core], undefined);
+		assert.equal(manifests.get('@octanejs/tanstack-router').peerDependencies[core], '1.171.38');
+		assert.equal(manifest.dependencies[core], '1.171.38');
+	});
+
+	test('permits only an exact numeric catalog as a registry host', () => {
+		assert.deepEqual(
+			configuredPackageArchiveRequests({ default: { [core]: '1.171.38' } }, '', manifests),
+			new Map(),
+		);
+		for (const spec of [
+			'file:/core.tgz',
+			'link:../core',
+			'github:BleedingDev/router',
+			'http://example.test/core.tgz',
+			'^1.171.38',
+			'latest',
+			'',
+			undefined,
+		]) {
+			assert.throws(
+				() => configuredPackageArchiveRequests({ default: { [core]: spec } }, lockfile, manifests),
+				/unsupported/,
+			);
+		}
+	});
+
+	test('rejects missing lock authority, redirected requests and changed archive bytes', () => {
+		assert.throws(
+			() => configuredPackageArchiveRequests({ default: { [core]: request } }, '', manifests),
+			/locked/,
+		);
+		assert.throws(
+			() =>
+				configuredPackageArchiveRequests(
+					{ default: { [core]: request } },
+					lockfile.replace(`tarball: ${request}`, 'tarball: https://example.test/core.tgz'),
+					manifests,
+				),
+			/integrity/,
+		);
+		assert.throws(
+			() =>
+				configuredPackageArchiveRequests(
+					{ default: { [core]: 'https://example.test/core.tgz' } },
+					lockfile,
+					manifests,
+				),
+			/unsupported/,
+		);
+		assert.throws(
+			() =>
+				configuredPackageArchiveRequests(
+					{ default: { [core]: request } },
+					`${lockfile}\n---\n${lockfile}`,
+					manifests,
+				),
+			/one locked/,
+		);
+		assert.throws(
+			() => authenticateConfiguredPackageArchive({ integrity }, Buffer.from('different bytes')),
+			/integrity mismatch/,
+		);
+	});
+
+	test('installed host rejects registry fallback, changed files and a second peer authority', () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'octane-configured-core-'));
+		try {
+			const expected = path.join(directory, 'accepted');
+			mkdirSync(expected);
+			writeFileSync(
+				path.join(expected, 'package.json'),
+				JSON.stringify({ name: core, version: '1.171.38' }),
+			);
+			writeFileSync(path.join(expected, 'index.js'), 'export const accepted = true;');
+			const consumer = path.join(directory, 'consumer');
+			const installed = path.join(consumer, 'node_modules', core);
+			mkdirSync(path.dirname(installed), { recursive: true });
+			fs.cpSync(expected, installed, { recursive: true });
+			const router = path.join(consumer, 'node_modules/@octanejs/tanstack-router');
+			mkdirSync(router, { recursive: true });
+			writeFileSync(
+				path.join(router, 'package.json'),
+				JSON.stringify({
+					name: '@octanejs/tanstack-router',
+					exports: { '.': './index.js' },
+					peerDependencies: { [core]: '1.171.38' },
+				}),
+			);
+			writeFileSync(path.join(consumer, 'package.json'), '{}');
+			const manifest = {
+				dependencies: { '@octanejs/tanstack-router': 'file:/router.tgz', [core]: request },
+			};
+			const archives = new Map([[core, { request, expected }]]);
+			assert.throws(
+				() =>
+					createRequire(path.join(consumer, 'package.json')).resolve(
+						'@octanejs/tanstack-router/package.json',
+					),
+				{ code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' },
+			);
+			verifyConfiguredPackageArchives(consumer, manifest, manifests, archives);
+			assert.throws(
+				() =>
+					verifyConfiguredPackageArchives(
+						consumer,
+						{ dependencies: { ...manifest.dependencies, [core]: '1.171.38' } },
+						manifests,
+						archives,
+					),
+				/declare.*directly/,
+			);
+			writeFileSync(path.join(installed, 'index.js'), 'export const accepted = false;');
+			assert.throws(
+				() => verifyConfiguredPackageArchives(consumer, manifest, manifests, archives),
+				/bytes differ/,
+			);
+			fs.cpSync(expected, installed, { recursive: true });
+			const duplicateConsumer = path.join(directory, 'duplicate-consumer');
+			fs.cpSync(consumer, duplicateConsumer, { recursive: true });
+			const duplicate = path.join(
+				duplicateConsumer,
+				'node_modules/@octanejs/tanstack-router/node_modules',
+				core,
+			);
+			mkdirSync(path.dirname(duplicate), { recursive: true });
+			fs.cpSync(expected, duplicate, { recursive: true });
+			assert.throws(
+				() => verifyConfiguredPackageArchives(duplicateConsumer, manifest, manifests, archives),
+				/second.*authority/,
+			);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
 
 	test('accepts explicit archives with selection in either argument order', () => {
 		for (const input of [args, [...args.slice(2), ...args.slice(0, 2)]]) {
