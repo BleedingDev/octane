@@ -19,7 +19,7 @@ const server = loadServerFixture<typeof client>(
 	'packages/octane/tests/_fixtures/signals-pending-stream.tsrx',
 	{
 		compileOptions: {
-			dev: process.env.OCTANE_TEST_COMPILE_MODE !== 'prod',
+			dev: process.env['OCTANE_TEST_COMPILE_MODE'] !== 'prod',
 			hmr: false,
 		},
 		runtimeModules: { 'octane/signals': signals },
@@ -111,7 +111,10 @@ describe('pending native streams', () => {
 				buildId: 'pending-stream-hydration-build',
 				documentId: `pending-stream-hydration-document-${changed}`,
 			};
-			const container = document.createElement('div');
+			// Each server response owns a fresh document; retiring a bridge fences its old ingress.
+			const ownerDocument = document.implementation.createHTMLDocument('Pending stream');
+			const target: Record<string, unknown> = {};
+			const container = ownerDocument.createElement('div');
 			const { requests, load } = browserStreams();
 			const errors: unknown[] = [];
 			let bridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
@@ -132,12 +135,17 @@ describe('pending native streams', () => {
 				await shellReady.promise;
 				await drainProducers();
 				container.innerHTML = collector.chunks.join('');
-				document.body.append(container);
-				activateStreamedMarkup(container);
+				ownerDocument.body.append(container);
+				activateStreamedMarkup(container, { target });
 				const shellChunkCount = collector.chunks.length;
 				const fallback = container.querySelector('.stream-pending');
 				expect(fallback?.textContent).toBe('Waiting for stream');
-				bridge = bootstrapStreamedSignalHydration({ ...config, signalOwner: clientOwner });
+				bridge = bootstrapStreamedSignalHydration({
+					...config,
+					document: ownerDocument,
+					target,
+					signalOwner: clientOwner,
+				});
 				root = hydrateRoot(
 					container,
 					client.PendingStreamParent,
@@ -171,7 +179,7 @@ describe('pending native streams', () => {
 				serverStream.end();
 				await collector.ended;
 				container.insertAdjacentHTML('beforeend', collector.chunks.slice(shellChunkCount).join(''));
-				activateStreamedMarkup(container);
+				activateStreamedMarkup(container, { target });
 				await act(() => {});
 				expect(container.querySelector('.stream-value')?.textContent).toBe(
 					changed ? 'replacement:1' : 'original:2',

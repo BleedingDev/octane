@@ -182,7 +182,7 @@ export function activateStreamedMarkup(
 					target,
 					ownerDocument,
 					...reveals.map((name) => {
-						const callback = target[name];
+						const callback: unknown = Reflect.get(target, name);
 						return typeof callback === 'function' ? callback.bind(target) : callback;
 					}),
 				);

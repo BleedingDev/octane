@@ -352,7 +352,13 @@ ${includeRawBinding ? "export { Raw } from '@fixture/raw';" : ''}
 			entry: './src/index.js',
 			resolve: { extensionAlias: { '.js': ['.ts', '.js'] } },
 			optimization: { minimize: true },
-			output: { path: outputPath, filename: 'bundle.cjs' },
+			// The web fixture is imported without a browser script URL.
+			output: {
+				path: outputPath,
+				filename: 'bundle.cjs',
+				publicPath: '/',
+				globalObject: 'globalThis',
+			},
 			plugins: [new OctaneRspackPlugin({ profile })],
 		});
 		const file = join(outputPath, 'bundle.cjs');
@@ -394,7 +400,8 @@ globalThis.bundledLink = (async () => {
 			entry: './src/index.js',
 			resolve: { extensionAlias: { '.js': ['.ts', '.js'] } },
 			optimization: { minimize: false },
-			output: { path: output, filename: 'bundle.js' },
+			// eval does not supply the executing script's URL for automatic publicPath.
+			output: { path: output, filename: 'bundle.js', publicPath: '/' },
 			plugins: [new OctaneRspackPlugin({ parallel: false })],
 		});
 		const browser = new JSDOM('<div id="root"></div>', {
@@ -1039,7 +1046,8 @@ globalThis.__octane_descriptor_result__ = renderToString(App, {}).html;
 					},
 					resolve: { extensionAlias: { '.js': ['.ts', '.js'] } },
 					optimization: { minimize: false },
-					output: { path: output, filename: 'bundle.cjs' },
+					// Client bundles below run through eval without a script URL.
+					output: { path: output, filename: 'bundle.cjs', publicPath: '/' },
 					plugins: [new OctaneRspackPlugin()],
 				});
 			await buildDescriptor(outputPath);

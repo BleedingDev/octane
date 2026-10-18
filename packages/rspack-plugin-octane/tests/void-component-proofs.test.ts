@@ -91,6 +91,8 @@ function voidConfiguration(
 		output: {
 			path: directory,
 			filename: 'main.js',
+			// These web bundles run through eval, without a script URL to infer.
+			publicPath: '/',
 			globalObject: 'globalThis',
 			library: { name: 'voidFixture', type: 'var' },
 		},
