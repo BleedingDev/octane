@@ -1264,6 +1264,14 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 			'const api = { get component() { return Counter; } }; { const alias = api; capture(alias.component); }',
 			'const api = { get component() { return Counter; } }; function f() { return arguments[0].component; } capture(f(api));',
 			'const api = { get component() { return Counter; } }; function f() { let alias; alias = api; return alias.component; } capture(f());',
+			'const api = { get component() { return Counter; } }; const { a = api } = {}; capture(a.component);',
+			'const api = { get component() { return Counter; } }; const [a = api] = []; capture(a.component);',
+			'const api = { get component() { return Counter; } }; { var v = api; } capture(v.component);',
+			'const api = { get component() { return Counter; } }; for (var v = api; false;); capture(v.component);',
+			'class H { static get c() { return Counter; } static x = capture(this.c); }',
+			'class H { static get c() { return Counter; } static { capture(this.c); } }',
+			'class B { static get c() { return Counter; } } class H extends B { static x = capture(super.c); }',
+			'const api = { get component() { return Counter; } }; let v; v = api; capture(v.component);',
 		]
 			.map<{ capture: string; target?: string }>((capture) => ({ capture }))
 			.concat({

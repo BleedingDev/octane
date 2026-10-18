@@ -9863,7 +9863,7 @@ function collectHotComponentExportFlows(input) {
 		const capturesPattern =
 			pattern?.type === 'ObjectPattern' ||
 			pattern?.type === 'ArrayPattern' ||
-			(pattern?.type === 'Identifier' && !rootReference(pattern));
+			(pattern?.type === 'Identifier' && bindings.get(pattern.name)?.item !== node);
 		const aggregateKey =
 			node.type === 'Decorator'
 				? 'expression'
@@ -9875,16 +9875,29 @@ function collectHotComponentExportFlows(input) {
 							? 'init'
 							: node.type === 'ForOfStatement'
 								? 'right'
-								: node.type === 'AssignmentPattern' && capturesPattern
+								: node.type === 'AssignmentPattern'
 									? 'right'
 									: node.type === 'AssignmentExpression' &&
-										  (capturesPattern || node.left.type === 'MemberExpression')
+										  (node.left.type === 'Identifier' ||
+												capturesPattern ||
+												node.left.type === 'MemberExpression')
 										? 'right'
 										: null;
 		if (
 			!aggregate &&
 			aggregateKey &&
 			earlyCapture(node[aggregateKey], position ?? node.start, new Set(), node, aggregateKey, true)
+		)
+			return true;
+		// Static initializers can invoke getters through this or super, neither
+		// of which names the class binding. Inspect the class and its heritage.
+		if (
+			!aggregate &&
+			(node.type === 'ClassDeclaration' || node.type === 'ClassExpression') &&
+			node.body.body.some(
+				(item) => item.type === 'StaticBlock' || (item.static && item.type !== 'MethodDefinition'),
+			) &&
+			(position ?? node.start) < aggregateStart(node)
 		)
 			return true;
 		if (!aggregate && node.type === 'CallExpression') {
