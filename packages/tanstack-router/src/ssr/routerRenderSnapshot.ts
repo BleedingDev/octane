@@ -1,4 +1,4 @@
-import type { AnyRoute, AnyRouter } from '@tanstack/router-core';
+import type { AnyRoute, AnyRouteMatch, AnyRouter } from '@tanstack/router-core';
 import { defaultParseSearch, defaultStringifySearch } from '@tanstack/router-core';
 import { createMemoryHistory } from '../history';
 import { createRootRoute, createRoute } from '../route';
@@ -769,8 +769,8 @@ export async function restoreRouterRenderSnapshot(
 		if (restoredPublic !== snapshot.routing.publicHref)
 			throw invalid('restored public location differs');
 		for (let i = 0; i < snapshot.matches.length; i++) {
-			const expected = snapshot.matches[i],
-				actual = router.state.matches[i];
+			const expected = snapshot.matches[i];
+			const actual: AnyRouteMatch | undefined = router.state.matches[i];
 			if (expected === undefined || actual === undefined)
 				throw invalid('restored route geometry or matches differ');
 			if (

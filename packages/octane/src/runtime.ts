@@ -19456,7 +19456,7 @@ export function preparePublisherBoundaryReplacement(
 
 /** Adopt external native output inside the existing parent scope and render owner. */
 export function externalSnapshotBoundary<P>(
-	options: ExternalSnapshotBoundaryOptions<P, ComponentBody<P>>,
+	options: ExternalSnapshotBoundaryOptions<ComponentBody<P>>,
 ): ComponentBody<P> {
 	const timeoutMs = options.timeoutMs;
 	if (

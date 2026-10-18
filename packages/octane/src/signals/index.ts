@@ -88,4 +88,8 @@ export {
 	__registerHotSignalComponent,
 	__remountHotSignalComponent,
 } from './hot-declarations.js';
-export type { HotSignalModuleManifest, HotSignalModuleStamp } from './hot-declarations.js';
+export type {
+	HotSignalDeclarationShape,
+	HotSignalModuleManifest,
+	HotSignalModuleStamp,
+} from './hot-declarations.js';

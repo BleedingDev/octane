@@ -26,7 +26,12 @@ async function getBrowser() {
 	if (sharedBrowser) return sharedBrowser;
 	try {
 		const { chromium } = await import('playwright');
-		sharedBrowser = await chromium.launch({ headless: true });
+		sharedBrowser = await chromium.launch({
+			headless: true,
+			...(process.env.PLAYWRIGHT_CHROMIUM_PATH
+				? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
+				: {}),
+		});
 		return sharedBrowser;
 	} catch (error) {
 		throw new Error(
@@ -487,26 +492,6 @@ export function App() @{
 				'react-dom',
 				realpathSync(join(repositoryRoot, 'packages/octane/node_modules/react-dom')),
 			);
-			rmSync(join(root, 'node_modules/octane'), { recursive: true, force: true });
-			write(
-				root,
-				'node_modules/octane/package.json',
-				JSON.stringify({
-					name: 'octane',
-					exports: { '.': './index.cjs', './internal/client': './index.cjs' },
-				}) + '\n',
-			);
-			write(
-				root,
-				'node_modules/octane/index.cjs',
-				`module.exports = new Proxy({}, {
-	get(_target, name) {
-		if (name === 'template') return (html) => html;
-		return (...args) => args[0];
-	},
-});
-`,
-			);
 			write(root, 'index.html', '<!doctype html><html><body><div id="root"></div></body></html>\n');
 			write(
 				root,
@@ -522,9 +507,10 @@ export function Counter(props: { start: number }) @{
 			write(
 				root,
 				'src/index.tsx',
-				`import { Counter } from './Counter.tsrx';
+				`import { createRoot } from 'octane';
+import { Counter } from './Counter.tsrx';
 
-document.querySelector('#root')!.textContent = typeof Counter;
+createRoot(document.querySelector('#root')!).render(Counter, { start: 0 });
 `,
 			);
 
@@ -544,7 +530,11 @@ document.querySelector('#root')!.textContent = typeof Counter;
 			page.on('pageerror', (error) => errors.push(String(error)));
 			await page.goto(`http://127.0.0.1:${started.port}/`, { waitUntil: 'load' });
 			expect(errors).toEqual([]);
-			expect(await page.locator('#root').textContent()).toBe('function');
+			const counter = page.locator('#root button');
+			expect(await counter.textContent()).toBe('clicks: 0');
+			await counter.click();
+			await expect.poll(() => counter.textContent()).toBe('clicks: 1');
+			expect(errors).toEqual([]);
 		} finally {
 			await page?.close();
 			await closeServer?.();

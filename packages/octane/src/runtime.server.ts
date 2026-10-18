@@ -10813,7 +10813,7 @@ const EXTERNAL_SNAPSHOT_LOADS = /* @__PURE__ */ new WeakMap<
 >();
 
 /** The native loader suspends without putting transported HTML into application use() seeds. */
-export function externalSnapshotBoundary<P, C>(options: ExternalSnapshotBoundaryOptions<P, C>): C {
+export function externalSnapshotBoundary<C>(options: ExternalSnapshotBoundaryOptions<C>): C {
 	validateExternalSnapshotAuthority(options.authority);
 	EXTERNAL_SNAPSHOT_DISCOVERY ??= new WeakSet();
 	const snapshotTransport = options.snapshot;
@@ -10836,7 +10836,7 @@ export function externalSnapshotBoundary<P, C>(options: ExternalSnapshotBoundary
 		throw new TypeError(formatServerError(356));
 	const authority = Object.freeze({ ...options.authority });
 	const boundary = markComponentFlags(
-		function ExternalSnapshotBoundary(props: P, scope: SSRScope): string {
+		function ExternalSnapshotBoundary(props: unknown, scope: SSRScope): string {
 			const resolved = RESOLVED;
 			const resources = getServerRenderResourceContext();
 			const documentId = resolved?.resourceOptions?.externalSnapshots?.documentId;

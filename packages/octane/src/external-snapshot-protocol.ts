@@ -52,7 +52,7 @@ export interface ExternalSnapshot {
 	readonly head: string;
 }
 
-export interface ExternalSnapshotBoundaryOptions<P, C> {
+export interface ExternalSnapshotBoundaryOptions<C> {
 	readonly authority: ExternalSnapshotAuthority;
 	readonly snapshot: (
 		request: ExternalSnapshotRequest,
