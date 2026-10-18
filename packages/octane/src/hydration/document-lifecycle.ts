@@ -5,7 +5,12 @@ import {
 	type SignalDocumentLifecycleParticipant,
 } from '../signals/document-owner.js';
 export { joinSignalDocumentLifecycle } from '../signals/document-owner.js';
-import { createSignalOwnerLifecycle } from '../signals/facade.js';
+import {
+	assertSignalDocumentOwner,
+	retiredSignalOwnerIdentities,
+	observeSignalOwnerLifecycle,
+	type SignalOwnerLifecycle,
+} from '../signals/owner-context.js';
 import type { SignalOwner } from '../signals/types.js';
 import type { IndependentHydrateLifecycle } from './independent-island.js';
 import type { StreamedSignalResults } from './streamed-signals.js';
@@ -23,7 +28,8 @@ export interface SignalDocumentLifecycleOptions {
 }
 
 interface DocumentLifecycleParticipant {
-	readonly owner: ReturnType<typeof createSignalOwnerLifecycle>;
+	readonly signalOwner: SignalOwner;
+	owner: SignalOwnerLifecycle | undefined;
 	readonly streamedHydration: Pick<StreamedSignalResults, 'suspend'> | undefined;
 	readonly onRetire: () => void;
 }
@@ -36,7 +42,9 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 		throw new TypeError(formatClientError(213));
 	}
 	const signalOwner = options.signalOwner ?? documentSignalOwner(document);
-	const owner = createSignalOwnerLifecycle(signalOwner);
+	assertSignalDocumentOwner(signalOwner);
+	let createOwner: ((owner: SignalOwner) => SignalOwnerLifecycle) | undefined;
+	let owner: SignalOwnerLifecycle | undefined;
 	let frozen = false;
 	let disposed = false;
 	let waiting: Promise<boolean> | undefined;
@@ -55,8 +63,10 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 			streamedHydration: Pick<StreamedSignalResults, 'suspend'> | undefined,
 			onRetire: () => void,
 		): SignalDocumentLifecycleParticipant {
-			const participant = {
-				owner: createSignalOwnerLifecycle(signalOwner),
+			assertSignalDocumentOwner(signalOwner);
+			const participant: DocumentLifecycleParticipant = {
+				signalOwner,
+				owner: createOwner?.(signalOwner),
 				streamedHydration,
 				onRetire,
 			};
@@ -64,14 +74,15 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 			try {
 				if (frozen) {
 					try {
-						participant.owner.freeze();
+						participant.owner?.freeze();
 					} finally {
 						streamedHydration?.suspend();
 					}
 				}
 			} catch (error) {
 				participants.delete(participant);
-				participant.owner.retire();
+				if (participant.owner) participant.owner.retire();
+				else retiredSignalOwnerIdentities.add(participant.signalOwner);
 				throw error;
 			}
 			const leave = () => {
@@ -84,7 +95,12 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 		},
 	};
 	const compatible = (): boolean => {
-		if (owner.retired || view.document !== document) return false;
+		if (
+			owner?.retired ||
+			retiredSignalOwnerIdentities.has(signalOwner) ||
+			view.document !== document
+		)
+			return false;
 		try {
 			if (options.readIdentity !== undefined) {
 				const identity = options.readIdentity();
@@ -104,6 +120,7 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 	const dispose = (): void => {
 		if (disposed) return;
 		disposed = true;
+		stopObservingOwner();
 		view.removeEventListener('pagehide', hide);
 		view.removeEventListener('pageshow', show);
 		unregister();
@@ -124,7 +141,8 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 							failure ??= { error };
 						}
 						try {
-							participant.owner.retire();
+							if (participant.owner) participant.owner.retire();
+							else retiredSignalOwnerIdentities.add(participant.signalOwner);
 						} catch (error) {
 							failure ??= { error };
 						}
@@ -138,7 +156,8 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 				}
 			} finally {
 				participants?.clear();
-				owner.retire();
+				if (owner) owner.retire();
+				else retiredSignalOwnerIdentities.add(signalOwner);
 				options.streamedHydration?.suspend();
 				wake?.(false);
 				wake = undefined;
@@ -155,11 +174,11 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 		waiting = new Promise<boolean>((resolve) => {
 			wake = resolve;
 		});
-		owner.freeze();
+		owner?.freeze();
 		if (participants !== undefined) {
 			for (const participant of participants) {
 				try {
-					participant.owner.freeze();
+					participant.owner?.freeze();
 				} finally {
 					participant.streamedHydration?.suspend();
 				}
@@ -178,11 +197,11 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 			return;
 		}
 		frozen = false;
-		owner.resume();
+		owner?.resume();
 		if (disposed || frozen) return;
 		if (participants !== undefined) {
 			for (const participant of participants) {
-				participant.owner.resume();
+				participant.owner?.resume();
 				if (disposed || frozen) return;
 			}
 		}
@@ -191,6 +210,16 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 		wake = undefined;
 		waiting = undefined;
 	};
+	const stopObservingOwner = observeSignalOwnerLifecycle((create) => {
+		if (disposed) return;
+		createOwner = create;
+		owner = create(signalOwner);
+		if (frozen) owner.freeze();
+		for (const participant of participants ?? []) {
+			participant.owner = create(participant.signalOwner);
+			if (frozen) participant.owner.freeze();
+		}
+	});
 	view.addEventListener('pagehide', hide);
 	view.addEventListener('pageshow', show);
 	const unregister = registerSignalDocumentLifecycle(document, registration);

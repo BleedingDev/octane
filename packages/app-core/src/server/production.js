@@ -609,7 +609,9 @@ export function createHandler(manifest, deps) {
 			} = await prerender(RootComponent, undefined, {
 				nonce: nonce ?? undefined,
 				headChannel: 'separate',
-				...(streamedSignals === undefined ? {} : { streamedSignals }),
+				...(streamedSignals === undefined
+					? {}
+					: { streamedSignals, externalSnapshots: { documentId: streamedSignals.documentId } }),
 				...(independentHydration === undefined ? {} : { independentHydration }),
 				signal: context.request.signal,
 				onError(/** @type {unknown} */ error) {
@@ -631,7 +633,9 @@ export function createHandler(manifest, deps) {
 			},
 			nonce: nonce ?? undefined,
 			headChannel: 'separate',
-			...(streamedSignals === undefined ? {} : { streamedSignals }),
+			...(streamedSignals === undefined
+				? {}
+				: { streamedSignals, externalSnapshots: { documentId: streamedSignals.documentId } }),
 			...(independentHydration === undefined ? {} : { independentHydration }),
 			// Fires before the shell is written, so the metadata is in hand before
 			// the template prefix (which carries `<head>`) is composed below.

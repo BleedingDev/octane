@@ -178,7 +178,10 @@ async function runClientEntry(
 				name: 'client-entry-module-boundaries',
 				setup(builder) {
 					builder.onResolve(
-						{ filter: /^(?:@fixture\/|octane\/hydration(?:\/streamed-signals)?$)/ },
+						{
+							filter:
+								/^(?:@fixture\/|octane\/hydration(?:\/(?:streamed-signals|document-lifecycle))?$)/,
+						},
 						({ path }) => ({
 							path,
 							namespace: 'fixture',
@@ -194,11 +197,13 @@ async function runClientEntry(
 									? `globalThis.imports.push('hydration'); export const bootstrapIndependentHydration = globalThis.bootstrap; export const initializeHydrationEventCapture = globalThis.capture;`
 									: path === 'octane/hydration/streamed-signals'
 										? `globalThis.imports.push('streamed-signals'); export const bootstrapStreamedSignalHydration = globalThis.bootstrapSignals; export const installSignalDocumentLifecycle = globalThis.installLifecycle;`
-										: path === '@fixture/widget'
-											? `globalThis.imports.push('widget'); export default globalThis.activateWidget;`
-											: path === '@fixture/pre-hydrate'
-												? 'export default globalThis.finishIslands;'
-												: "globalThis.pages.push('page'); globalThis.readPage(); export default function Page() {}",
+										: path === 'octane/hydration/document-lifecycle'
+											? `globalThis.imports.push('document-lifecycle'); export const installSignalDocumentLifecycle = globalThis.installLifecycle;`
+											: path === '@fixture/widget'
+												? `globalThis.imports.push('widget'); export default globalThis.activateWidget;`
+												: path === '@fixture/pre-hydrate'
+													? 'export default globalThis.finishIslands;'
+													: "globalThis.pages.push('page'); globalThis.readPage(); export default function Page() {}",
 					}));
 				},
 			},
@@ -376,7 +381,7 @@ describe('bundler-neutral app codegen', () => {
 	});
 
 	it.each(['host', 'islands'] as const)(
-		'keeps production identity-only documents on the owner-free renderer path (%s entry)',
+		'keeps production identity-only documents free of streamed hydration while preserving restore checks (%s entry)',
 		async (entryMode) => {
 			const app = await runClientEntry('none', {
 				entryMode,
@@ -391,7 +396,7 @@ describe('bundler-neutral app codegen', () => {
 			});
 			try {
 				expect(app.imports).toEqual(
-					entryMode === 'islands' ? ['hydration', 'streamed-signals'] : ['streamed-signals'],
+					entryMode === 'islands' ? ['hydration', 'document-lifecycle'] : ['document-lifecycle'],
 				);
 				expect(app.lifecycles).toHaveLength(1);
 				expect(app.pages).toEqual(entryMode === 'host' ? ['page'] : []);
@@ -405,6 +410,9 @@ describe('bundler-neutral app codegen', () => {
 						: [],
 				);
 				expect(app.owners).toEqual(entryMode === 'host' ? [undefined] : []);
+				app.transition('pagehide', true);
+				app.transition('pageshow', true);
+				expect(app.reloads).toEqual([]);
 				app.transition('pagehide', true);
 				app.target.ownerDocument.getElementById('__octane_data')!.textContent = '{}';
 				app.transition('pageshow', true);

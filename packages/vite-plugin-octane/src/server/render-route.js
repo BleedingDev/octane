@@ -284,7 +284,9 @@ export async function handleRenderRoute(
 			},
 			nonce: nonce ?? undefined,
 			headChannel: 'separate',
-			...(streamedSignals === undefined ? {} : { streamedSignals }),
+			...(streamedSignals === undefined
+				? {}
+				: { streamedSignals, externalSnapshots: { documentId: streamedSignals.documentId } }),
 			...(independentHydration === undefined ||
 			clientBuild?.capabilities.independentHydration === false
 				? {}

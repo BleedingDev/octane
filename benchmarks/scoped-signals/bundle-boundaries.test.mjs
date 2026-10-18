@@ -21,6 +21,10 @@ import { verifyScenario } from '../bundle-size/verify-reachability.mjs';
 import { generateStylexCSS, transformStylex } from '../../packages/stylex/src/transform.js';
 import { measureOpaqueAttributes } from './opaque-attributes.mjs';
 import {
+	create_client_entry_source,
+	create_islands_entry_source,
+} from '../../packages/app-core/src/codegen.js';
+import {
 	BUNDLE_CASES,
 	baselineUnavailableReason,
 	entrySource,
@@ -29,6 +33,60 @@ import {
 	verifyOrdinaryEngineOutput,
 	verifyTransitionBoundary,
 } from './bundle-boundaries.mjs';
+
+test('identity-only documents load lifecycle handling without the signals engine', async (t) => {
+	for (const [mode, generate] of [
+		['host', create_client_entry_source],
+		['islands', create_islands_entry_source],
+	]) {
+		await t.test(mode, async () => {
+			const bundle = await build({
+				stdin: {
+					contents: generate({
+						clientBuildId: 'identity-only-build',
+						runtimeModuleId: path.resolve('packages/app-core/src/client-entry-runtime.js'),
+					}),
+					resolveDir: process.cwd(),
+				},
+				bundle: true,
+				splitting: true,
+				write: false,
+				outdir: 'unused-lifecycle-bundle',
+				minify: true,
+				metafile: true,
+				format: 'esm',
+				platform: 'browser',
+				target: 'es2022',
+				legalComments: 'none',
+				tsconfigRaw: { compilerOptions: {} },
+				define: { 'process.env.NODE_ENV': '"production"', __OCTANE_PROFILE_ENABLED__: 'false' },
+			});
+			const outputs = bundle.metafile.outputs;
+			const lifecycle = Object.keys(outputs).find((file) => file.includes('/document-lifecycle-'));
+			assert.ok(lifecycle, 'The generated document has a separately loadable lifecycle entry.');
+			const pending = [lifecycle];
+			const loaded = new Set();
+			while (pending.length) {
+				const file = pending.pop();
+				if (loaded.has(file)) continue;
+				loaded.add(file);
+				for (const dependency of outputs[file].imports) {
+					if (!dependency.external && dependency.kind !== 'dynamic-import') {
+						pending.push(dependency.path);
+					}
+				}
+				for (const [input, contribution] of Object.entries(outputs[file].inputs)) {
+					if (contribution.bytesInOutput === 0) continue;
+					assert.doesNotMatch(
+						input,
+						/\/signals\/(?:engine|facade)\.ts$|\/hydration\/streamed-signals\.ts$/,
+						'Installing identity-only lifecycle handling must not download signal hydration or execution.',
+					);
+				}
+			}
+		});
+	}
+});
 
 test('opaque scalar rows do not activate signal owner allocations', async (t) => {
 	const directory = path.resolve('packages/octane');

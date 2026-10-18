@@ -53,6 +53,8 @@ import { runAsDeclaredServerSignalReader as readAsDeclared } from './query-attem
 export { isSignalHandle, isWritableSignal } from './handle-protocol.js';
 import {
 	captureSignalOwner,
+	assertSignalDocumentOwner,
+	retiredSignalOwnerIdentities as retiredIdentities,
 	currentExplicitSignalOwner,
 	currentSignalOwner,
 	installSignalOwnerRetirement,
@@ -86,7 +88,6 @@ import type {
 
 const identityScopes = new WeakMap<object, OwnerScope>();
 const scopeOwners = new WeakMap<OwnerScope, SignalOwner>();
-const retiredIdentities = new WeakSet<object>();
 
 registerEarlySignalHydration();
 const documentInstances = new WeakMap<object, Set<object>>();
@@ -203,36 +204,40 @@ function streamedScope(
 	return existingIdentityScope(isRendererOwner(target) ? target.instanceOwner : target);
 }
 
-installSignalOwnerRetirement((owner) => {
-	if (isScope(owner)) return;
-	const identity = isRendererOwner(owner) ? owner.instanceOwner : owner;
-	if (isRendererOwner(owner)) {
-		const document = instanceDocuments.get(identity);
-		if (document) documentInstances.get(document)?.delete(identity);
-		instanceDocuments.delete(identity);
-	} else {
-		const instances = documentInstances.get(identity);
-		if (instances) {
-			for (const instance of instances) {
-				retiredIdentities.add(instance);
-				const instanceScope = identityScopes.get(instance);
-				if (instanceScope) {
-					identityScopes.delete(instance);
-					scopeOwners.delete(instanceScope);
-					instanceScope.dispose();
+installSignalOwnerRetirement(
+	(owner) => {
+		if (isScope(owner)) return;
+		const identity = isRendererOwner(owner) ? owner.instanceOwner : owner;
+		if (isRendererOwner(owner)) {
+			const document = instanceDocuments.get(identity);
+			if (document) documentInstances.get(document)?.delete(identity);
+			instanceDocuments.delete(identity);
+		} else {
+			const instances = documentInstances.get(identity);
+			if (instances) {
+				for (const instance of instances) {
+					retiredIdentities.add(instance);
+					const instanceScope = identityScopes.get(instance);
+					if (instanceScope) {
+						identityScopes.delete(instance);
+						scopeOwners.delete(instanceScope);
+						instanceScope.dispose();
+					}
+					instanceDocuments.delete(instance);
 				}
-				instanceDocuments.delete(instance);
+				documentInstances.delete(identity);
 			}
-			documentInstances.delete(identity);
 		}
-	}
-	retiredIdentities.add(identity);
-	const scope = identityScopes.get(identity);
-	if (!scope) return;
-	identityScopes.delete(identity);
-	scopeOwners.delete(scope);
-	scope.dispose();
-}, supersedeOwner);
+		retiredIdentities.add(identity);
+		const scope = identityScopes.get(identity);
+		if (!scope) return;
+		identityScopes.delete(identity);
+		scopeOwners.delete(scope);
+		scope.dispose();
+	},
+	supersedeOwner,
+	createSignalOwnerLifecycle,
+);
 
 /** A query$ re-selects from new render inputs; a writable or asynchronous derived cell cannot. */
 function supersedeOwner(owner: SignalOwner): boolean {
@@ -251,7 +256,7 @@ function supersedeOwner(owner: SignalOwner): boolean {
 
 /** @internal A document may freeze read work without retiring data or accepted writes. */
 export function createSignalOwnerLifecycle(owner: SignalOwner) {
-	if (isRendererOwner(owner)) throw new TypeError(formatClientError(157));
+	assertSignalDocumentOwner(owner);
 	let barrier: Promise<void> | undefined;
 	let release: (() => void) | undefined;
 	let disposed = false;

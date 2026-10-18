@@ -120,7 +120,8 @@
       "types": "./src/compiler/valdi.d.ts"
     },
     "./strong/jsx-runtime": "./src/jsx-runtime-strong.d.ts",
-    "./strong/jsx-dev-runtime": "./src/jsx-runtime-strong.d.ts"
+    "./strong/jsx-dev-runtime": "./src/jsx-runtime-strong.d.ts",
+    "./hydration/document-lifecycle": "./src/hydration/document-lifecycle.ts"
   },
   "publishConfig": {
     "access": "public",
@@ -384,6 +385,11 @@
       },
       "./strong/jsx-dev-runtime": {
         "types": "./dist/jsx-runtime-strong.d.ts"
+      },
+      "./hydration/document-lifecycle": {
+        "types": "./dist/hydration/document-lifecycle.d.ts",
+        "node": "./dist/node/hydration/document-lifecycle.js",
+        "default": "./dist/hydration/document-lifecycle.js"
       }
     }
   },

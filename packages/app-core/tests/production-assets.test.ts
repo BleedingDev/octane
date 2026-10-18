@@ -1,5 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
+import * as Server from 'octane/server';
+import { prerender } from 'octane/static';
+import { loadCompiledFixtureSource } from '../../octane/tests/_server-fixture.js';
 import { OCTANE_NONCE_STATE_KEY } from '../src/constants.js';
 import { RenderRoute, ServerRoute } from '../src/routes.js';
 import { createHandler } from '../src/server/production.js';
@@ -213,6 +216,73 @@ function assetHrefs(html: string, rel: 'stylesheet' | 'modulepreload') {
 }
 
 describe.each(['buffered', 'streaming'] as const)('%s production route assets', (render) => {
+	it('renders external snapshots under the response document authority', async () => {
+		const { Remote } = loadCompiledFixtureSource(
+			`export function Remote(props) { return <strong data-external="production">{props.label}</strong>; }`,
+			{ id: '/remote/Production.tsx', mode: 'server', compileOptions: { dev: false } },
+		);
+		const authority = { publisherBuildId: 'external-production', runtimeABI: 1 as const };
+		const requests: Server.ExternalSnapshotRequest[] = [];
+		const boundary = Server.externalSnapshotBoundary({
+			authority,
+			component: Remote,
+			async snapshot(request) {
+				requests.push(request);
+				const prepared = await Server.prepareExternalSnapshotRequest(request, { authority });
+				try {
+					return await Server.renderExternalSnapshot(Remote, prepared);
+				} finally {
+					await Server.releasePreparedExternalSnapshotRequest(prepared);
+				}
+			},
+		});
+		const { Page } = loadCompiledFixtureSource(
+			`import {Boundary} from './publisher'; export function Page(props) { return <Boundary label={props.params.phase}/>; }`,
+			{
+				id: '/src/Page.tsrx',
+				mode: 'server',
+				compileOptions: { dev: false },
+				runtimeModules: { './publisher': { Boundary: boundary } },
+			},
+		);
+		const handler = createHandler(
+			{
+				routes: [new RenderRoute({ path: '/external/:phase', entry: ['Page', '/src/Page.tsrx'] })],
+				components: { '/src/Page.tsrx': { Page } },
+				layouts: {},
+				middlewares: [],
+				render,
+				clientBuild: {
+					version: 1,
+					buildId: 'production-host',
+					mode: 'production',
+					capabilities: { independentHydration: false },
+				},
+			},
+			{
+				htmlTemplate: TEMPLATE,
+				prerender,
+				renderToReadableStream: Server.renderToReadableStream,
+				executeServerFunction: Server.executeServerFunction,
+				createElement: Server.createElement,
+				Suspense: Server.Suspense,
+				ErrorBoundary: Server.ErrorBoundary,
+			},
+		);
+		const documents: string[] = [];
+		for (const label of ['first', 'second']) {
+			const response = await handler(new Request('https://octane.test/external/' + label));
+			expect(response.status).toBe(200);
+			const html = await response.text();
+			expect(html).toContain('<strong data-external="production">' + label + '</strong>');
+			const data = JSON.parse(html.match(/<script id="__octane_data"[^>]*>(.*?)<\/script>/)![1]);
+			expect(data.streamedSignals.buildId).toBe('production-host');
+			expect(requests.at(-1)?.documentId).toBe(data.streamedSignals.documentId);
+			documents.push(data.streamedSignals.documentId);
+		}
+		expect(documents[0]).not.toBe(documents[1]);
+	});
+
 	it('shares the completed build with SSR while assigning each response a separate document identity', async () => {
 		const manifest = makeManifest(render);
 		manifest.clientBuild = {

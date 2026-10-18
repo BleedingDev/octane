@@ -286,9 +286,9 @@ async function bootstrapDocumentLifecycle() {
   if (clientBuildId === null || !documentData?.streamedSignals) return;
   if (lifecycleBootstrap) return lifecycleBootstrap;
   lifecycleBootstrap = (async () => {
-    signalHydrationModule ??= await import('octane/hydration/streamed-signals');
+    const lifecycleModule = signalHydrationModule ?? await import('octane/hydration/document-lifecycle');
     if (incompatibleBuild) return;
-    documentLifecycle = signalHydrationModule.installSignalDocumentLifecycle({
+    documentLifecycle = lifecycleModule.installSignalDocumentLifecycle({
       document, buildId: clientBuildId, documentId: documentData.streamedSignals.documentId,
       ...(signalOwner === undefined ? {} : { signalOwner }),
       get streamedHydration() { return streamedHydration; },
