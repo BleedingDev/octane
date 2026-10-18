@@ -23,6 +23,8 @@
 //
 // `--work-only` collects the exact counters without timing. With the same
 // checkout as both trees it is the determinism control: every counter must match.
+// `--work-detail=octane-jsx:clear` also retains that operation's per-function
+// production coverage in meta.functionCalls. All operations and gates still run.
 //
 // The head tree is this checkout. Each tree's fixtures are built with its own
 // dependencies and served from its own dist: head on 5176/5177, base on 6176/6177.
@@ -33,6 +35,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { productionFunctionCalls } from '../lib/precise-work.mjs';
 import { pairedRatio, summarizeSamples, timingStatForJson } from '../lib/stats.mjs';
 import {
 	CANONICAL_OPS,
@@ -72,6 +75,14 @@ const FIXTURES = [
 	{ name: 'octane-tsrx', directory: 'octane-tsrx', head: 5176, base: 6176 },
 	{ name: 'octane-jsx', directory: 'octane-jsx', head: 5177, base: 6177 },
 ];
+const workDetail = options['work-detail'];
+if (
+	workDetail !== undefined &&
+	!FIXTURES.some((fixture) =>
+		CANONICAL_OPS.some((op) => workDetail === `${fixture.name}:${op.name}`),
+	)
+)
+	throw new Error('--work-detail must name an existing target:operation, such as octane-jsx:clear');
 const SIDES = ['base', 'head'];
 const exact = (value) => ({ median: value, min: value, samples: 1 });
 const treeOf = { base: BASE_TREE, head: HEAD_TREE };
@@ -258,6 +269,7 @@ async function countWork(fixture, side) {
 		});
 		const work = {};
 		const breakdown = {};
+		const functionCalls = {};
 		for (const op of CANONICAL_OPS) {
 			await ensureState(page, op.pre);
 			await page.evaluate(() => {
@@ -288,6 +300,8 @@ async function countWork(fixture, side) {
 				await new Promise((resolve) => setTimeout(resolve, 50));
 			}, op.click);
 			const coverage = await cdp.send('Profiler.takePreciseCoverage');
+			if (workDetail === `${fixture.name}:${op.name}`)
+				functionCalls[op.name] = productionFunctionCalls(coverage);
 			const dom = await page.evaluate(() => {
 				const { tally, count, observer } = window.__benchWork;
 				count(observer.takeRecords());
@@ -305,7 +319,7 @@ async function countWork(fixture, side) {
 			breakdown[op.name] = { calls, ...dom };
 		}
 		if (page.errors.length) throw new Error(page.errors.join('; '));
-		return { work, breakdown };
+		return { work, breakdown, functionCalls };
 	} finally {
 		await browser.close();
 	}
@@ -328,11 +342,14 @@ try {
 		console.error(`Pairing ${fixture.name} base/head × ${PAIRS}…`);
 		const timing = options['work-only'] ? { base: {}, head: {} } : await timeFixture(fixture);
 		for (const side of SIDES) {
-			const { work, breakdown } = await onSide(side, () => countWork(fixture, side));
+			const { work, breakdown, functionCalls } = await onSide(side, () => countWork(fixture, side));
 			payloads[side].targets.push({
 				name: fixture.name,
 				ops: { ...timing[side], ...work },
-				meta: { work: breakdown },
+				meta: {
+					work: breakdown,
+					...(Object.keys(functionCalls).length ? { functionCalls } : {}),
+				},
 			});
 		}
 	}
