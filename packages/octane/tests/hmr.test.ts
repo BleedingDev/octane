@@ -154,6 +154,7 @@ function webpackHotModule(
 	filename: string,
 	compileOptions: Record<string, unknown> = {},
 	runtimeModules: Record<string, Record<string, unknown>> = {},
+	fixtureOptions: { target?: string } = {},
 ) {
 	const data: Record<string, unknown> = {};
 	let dispose: ((data: Record<string, unknown>) => void) | undefined;
@@ -165,6 +166,7 @@ function webpackHotModule(
 			dispose = undefined;
 			module.accepted = false;
 			return loadCompiledFixtureSource(source, {
+				...fixtureOptions,
 				id: filename,
 				mode: 'client',
 				compileOptions: { hmr: 'webpack', ...compileOptions },
@@ -1206,69 +1208,119 @@ export function App(props) @{ <section>@if (props.visible) { <Slot component={pr
 		}
 	});
 
-	it.each([
-		'const Initial = Counter; capture(Initial);',
-		'const Initial = (() => Counter)(); capture(Initial);',
-		'const Initial = read(); function read() { return Counter; } capture(Initial);',
-		'const api = { read: () => Counter }; const Initial = api.read(); capture(Initial);',
-		'const api = { read: () => null }; api.read = () => Counter; const Initial = api.read(); capture(Initial);',
-		'const api = { read: () => Counter }; const Initial = api["read"](); capture(Initial);',
-		'const api = { get component() { return Counter; } }; const Initial = api.component; capture(Initial);',
-		'const api = { get component() { return Counter; } }; const { component: Initial } = api; capture(Initial);',
-		'const api = { read: () => Counter }; const { read } = api; const Initial = read(); capture(Initial);',
-		'const api = { get component() { capture(Counter); return null; } }; const copy = { ...api };',
-		'const api = { nested: { read: () => Counter } }; const alias = api; const nested = alias.nested; const invoke = nested.read; const Initial = invoke(); capture(Initial);',
-		'const api = { nested: { get component() { return Counter; } } }; const alias = api.nested; const Initial = alias.component; capture(Initial);',
-		'function f(flag) { if (flag) return () => Counter; return api.c; } const api = { get c() { return f(true)(); } }; const Initial = f(false); capture(Initial);',
-		'const api = { get component() { return Counter; } }; (({ component }) => capture(component))(api);',
-		'const api = { get component() { return Counter; } }; function f({ component } = api) { return component; } capture(f());',
-		'const it = { *[Symbol.iterator]() { yield Counter; } }; for (const C of it) capture(C);',
-	])('propagates an early hoisted component capture to its importer: %s', (capture) => {
-		let captured: ComponentBody<any> | undefined;
-		const hot = webpackHotModule(
-			'/src/early-hoisted-capture.tsrx',
-			{ dev: true },
-			{
-				'./capture': {
-					capture: (component: ComponentBody<any>) => {
-						captured = component;
-					},
-				},
-			},
-		);
-		const source = (version: number) => `import { useSignal$ } from 'octane/signals/client';
-import { capture } from './capture';
-${capture}
-export function Counter() @{ const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{'v${version}:' + count$.get() as string}</button> }`;
-		const importer = () =>
-			loadCompiledFixtureSource(
-				`import { Widget } from './widget'; export function Host() @{ <section><Widget /><span>host</span></section> }`,
-				{
-					id: '/src/early-capture-importer.tsrx',
-					mode: 'client',
-					runtimeModules: { './widget': { Widget: captured } },
-				},
-			)['Host'] as ComponentBody<any>;
-		hot.load(source(1), 'Counter');
-		expect(hot.accepted).toBe(false);
-		const r = mount(importer());
+	it('self-accepts a deep module aggregate without exhausting the compiler stack', () => {
+		const bindings = Array.from(
+			{ length: 1500 },
+			(_, index) =>
+				`const node${index} = { previous: ${index === 0 ? 'null' : `node${index - 1}`} };`,
+		).join('\n');
+		const source = (version: number) => `import { useState } from 'octane';
+${bindings}
+void node1499.previous;
+export function App() @{ const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{'v${version}:' + count as string}</button> }`;
+		const hot = webpackHotModule('/src/deep-module-aggregate.tsrx', { dev: true });
+		const initial = hot.load(source(1));
+		const r = mount(initial);
 		try {
+			expect(hot.accepted).toBe(true);
 			r.click('button');
-			r.click('button');
-			expect(r.find('button').textContent).toBe('v1:2');
-			hot.load(source(2), 'Counter');
-			expect(hot.accepted).toBe(false);
-			// The raw pre-canonical alias cannot receive a safe component handoff.
-			// Its importer must execute again instead of self-accepting stale UI.
-			expect(r.find('button').textContent).toBe('v1:2');
-			r.update(importer());
-			expect(r.find('button').textContent).toBe('v2:0');
-			r.click('button');
+			expect(r.find('button').textContent).toBe('v1:1');
+			expect(hot.load(source(2))).toBe(initial);
+			flushSync(() => {});
+			expect(hot.accepted).toBe(true);
+			expect(hot.invalidated).toBe(false);
 			expect(r.find('button').textContent).toBe('v2:1');
+			r.click('button');
+			expect(r.find('button').textContent).toBe('v2:2');
 		} finally {
 			r.unmount();
 		}
 	});
+
+	it.each(
+		[
+			'const Initial = Counter; capture(Initial);',
+			'const Initial = (() => Counter)(); capture(Initial);',
+			'const Initial = read(); function read() { return Counter; } capture(Initial);',
+			'const api = { read: () => Counter }; const Initial = api.read(); capture(Initial);',
+			'const api = { read: () => null }; api.read = () => Counter; const Initial = api.read(); capture(Initial);',
+			'const api = { read: () => Counter }; const Initial = api["read"](); capture(Initial);',
+			'const api = { get component() { return Counter; } }; const Initial = api.component; capture(Initial);',
+			'const api = { get component() { return Counter; } }; const { component: Initial } = api; capture(Initial);',
+			'const api = { read: () => Counter }; const { read } = api; const Initial = read(); capture(Initial);',
+			'const api = { get component() { capture(Counter); return null; } }; const copy = { ...api };',
+			'const api = { nested: { read: () => Counter } }; const alias = api; const nested = alias.nested; const invoke = nested.read; const Initial = invoke(); capture(Initial);',
+			'const api = { nested: { get component() { return Counter; } } }; const alias = api.nested; const Initial = alias.component; capture(Initial);',
+			'function f(flag) { if (flag) return () => Counter; return api.c; } const api = { get c() { return f(true)(); } }; const Initial = f(false); capture(Initial);',
+			'const api = { get component() { return Counter; } }; (({ component }) => capture(component))(api);',
+			'const api = { get component() { return Counter; } }; function f({ component } = api) { return component; } capture(f());',
+			'const it = { *[Symbol.iterator]() { yield Counter; } }; for (const C of it) capture(C);',
+			'const api = { get component() { return Counter; } }; function read(o) { return o.component; } capture(read(api));',
+			'const api = { read: () => Counter }; function call(o) { return o.read(); } capture(call(api));',
+			'const api = { get component() { return Counter; } }; ((o) => capture(o.component))(api);',
+			'const api = { get component() { return Counter; } }; (() => { const alias = api; capture(alias.component); })();',
+			'const api = { get component() { return Counter; } }; function f() { const alias = api; return alias.component; } capture(f());',
+			'const api = { get component() { return Counter; } }; function f(o = api) { return o.component; } capture(f());',
+			'const api = { get component() { return Counter; } }; { const alias = api; capture(alias.component); }',
+			'const api = { get component() { return Counter; } }; function f() { return arguments[0].component; } capture(f(api));',
+			'const api = { get component() { return Counter; } }; function f() { let alias; alias = api; return alias.component; } capture(f());',
+		]
+			.map<{ capture: string; target?: string }>((capture) => ({ capture }))
+			.concat({
+				capture:
+					'function expose(value) { capture(Counter); return value; } @expose class Holder {}',
+				target: 'es2022',
+			}),
+	)(
+		'propagates an early hoisted component capture to its importer: $capture',
+		({ capture, target }) => {
+			let captured: ComponentBody<any> | undefined;
+			const hot = webpackHotModule(
+				'/src/early-hoisted-capture.tsrx',
+				{ dev: true },
+				{
+					'./capture': {
+						capture: (component: ComponentBody<any>) => {
+							captured = component;
+						},
+					},
+				},
+				target === undefined ? {} : { target },
+			);
+			const source = (version: number) => `import { useSignal$ } from 'octane/signals/client';
+import { capture } from './capture';
+${capture}
+export function Counter() @{ const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{'v${version}:' + count$.get() as string}</button> }`;
+			const importer = () =>
+				loadCompiledFixtureSource(
+					`import { Widget } from './widget'; export function Host() @{ <section><Widget /><span>host</span></section> }`,
+					{
+						id: '/src/early-capture-importer.tsrx',
+						mode: 'client',
+						runtimeModules: { './widget': { Widget: captured } },
+					},
+				)['Host'] as ComponentBody<any>;
+			hot.load(source(1), 'Counter');
+			expect(hot.accepted).toBe(false);
+			const r = mount(importer());
+			try {
+				r.click('button');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v1:2');
+				hot.load(source(2), 'Counter');
+				expect(hot.accepted).toBe(false);
+				// The raw pre-canonical alias cannot receive a safe component handoff.
+				// Its importer must execute again instead of self-accepting stale UI.
+				expect(r.find('button').textContent).toBe('v1:2');
+				r.update(importer());
+				expect(r.find('button').textContent).toBe('v2:0');
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v2:1');
+			} finally {
+				r.unmount();
+			}
+		},
+	);
 
 	it.each([
 		{ declaration: 'export default memo(Counter);', exported: 'default' },

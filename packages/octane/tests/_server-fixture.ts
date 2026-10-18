@@ -7,6 +7,8 @@
  * and the one unavoidable `new Function` boundary.
  */
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import ts from 'typescript';
 import { compile } from 'octane/compiler';
@@ -37,6 +39,8 @@ export interface CompiledFixtureSourceOptions {
 	compileOptions?: Record<string, unknown>;
 	/** Self-contained external modules used by custom-renderer fixtures. */
 	runtimeModules?: Readonly<Record<string, CompiledFixtureModule>>;
+	/** Optional host toolchain target for syntax such as standard decorators. */
+	target?: string;
 	/** Host-provided import.meta fields, including the real bundler HMR callbacks. */
 	importMeta?: Readonly<Record<string, unknown>>;
 }
@@ -67,8 +71,30 @@ export function loadCompiledFixtureSource<T extends CompiledFixtureModule = Comp
 		...options.compileOptions,
 		mode,
 	});
+	// Run host syntax lowering outside the DOM realm: esbuild expects Node's
+	// TextEncoder and Uint8Array to share a realm. The default loader is unchanged.
+	const executable =
+		options.target === undefined
+			? code
+			: execFileSync(
+					process.execPath,
+					[
+						'--input-type=commonjs',
+						'--eval',
+						`const { transformSync } = require(process.argv[1]);
+const { readFileSync } = require('node:fs');
+process.stdout.write(transformSync(readFileSync(0, 'utf8'), {
+	loader: 'ts', target: process.argv[2], format: 'esm', sourcefile: process.argv[3],
+}).code);`,
+						createRequire(import.meta.url).resolve('esbuild'),
+						options.target,
+						id,
+					],
+					{ input: code, encoding: 'utf8' },
+				);
+
 	return evaluateCompiledFixtureCode<T>(
-		code,
+		executable,
 		id,
 		mode,
 		options.runtimeModules,

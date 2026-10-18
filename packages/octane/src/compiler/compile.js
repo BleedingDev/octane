@@ -9797,28 +9797,37 @@ function collectHotComponentExportFlows(input) {
 		// Complete each value's reachability query independently. A partial
 		// answer from a cycle cannot safely be cached for another entry point.
 		const seen = new Set();
-		const visit = (node, parent, key) => {
-			if (node === null || typeof node !== 'object' || seen.has(node)) return -Infinity;
+		const pending = [[value, undefined, undefined]];
+		let latest = -Infinity;
+		while (pending.length) {
+			const [node, parent, key] = pending.pop();
+			if (node === null || typeof node !== 'object' || seen.has(node)) continue;
 			seen.add(node);
-			if (Array.isArray(node))
-				return node.reduce(
-					(latest, child) => Math.max(latest, visit(child, parent, key)),
-					-Infinity,
-				);
-			if (node.type === 'ImportDeclaration' || node.type === 'ExportSpecifier') return -Infinity;
-			let latest = -Infinity;
+			if (aggregateStarts.has(node)) {
+				latest = Math.max(latest, aggregateStarts.get(node));
+				continue;
+			}
+			if (Array.isArray(node)) {
+				for (const child of node) pending.push([child, parent, key]);
+				continue;
+			}
+			if (node.type === 'ImportDeclaration' || node.type === 'ExportSpecifier') continue;
 			if (rootReference(node) && isIdentifierReference(node, parent, key, lexical)) {
 				const component = components.get(node.name);
-				if (component) return component.start;
-				latest = visit(bindings.get(node.name)?.item.init ?? opaqueDeclarations.get(node.name));
+				if (component) latest = Math.max(latest, component.start);
+				else
+					pending.push([
+						bindings.get(node.name)?.item.init ?? opaqueDeclarations.get(node.name),
+						undefined,
+						undefined,
+					]);
 			}
 			for (const childKey in node) {
-				if (!AST_WALK_SKIP_KEYS.has(childKey))
-					latest = Math.max(latest, visit(node[childKey], node, childKey));
+				const child = node[childKey];
+				if (!AST_WALK_SKIP_KEYS.has(childKey) && child !== null && typeof child === 'object')
+					pending.push([child, node, childKey]);
 			}
-			return latest;
-		};
-		const latest = visit(value);
+		}
 		aggregateStarts.set(value, latest);
 		return latest;
 	};
@@ -9851,22 +9860,27 @@ function collectHotComponentExportFlows(input) {
 		// closures without trusting a selected property shape; unrelated early
 		// property reads and assigned closures also conservatively propagate.
 		const pattern = node.type === 'VariableDeclarator' ? node.id : node.left;
-		const destructuring = pattern?.type === 'ObjectPattern' || pattern?.type === 'ArrayPattern';
+		const capturesPattern =
+			pattern?.type === 'ObjectPattern' ||
+			pattern?.type === 'ArrayPattern' ||
+			(pattern?.type === 'Identifier' && !rootReference(pattern));
 		const aggregateKey =
-			node.type === 'MemberExpression'
-				? 'object'
-				: node.type === 'SpreadElement'
-					? 'argument'
-					: node.type === 'VariableDeclarator' && destructuring
-						? 'init'
-						: node.type === 'ForOfStatement'
-							? 'right'
-							: node.type === 'AssignmentPattern' && destructuring
+			node.type === 'Decorator'
+				? 'expression'
+				: node.type === 'MemberExpression'
+					? 'object'
+					: node.type === 'SpreadElement'
+						? 'argument'
+						: node.type === 'VariableDeclarator' && capturesPattern
+							? 'init'
+							: node.type === 'ForOfStatement'
 								? 'right'
-								: node.type === 'AssignmentExpression' &&
-									  (destructuring || node.left.type === 'MemberExpression')
+								: node.type === 'AssignmentPattern' && capturesPattern
 									? 'right'
-									: null;
+									: node.type === 'AssignmentExpression' &&
+										  (capturesPattern || node.left.type === 'MemberExpression')
+										? 'right'
+										: null;
 		if (
 			!aggregate &&
 			aggregateKey &&
@@ -9892,8 +9906,7 @@ function collectHotComponentExportFlows(input) {
 				const executing = new Set([...active, callee]);
 				const callPosition = position ?? node.start;
 				if (
-					(callee.params.some((param) => param.type !== 'Identifier') &&
-						earlyCapture(node.arguments, callPosition, new Set(), node, 'arguments', true)) ||
+					earlyCapture(node.arguments, callPosition, new Set(), node, 'arguments', true) ||
 					earlyCapture(callee.params, callPosition, executing, callee, 'params') ||
 					earlyCapture(callee.body, callPosition, executing, callee, 'body')
 				)
