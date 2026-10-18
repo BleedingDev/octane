@@ -9791,14 +9791,15 @@ function collectHotComponentExportFlows(input) {
 	// Function bodies read the canonical binding when called, not where they
 	// are declared. Only evaluation before that binding initializes can retain
 	// a raw component; follow local calls and IIFEs at their call-site position.
-	const earlyCapture = (node, position, active = new Set(), parent, key) => {
+	const earlyCapture = (node, position, active = new Set(), parent, key, aggregate = false) => {
 		if (node === null || typeof node !== 'object') return false;
 		if (Array.isArray(node))
-			return node.some((child) => earlyCapture(child, position, active, parent, key));
+			return node.some((child) => earlyCapture(child, position, active, parent, key, aggregate));
 		if (
-			node.type === 'FunctionDeclaration' ||
-			node.type === 'FunctionExpression' ||
-			node.type === 'ArrowFunctionExpression' ||
+			(!aggregate &&
+				(node.type === 'FunctionDeclaration' ||
+					node.type === 'FunctionExpression' ||
+					node.type === 'ArrowFunctionExpression')) ||
 			node.type === 'ImportDeclaration' ||
 			node.type === 'ExportSpecifier'
 		)
@@ -9808,6 +9809,33 @@ function collectHotComponentExportFlows(input) {
 			isIdentifierReference(node, parent, key, lexical) &&
 			components.has(node.name) &&
 			(position ?? node.start) < components.get(node.name).start
+		)
+			return true;
+		if (aggregate && rootReference(node) && isIdentifierReference(node, parent, key, lexical)) {
+			const value = bindings.get(node.name)?.item.init ?? opaqueDeclarations.get(node.name);
+			if (value && !active.has(value))
+				return earlyCapture(
+					value,
+					position,
+					new Set([...active, value]),
+					undefined,
+					undefined,
+					true,
+				);
+		}
+		// A member can be assigned a new closure after its initial object shape.
+		if (
+			node.type === 'AssignmentExpression' &&
+			node.left.type === 'MemberExpression' &&
+			earlyCapture(node.right, position ?? node.start, active, node, 'right', true)
+		)
+			return true;
+		// A local aggregate may expose an executing method/getter through aliases
+		// or rewritten properties. Inspect its reachable closures without trusting
+		// a selected property shape; unrelated early property reads also propagate.
+		if (
+			node.type === 'MemberExpression' &&
+			earlyCapture(node.object, position ?? node.start, active, node, 'object', true)
 		)
 			return true;
 		if (node.type === 'CallExpression') {
@@ -9836,7 +9864,10 @@ function collectHotComponentExportFlows(input) {
 			}
 		}
 		for (const key in node) {
-			if (!AST_WALK_SKIP_KEYS.has(key) && earlyCapture(node[key], position, active, node, key))
+			if (
+				!AST_WALK_SKIP_KEYS.has(key) &&
+				earlyCapture(node[key], position, active, node, key, aggregate)
+			)
 				return true;
 		}
 		return false;

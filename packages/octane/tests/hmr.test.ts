@@ -308,6 +308,19 @@ describe('hmr — runtime wrapper', () => {
 			local: 'const Child = Helper;',
 			after: '',
 		},
+		{
+			name: 'member helper evaluated only during rendering',
+			before: 'const api = { read: () => Helper }; function deferred() { return api.read(); }',
+			local: 'const Child = api.read();',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'getter evaluated only during rendering',
+			before:
+				'const api = { get component() { return Helper; } }; function deferred() { return api.component; }',
+			local: 'const Child = api.component;',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
 	])(
 		'self-accepts deferred component references through $name',
 		({ name, before, local, after }) => {
@@ -519,7 +532,7 @@ export function Counter(props) @{ const count$ = useSignal$(0); props.capture(pr
 			const pending = new Promise<boolean>((done) => {
 				resolve = done;
 			});
-			const gate: { ready: Promise<boolean>; failure?: Error } = { ready };
+			const gate: { ready: Promise<boolean>; failure?: Error | undefined } = { ready };
 			const signals = new Map<string, ClientSignals.WritableSignal<number>>();
 			const props = {
 				gate,
@@ -592,7 +605,7 @@ export function Counter() @{ ${counter.replace('PREFIX', `'v${version}:'`)} }`;
 			const pending = new Promise<boolean>((done) => {
 				resolve = done;
 			});
-			const gate: { ready: Promise<boolean>; failure?: Error } = { ready };
+			const gate: { ready: Promise<boolean>; failure?: Error | undefined } = { ready };
 			const r = mount(initial, { gate });
 			try {
 				await Promise.resolve();
@@ -1197,6 +1210,12 @@ export function App(props) @{ <section>@if (props.visible) { <Slot component={pr
 		'const Initial = Counter; capture(Initial);',
 		'const Initial = (() => Counter)(); capture(Initial);',
 		'const Initial = read(); function read() { return Counter; } capture(Initial);',
+		'const api = { read: () => Counter }; const Initial = api.read(); capture(Initial);',
+		'const api = { read: () => null }; api.read = () => Counter; const Initial = api.read(); capture(Initial);',
+		'const api = { read: () => Counter }; const Initial = api["read"](); capture(Initial);',
+		'const api = { get component() { return Counter; } }; const Initial = api.component; capture(Initial);',
+		'const api = { nested: { read: () => Counter } }; const alias = api; const nested = alias.nested; const invoke = nested.read; const Initial = invoke(); capture(Initial);',
+		'const api = { nested: { get component() { return Counter; } } }; const alias = api.nested; const Initial = alias.component; capture(Initial);',
 	])('propagates an early hoisted component capture to its importer: %s', (capture) => {
 		let captured: ComponentBody<any> | undefined;
 		const hot = webpackHotModule(
@@ -1222,7 +1241,7 @@ export function Counter() @{ const count$ = useSignal$(0); <button onClick={() =
 					mode: 'client',
 					runtimeModules: { './widget': { Widget: captured } },
 				},
-			).Host as ComponentBody<any>;
+			)['Host'] as ComponentBody<any>;
 		hot.load(source(1), 'Counter');
 		expect(hot.accepted).toBe(false);
 		const r = mount(importer());
@@ -1790,7 +1809,7 @@ export function App() @{ <button onClick={() => count$.set(count$.get() + 1)}>{c
 				flushSync(() => previousAccept?.(module));
 				return module;
 			};
-			const r = mount((await load('v1', 'first')).App);
+			const r = mount((await load('v1', 'first'))['App']);
 			try {
 				// Importers still hold the previous evaluation's bindings. An unchanged
 				// value keeps them current, so the module stays its own boundary.
@@ -2130,7 +2149,7 @@ export function App() @{ <button onClick={() => count$.set(count$.get() + 1)}>{c
 		const filename = '/src/Rebuilt.tsrx';
 		const server = loadCompiledFixtureSource(source('v1'), { id: filename, mode: 'server' });
 		const container = document.createElement('div');
-		container.innerHTML = renderToString(server.App, { server: true }).html;
+		container.innerHTML = renderToString(server['App'], { server: true }).html;
 		document.body.appendChild(container);
 		const serverNodes = [...container.querySelectorAll('*')];
 		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -2193,7 +2212,7 @@ export function App() @{ <button onClick={() => count$.set(count$.get() + 1)}>{c
 		const filename = '/src/Appended.tsrx';
 		const server = loadCompiledFixtureSource(source('v1'), { id: filename, mode: 'server' });
 		const container = document.createElement('div');
-		container.innerHTML = renderToString(server.App, { server: true }).html;
+		container.innerHTML = renderToString(server['App'], { server: true }).html;
 		document.body.appendChild(container);
 		const serverNodes = [...container.querySelectorAll('*')];
 		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

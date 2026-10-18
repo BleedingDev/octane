@@ -18,3 +18,5 @@ Router capture requires the server-load pending-state fix in TanStack/router#874
 Keep `octane/server` declarations usable without Node ambient types by isolating the unchanged Node stream adapter behind `octane/static`.
 
 Avoid mutating non-extensible hoisted component functions when adding development/HMR identity metadata.
+
+Propagate hot updates to importers when module evaluation can capture a hoisted component through local member calls, getters or assigned member closures before its canonical identity initializes. Early reads conservatively propagate when the same local aggregate closes over a later component, even if the selected property is unrelated; deferred reads during rendering remain eligible for hot replacement.
