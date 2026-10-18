@@ -81,3 +81,11 @@ export type {
 	SignalTraceEvent,
 	WritableSignal,
 } from './types.js';
+
+export {
+	__hotSignalModule,
+	__canonicalHotSignalComponent,
+	__registerHotSignalComponent,
+	__remountHotSignalComponent,
+} from './hot-declarations.js';
+export type { HotSignalModuleManifest, HotSignalModuleStamp } from './hot-declarations.js';

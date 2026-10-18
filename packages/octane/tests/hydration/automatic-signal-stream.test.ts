@@ -48,7 +48,9 @@ function streamedFrames(html: string): StreamedRendererFrame[] {
 
 function streamedTarget(html: string): Record<string, unknown> {
 	const frames = streamedFrames(html);
-	const selectionMatch = html.match(/v\.register\((\{.*?\})\);\}\)\(globalThis\);<\/script>/);
+	const selectionMatch = html.match(
+		/globalThis\.__octaneStreamedSignalSelections\.register\((\{.*?\})\);<\/script>/,
+	);
 	expect(selectionMatch).not.toBeNull();
 	return {
 		__octaneStreamedSignalSelections: {

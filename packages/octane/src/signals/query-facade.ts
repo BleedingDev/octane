@@ -1,3 +1,4 @@
+import type { HotSignalModuleStamp } from './hot-declarations.js';
 import { formatClientError } from '../error-codes.client.generated.js';
 import { createResourceCellWith, signalDeclarationSequence } from './engine.js';
 import { declarationKey, Descriptor, descriptorKey, signalOptionsKey } from './facade.js';
@@ -37,6 +38,7 @@ export function __queryAt<A, T>(
 	options?: QueryOptions & SignalOptions,
 	// Compiler-listed render values that select, load and options capture.
 	captures?: readonly unknown[],
+	stamp?: HotSignalModuleStamp,
 ): QuerySignal<T> {
 	if (typeof select !== 'function' || typeof load !== 'function') {
 		throw new TypeError(formatClientError(193));
@@ -77,6 +79,10 @@ export function __queryAt<A, T>(
 				declaring,
 			) as QuerySignal<T>,
 		site,
+		undefined,
+		stamp,
+		'__queryAt',
+		stamp ? (options?.kind ?? 'promise') : undefined,
 	);
 }
 

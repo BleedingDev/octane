@@ -17,6 +17,44 @@ export interface SignalDocumentLifecycleOptions {
 	readonly onMismatch?: () => void;
 }
 
+interface DocumentLifecycleParticipant {
+	readonly owner: ReturnType<typeof createSignalOwnerLifecycle>;
+	readonly streamedHydration: Pick<StreamedSignalResults, 'suspend'> | undefined;
+	readonly onRetire: () => void;
+}
+
+interface DocumentLifecycleRegistration {
+	readonly documentId: string;
+	join(
+		owner: SignalOwner,
+		streamedHydration: Pick<StreamedSignalResults, 'suspend'> | undefined,
+		onRetire: () => void,
+	): () => void;
+}
+
+const documentLifecycles = /* @__PURE__ */ new WeakMap<
+	Document,
+	Set<DocumentLifecycleRegistration>
+>();
+
+/** @internal Publishers borrow the host's identity check, never its data owner. */
+export function joinSignalDocumentLifecycle(options: {
+	readonly document: Document;
+	readonly documentId: string;
+	readonly signalOwner: SignalOwner;
+	readonly streamedHydration: Pick<StreamedSignalResults, 'suspend'> | undefined;
+	readonly onRetire: () => void;
+}): (() => void) | undefined {
+	// A manual renderer may opt out of document lifecycle handling entirely.
+	const registrations = documentLifecycles.get(options.document);
+	if (registrations === undefined) return;
+	for (const registration of registrations) {
+		if (registration.documentId === options.documentId)
+			return registration.join(options.signalOwner, options.streamedHydration, options.onRetire);
+	}
+	throw new TypeError(formatClientError(357));
+}
+
 /** Optional feature-local lifetime for one executing document, never an account manager. */
 export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleOptions) {
 	const document = options.document;
@@ -30,6 +68,34 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 	let disposed = false;
 	let waiting: Promise<boolean> | undefined;
 	let wake: ((active: boolean) => void) | undefined;
+	let participants: Set<DocumentLifecycleParticipant> | undefined;
+	const registration: DocumentLifecycleRegistration = {
+		documentId: options.documentId,
+		join(signalOwner, streamedHydration, onRetire) {
+			const participant = {
+				owner: createSignalOwnerLifecycle(signalOwner),
+				streamedHydration,
+				onRetire,
+			};
+			(participants ??= new Set()).add(participant);
+			try {
+				if (frozen) {
+					try {
+						participant.owner.freeze();
+					} finally {
+						streamedHydration?.suspend();
+					}
+				}
+			} catch (error) {
+				participants.delete(participant);
+				participant.owner.retire();
+				throw error;
+			}
+			return () => {
+				participants!.delete(participant);
+			};
+		},
+	};
 	const compatible = (): boolean => {
 		if (owner.retired || view.document !== document) return false;
 		try {
@@ -53,15 +119,45 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 		disposed = true;
 		view.removeEventListener('pagehide', hide);
 		view.removeEventListener('pageshow', show);
+		const registrations = documentLifecycles.get(document)!;
+		registrations.delete(registration);
+		if (registrations.size === 0) documentLifecycles.delete(document);
 		try {
 			// Unmount islands while their document data is still live. Retiring first
 			// would notify each island of the retirement and break its cleanups.
 			options.independentHydration?.();
 		} finally {
-			owner.retire();
-			options.streamedHydration?.suspend();
-			wake?.(false);
-			wake = undefined;
+			try {
+				if (participants !== undefined) {
+					let failure: { error: unknown } | undefined;
+					for (const participant of participants) {
+						// A native error boundary may rethrow during teardown. Finish each
+						// independent publisher before reporting the first failure.
+						try {
+							participant.onRetire();
+						} catch (error) {
+							failure ??= { error };
+						}
+						try {
+							participant.owner.retire();
+						} catch (error) {
+							failure ??= { error };
+						}
+						try {
+							participant.streamedHydration?.suspend();
+						} catch (error) {
+							failure ??= { error };
+						}
+					}
+					if (failure !== undefined) throw failure.error;
+				}
+			} finally {
+				participants?.clear();
+				owner.retire();
+				options.streamedHydration?.suspend();
+				wake?.(false);
+				wake = undefined;
+			}
 		}
 	};
 	const hide = (event: PageTransitionEvent): void => {
@@ -75,6 +171,15 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 			wake = resolve;
 		});
 		owner.freeze();
+		if (participants !== undefined) {
+			for (const participant of participants) {
+				try {
+					participant.owner.freeze();
+				} finally {
+					participant.streamedHydration?.suspend();
+				}
+			}
+		}
 		// Close the old stream permanently. A compatible restore starts unfinished
 		// idempotent reads under new attempts; it never replays a mutation.
 		options.streamedHydration?.suspend();
@@ -90,6 +195,12 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 		frozen = false;
 		owner.resume();
 		if (disposed || frozen) return;
+		if (participants !== undefined) {
+			for (const participant of participants) {
+				participant.owner.resume();
+				if (disposed || frozen) return;
+			}
+		}
 		options.independentHydration?.resume();
 		wake?.(true);
 		wake = undefined;
@@ -97,6 +208,9 @@ export function installSignalDocumentLifecycle(options: SignalDocumentLifecycleO
 	};
 	view.addEventListener('pagehide', hide);
 	view.addEventListener('pageshow', show);
+	let registrations = documentLifecycles.get(document);
+	if (registrations === undefined) documentLifecycles.set(document, (registrations = new Set()));
+	registrations.add(registration);
 	return {
 		signalOwner,
 		whenActive(): Promise<boolean> {

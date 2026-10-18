@@ -263,6 +263,7 @@ async function bootstrapIndependentIslands(target) {
   ) return;
   await bootstrapDocumentLifecycle();
   if (documentLifecycle && !await documentLifecycle.whenActive()) return;
+  signalOwner ??= documentLifecycle?.signalOwner;
   if (independentBootstrap) return independentBootstrap;
   independentBootstrap = ${hydrationModule}.then(async ({ bootstrapIndependentHydration }) => {
     if (incompatibleBuild) return;
@@ -294,7 +295,6 @@ async function bootstrapDocumentLifecycle() {
       get independentHydration() { return disposeIndependentHydration; },
       onMismatch() { incompatibleBuild = true; globalThis.location.reload(); },
     });
-    signalOwner = documentLifecycle.signalOwner;
   })();
   return lifecycleBootstrap;
 }
@@ -432,8 +432,8 @@ function withRootBoundary(content, boundary) {
       if (incompatibleBuild) return;
       streamedHydration = signalHydrationModule.bootstrapStreamedSignalHydration(data.streamedSignals);
       signalOwner = streamedHydration.signalOwner;
-      await bootstrapDocumentLifecycle();
     }
+    if (data.streamedSignals !== undefined) await bootstrapDocumentLifecycle();
     if (!data.entry) {
       console.error('[octane] Unable to hydrate: no route entry in #__octane_data.');
       return;
@@ -506,8 +506,12 @@ function withRootBoundary(content, boundary) {
 
     if (incompatibleBuild) return;
     if (documentLifecycle && !await documentLifecycle.whenActive()) return;
-    hydrateRoot(target, withRootBoundary(Content, rootBoundary), undefined,
-      signalOwner === undefined ? undefined : { signalOwner });
+    hydrateRoot(target, withRootBoundary(Content, rootBoundary), undefined, {
+      ...(signalOwner === undefined ? {} : { signalOwner }),
+      ...(data.streamedSignals === undefined ? {} : {
+        externalSnapshots: { documentId: data.streamedSignals.documentId },
+      }),
+    });
   } catch (error) {
     console.error('[octane] Failed to bootstrap client hydration.', error);
   }
@@ -568,8 +572,8 @@ export function create_islands_entry_source(options = {}) {
       if (incompatibleBuild) return;
       streamedHydration = signalHydrationModule.bootstrapStreamedSignalHydration(data.streamedSignals);
       signalOwner = streamedHydration.signalOwner;
-      await bootstrapDocumentLifecycle();
     }
+    if (data.streamedSignals !== undefined) await bootstrapDocumentLifecycle();
 
     // The shell stays server-owned: only its independent islands activate.
     await bootstrapIndependentIslands(target);

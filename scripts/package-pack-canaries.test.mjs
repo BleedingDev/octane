@@ -151,6 +151,32 @@ describe('packed JavaScript consumers', () => {
 		assert.match(source, /renderToString/);
 	});
 
+	for (const [format, render] of [
+		['CommonJS', renderPackedCommonjsConsumerSource],
+		['ESM', renderPackedEsmConsumerSource],
+	]) {
+		test(`${format} executes the packed snapshot lifecycle rather than only listing exports`, () => {
+			const source = render();
+			for (const operation of [
+				'server.externalSnapshotBoundary(',
+				'server.registerExternalSnapshotContext(',
+				'octane.serializeExternalSnapshotRequest(request)',
+				'server.decodeExternalSnapshotRequest(wire, authority)',
+				'server.prepareExternalSnapshotRequest(wire, { authority, signal })',
+				'server.renderExternalSnapshot(Remote, prepared)',
+				'octane.decodeExternalSnapshot(server.serializeExternalSnapshot(snapshot))',
+				'server.releasePreparedExternalSnapshotRequest(prepared)',
+			]) {
+				assert.ok(source.includes(operation), `${format} must exercise ${operation}`);
+			}
+			assert.match(source, /assert\.match\(html, \/host context:packed publisher\/\)/);
+			assert.match(source, /assert\.deepEqual\(disposed, decoded\)/);
+			assert.match(source, /lease\.signal\.aborted, true/);
+			assert.match(source, /publisherBuildId: 'foreign-publisher'/);
+			assert.match(source, /error => error === reason/);
+		});
+	}
+
 	test('compiles the TSRX draggable ESM entry through the Octane toolchain', () => {
 		const source = renderPackedDraggableEsmConsumerSource();
 		assert.match(source, /from '@octanejs\/draggable'/);
@@ -445,6 +471,39 @@ declare namespace NodeJS { interface Process { env: { NODE_ENV?: string } } }
 		assert.match(source, /invalidNavLinkRef/);
 		assert.match(source, /Parameters<typeof Bar<Datum, number>>/);
 	});
+
+	for (const [lane, render] of [
+		['source', renderPackedTsrxConsumerTypeProbe],
+		['strict browser', renderPackedStrictBrowserConsumerTypeProbe],
+	]) {
+		test(`${lane} checks snapshot ownership and native router declarations from public packages`, () => {
+			const source = render();
+			assert.match(source, /from 'octane\/server'/);
+			assert.match(source, /from '@octanejs\/tanstack-router'/);
+			assert.match(source, /SnapshotAssertNotAny<ExternalSnapshotRequest>/);
+			assert.match(source, /RootOptions\['externalSnapshots'\]/);
+			assert.match(source, /invalidSnapshotRootOptions: RootOptions/);
+			assert.match(source, /invalidRouterPublicContext: RouterRenderJsonRecord/);
+			assert.match(source, /invalidHtml: number = decodeExternalSnapshot\(wire\)\.html/);
+			assert.match(
+				source,
+				/prepared: PreparedExternalSnapshotRequest = await prepareExternalSnapshotRequest/,
+			);
+			assert.match(source, /await releasePreparedExternalSnapshotRequest\(prepared\)/);
+			for (const name of [
+				'assertDefaultRouterRenderHost',
+				'associateRouterRenderProfile',
+				'captureRouterRenderSnapshot',
+				'createRouterRenderRouteTree',
+				'disposeRouterRenderSnapshot',
+				'getRouterRenderProfile',
+				'registerRouterRenderProfile',
+				'restoreRouterRenderSnapshot',
+			]) {
+				assert.ok(source.includes(name), `${lane} must check ${name}`);
+			}
+		});
+	}
 
 	test('rejects TSRX parser diagnostics even when the checker exits successfully', () => {
 		const diagnostic =
@@ -1120,4 +1179,19 @@ describe('retainPackedCompilerCohort', () => {
 			syncBuiltinESMExports();
 		}
 	});
+});
+
+test('packed declaration probes retain publisher identity and hot manifest admission contracts', () => {
+	for (const source of [
+		renderPackedTsrxConsumerTypeProbe(),
+		renderPackedStrictBrowserConsumerTypeProbe(),
+	]) {
+		assert.match(source, /publisherBoundary as serverPublisherBoundary/);
+		assert.match(source, /SnapshotAssertNotAny<ReturnType<typeof publisherBoundary>>/);
+		assert.match(source, /SnapshotAssertNotAny<HotSignalModuleStamp>/);
+		assert.match(source, /factory: '__signalAt'/);
+		assert.match(source, /@ts-expect-error Publisher identity must remain a string/);
+		assert.match(source, /@ts-expect-error A module generation must remain a string/);
+		assert.match(source, /__registerHotSignalComponent, __remountHotSignalComponent/);
+	}
 });

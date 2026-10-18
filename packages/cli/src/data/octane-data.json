@@ -3540,6 +3540,91 @@
       "message": "CompiledOutlet requires a compiled component function with no returned renderable.",
       "runtime": ["client", "server"],
       "status": "active"
+    },
+    "347": {
+      "message": "Invalid native external snapshot payload or runtime ABI.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "348": {
+      "message": "External snapshot contexts require unique registered codecs and every required ancestor provider.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "349": {
+      "message": "External snapshot authority does not match its publisher, document, boundary, or request.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "350": {
+      "message": "External snapshot rendering requires a genuine, open request prepared for one render.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "351": {
+      "message": "External snapshot context cleanup exceeded its deadline.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "352": {
+      "message": "External snapshot load exceeded its boundary deadline.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "353": {
+      "message": "External snapshot request or cleanup produced multiple failures.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "354": {
+      "message": "External snapshots require a trusted document ID configured on the host renderer.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "355": {
+      "message": "An external snapshot boundary cannot change publisher authority during its mounted lifetime.",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "356": {
+      "message": "External snapshot boundary options must specify a native component, a snapshot transport, a finite positive timeout, and unique valid context keys.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "357": {
+      "message": "External snapshot and streamed signal document identities must match.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "358": {
+      "message": "External snapshot timeout must be finite and between 0 and 2147483647 milliseconds. Boundary timeouts must be greater than 0.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "359": {
+      "message": "A historical signal owner cannot change its module generation.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "360": {
+      "message": "The hot declaration no longer belongs to its native owner.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "361": {
+      "message": "The signal module generation is stale or already being installed.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "362": {
+      "message": "The hot declaration changed its native cell identity.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "363": {
+      "message": "The hot signal generation has no current native publisher admission.",
+      "runtime": ["client", "server"],
+      "status": "active"
     }
   },
   "strongDiagnostics": {

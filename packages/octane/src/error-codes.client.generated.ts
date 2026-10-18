@@ -317,6 +317,19 @@ type ClientErrorArguments = {
 	344: [];
 	345: [];
 	346: [];
+	347: [];
+	348: [];
+	349: [];
+	354: [];
+	355: [];
+	356: [];
+	357: [];
+	358: [];
+	359: [];
+	360: [];
+	361: [];
+	362: [];
+	363: [];
 };
 
 export function formatClientError<Code extends keyof ClientErrorArguments>(
@@ -1383,6 +1396,68 @@ export function formatClientError<Code extends keyof ClientErrorArguments>(
 			case 346:
 				return formatDevErrorMessage(
 					'CompiledOutlet requires a compiled component function with no returned renderable.',
+					args,
+				);
+			case 347:
+				return formatDevErrorMessage(
+					'Invalid native external snapshot payload or runtime ABI.',
+					args,
+				);
+			case 348:
+				return formatDevErrorMessage(
+					'External snapshot contexts require unique registered codecs and every required ancestor provider.',
+					args,
+				);
+			case 349:
+				return formatDevErrorMessage(
+					'External snapshot authority does not match its publisher, document, boundary, or request.',
+					args,
+				);
+			case 354:
+				return formatDevErrorMessage(
+					'External snapshots require a trusted document ID configured on the host renderer.',
+					args,
+				);
+			case 355:
+				return formatDevErrorMessage(
+					'An external snapshot boundary cannot change publisher authority during its mounted lifetime.',
+					args,
+				);
+			case 356:
+				return formatDevErrorMessage(
+					'External snapshot boundary options must specify a native component, a snapshot transport, a finite positive timeout, and unique valid context keys.',
+					args,
+				);
+			case 357:
+				return formatDevErrorMessage(
+					'External snapshot and streamed signal document identities must match.',
+					args,
+				);
+			case 358:
+				return formatDevErrorMessage(
+					'External snapshot timeout must be finite and between 0 and 2147483647 milliseconds. Boundary timeouts must be greater than 0.',
+					args,
+				);
+			case 359:
+				return formatDevErrorMessage(
+					'A historical signal owner cannot change its module generation.',
+					args,
+				);
+			case 360:
+				return formatDevErrorMessage(
+					'The hot declaration no longer belongs to its native owner.',
+					args,
+				);
+			case 361:
+				return formatDevErrorMessage(
+					'The signal module generation is stale or already being installed.',
+					args,
+				);
+			case 362:
+				return formatDevErrorMessage('The hot declaration changed its native cell identity.', args);
+			case 363:
+				return formatDevErrorMessage(
+					'The hot signal generation has no current native publisher admission.',
 					args,
 				);
 			default:

@@ -168,6 +168,148 @@ computations still require the signal engine. Dispose the browser bridge when
 its document owner ends, and keep initial-response streams finite; ongoing live
 updates need a separately managed connection.
 
+### Compose an external native snapshot
+
+`externalSnapshotBoundary` is available from `octane` in the browser and from
+`octane/server` on the server. It returns a native component. Its server version
+captures a request at that component's position, suspends while the supplied
+`snapshot(request, signal)` transport runs, and inserts the accepted publisher's
+HTML, scoped styles and head output through the normal render channels. The
+browser version adopts that output and activates its matching native component
+inside the existing parent root. It does not create a separate application root
+or fetch a new snapshot during hydration.
+
+The host explicitly opts in with `externalSnapshots: { documentId }` in its
+server render options and the same trusted value in `hydrateRoot` or
+`createRoot` options. Obtain this value from the host's accepted bootstrap
+metadata, not from the external boundary's DOM. Give each response a distinct
+document identity. If the host also uses `streamedSignals`, both document IDs
+must agree. `authority: { publisherBuildId, runtimeABI: 1 }` selects the matching
+publisher build; the native request also binds its document, boundary, owner
+and ID prefix. A reply must match the complete request before adoption.
+
+For example, this is the boundary used by a host whose publisher serves the
+matching server component. Compile the module for its respective server or
+browser target, as with any other Octane component:
+
+```ts
+import {
+	decodeExternalSnapshot,
+	externalSnapshotBoundary,
+	lazy,
+	serializeExternalSnapshotRequest,
+} from 'octane';
+
+export const Product = externalSnapshotBoundary({
+	authority: { publisherBuildId: 'product-build', runtimeABI: 1 },
+	component: lazy(() => import('./Product.tsrx').then((module) => module.Product)),
+	contextKeys: ['product-theme'],
+	timeoutMs: 5000,
+	async snapshot(request, signal) {
+		const response = await fetch('https://publisher.example/snapshot', {
+			method: 'POST',
+			body: serializeExternalSnapshotRequest(request),
+			signal: signal ?? null,
+		});
+		if (!response.ok) throw new Error('Publisher snapshot failed');
+		return decodeExternalSnapshot(await response.text());
+	},
+});
+```
+
+The publisher admits the request and restores its selected contexts **before**
+importing exposed component code. This follows the same prepare/render/release
+sequence as the native boundary tests:
+
+```ts
+import {
+	prepareExternalSnapshotRequest,
+	releasePreparedExternalSnapshotRequest,
+	renderExternalSnapshot,
+	serializeExternalSnapshot,
+} from 'octane/server';
+
+export async function renderProduct(request: Request) {
+	const prepared = await prepareExternalSnapshotRequest(await request.text(), {
+		authority: { publisherBuildId: 'product-build', runtimeABI: 1 },
+		signal: request.signal,
+		timeoutMs: 5000,
+	});
+	try {
+		const { Product } = await import('./Product.tsrx');
+		prepared.signal.throwIfAborted();
+		const snapshot = await renderExternalSnapshot(Product, prepared);
+		return new Response(serializeExternalSnapshot(snapshot), {
+			headers: { 'content-type': 'application/json' },
+		});
+	} finally {
+		await releasePreparedExternalSnapshotRequest(prepared);
+	}
+}
+```
+
+The example assumes the `product-theme` codec has already been registered in
+both server graphs. Register a shared physical native context with
+`registerExternalSnapshotContext(Theme, { key, encode, decode, validate?, dispose? })`.
+The returned function unregisters that codec when its registration owner ends.
+Only the boundary's `contextKeys` are encoded. A missing registration or an
+absent selected provider fails instead of substituting a context default.
+Register codecs before preparing a request; importing a codec from exposed code
+would run too late for admission.
+
+Decoders reconstruct the selected values, then optional validators inspect them
+with a reader that distinguishes an absent context from a present value.
+`initializeContexts(provide)` may synchronously add trusted endpoint-local
+providers; it cannot overwrite selected contexts or retain `provide` for later
+use. These providers add no component frames. In the browser, the component
+reads its live ancestor providers, rather than installing serialized values as
+permanent client context. The publisher's `useId()` calls use its boundary's
+external prefix instead of consuming IDs from the surrounding root.
+
+A prepared handle is opaque and permits one render. Copies, concurrent use,
+reuse and rendering after release are rejected. Its abort signal and deadline
+cover asynchronous context reconstruction, validation, the intervening import
+and rendering. Preparation
+uses the renderer's Suspense timeout by default; a finite positive `timeoutMs`
+overrides it, and `0` disables this preparation deadline. The boundary's own
+optional `timeoutMs` must be positive and aborts its transport waiter. An abort
+cannot undo JavaScript module evaluation, so check `prepared.signal` after an
+asynchronous import before using its result.
+
+Always release a prepared handle in `finally`, including after import failure.
+Release is idempotent, aborts its signal, retires its data owner and calls each
+successful context acquisition's disposer once in reverse acquisition order.
+Each disposer has a one-second cleanup bound. Late decoder results are also
+disposed; cleanup failures remain observable. The convenience overload
+`renderExternalSnapshot(component, wireRequest, options)` prepares and releases
+automatically, but its component has already been imported by the caller.
+
+Streamed results are isolated by publisher build, document and native owner,
+including sibling boundaries and host-owned signals. Removing a boundary
+retires its owned stream bridge; it does not reset a sibling or the host's data.
+A committed boundary keeps its publisher lease while Suspense or Activity hides
+its content, and releases it only when the boundary actually unmounts.
+This identity validation is not transport authentication or HTML sanitization.
+The host must select and authenticate a trusted publisher and serve matching
+compiled client code. Forward the native request and reply unchanged instead
+of rebuilding IDs, context payloads or HTML in the transport.
+
+For routed fragments, `@octanejs/tanstack-router/ssr/server` also exports
+`registerRouterRenderProfile`, `associateRouterRenderProfile`,
+`captureRouterRenderSnapshot`, `restoreRouterRenderSnapshot` and
+`disposeRouterRenderSnapshot`. These transfer an explicitly registered routing
+profile and JSON-safe public state into a routing-only tree, rather than
+rerunning application loaders or lifecycle hooks in the publisher. A context
+codec can capture, restore and dispose that request-owned router. Do not
+serialize the router instance or its executable options as ordinary props.
+
+Capture requires router-core's server-load lifecycle to publish `pending`
+before running loaders and remain pending until every overlapping load settles.
+The currently pinned router-core 1.171.34 does not provide that contract. This
+feature must adopt the owning server-load fix before publication. It is tracked
+in [TanStack/router#8740](https://github.com/TanStack/router/pull/8740) and
+[BleedingDev/router#1](https://github.com/BleedingDev/router/pull/1).
+
 ### Leading list ranges on an owned SSR host
 
 `getLeadingHydrationListRange(host)` from `octane/hydration` returns the first
@@ -655,9 +797,9 @@ second, renderer-free bootstrap entry:
 
 ```ts
 export default defineConfig({
-  router: {
-    routes: [new RenderRoute({ path: '/', entry: '/src/App.tsrx', hydrate: 'islands' })],
-  },
+	router: {
+		routes: [new RenderRoute({ path: '/', entry: '/src/App.tsrx', hydrate: 'islands' })],
+	},
 });
 ```
 
@@ -712,11 +854,11 @@ entry. A string selects a module's default (or first PascalCase) export; use an
 
 ```ts
 export default defineConfig({
-  rootBoundary: {
-    pending: '/src/RootPending.tsrx',
-    catch: ['RootCatch', '/src/RootCatch.tsrx'],
-  },
-  // ...router
+	rootBoundary: {
+		pending: '/src/RootPending.tsrx',
+		catch: ['RootCatch', '/src/RootCatch.tsrx'],
+	},
+	// ...router
 });
 ```
 
@@ -735,11 +877,11 @@ import:
 
 ```tsrx
 module server {
-  import { database } from './database.js';
+	import { database } from './database.js';
 
-  export async function saveName(name: string) {
-    return database.users.save({ name });
-  }
+	export async function saveName(name: string) {
+		return database.users.save({ name });
+	}
 }
 
 import { saveName } from 'server';
@@ -756,8 +898,8 @@ hydration-data and hydrate-module scripts in both dev and production:
 import { OCTANE_NONCE_STATE_KEY } from '@octanejs/vite-plugin';
 
 const cspNonce = async (context, next) => {
-  context.state.set(OCTANE_NONCE_STATE_KEY, crypto.randomUUID());
-  return next();
+	context.state.set(OCTANE_NONCE_STATE_KEY, crypto.randomUUID());
+	return next();
 };
 ```
 
