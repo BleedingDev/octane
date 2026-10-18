@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+	frameworkErrorSurface,
 	generateFiles,
 	validateCatalog,
 	validateCatalogCompatibility,
@@ -424,4 +425,21 @@ test('validates external wire and request lease error surfaces', () => {
 			"throw new TypeError(formatServerError(1, 'lease'));",
 		],
 	]);
+});
+
+test('keeps the static Node adapter on the server error surface', () => {
+	const input = catalog({ codes: { 1: { ...catalog().codes[1], runtime: ['server'] } } });
+	assert.equal(frameworkErrorSurface('static/node.ts'), 'server');
+	assert.doesNotThrow(() =>
+		validateRuntimeUsages(input, [
+			['static/node.ts', 'throw new Error(formatServerError(1, value));'],
+		]),
+	);
+	assert.throws(
+		() =>
+			validateRuntimeUsages(input, [
+				['static/node.ts', 'throw new Error(formatClientError(1, value));'],
+			]),
+		/constructs Error without a direct formatServerError/,
+	);
 });

@@ -401,7 +401,7 @@ export const REQUIRED_PUBLIC_VALUE_EXPORTS = {
 		'nativeCreateScopedValue',
 		'nativeCreateScopedElement',
 	],
-	'./static': ['prerender'],
+	'./static': ['prerender', 'prerenderToNodeStream'],
 	'./testing': ['clampJsdomScrollTop'],
 	'./constants': [
 		'ATTRIBUTE_ALIASES',

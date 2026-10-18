@@ -12,3 +12,5 @@ Initialize renderer-local context providers on their first compiled DOM render, 
 Add registered router render profiles and public capture, restore and disposal contracts for request-owned routing snapshots without rerunning application loaders or lifecycle hooks.
 
 Router capture requires the server-load pending-state fix in TanStack/router#8740. The adapter now takes router-core 1.171.38 as an exact peer so the application owns one shared core instance without a transitive archive request. Qualify the final merged core archive and its resolved identity before publishing these APIs.
+
+Keep `octane/server` declarations usable without Node ambient types by isolating the unchanged Node stream adapter behind `octane/static`.

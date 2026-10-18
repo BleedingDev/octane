@@ -165,7 +165,7 @@ export function generateFiles(catalog) {
 // independent-hydration-protocol.ts shares its manifest message with
 // hydration/independent-island.ts, so it is covered with the hydration modules.
 const COVERED_MODULE =
-	/^(?:signals\/[^/]+|hydration\/[^/]+|dom-bindings?(?:-[a-z-]+)?|independent-hydration-protocol|external-snapshot-(?:protocol|budget)|server\/external-snapshot-preparation)\.ts$/;
+	/^(?:signals\/[^/]+|hydration\/[^/]+|dom-bindings?(?:-[a-z-]+)?|independent-hydration-protocol|external-snapshot-(?:protocol|budget)|server\/external-snapshot-preparation|static\/node)\.ts$/;
 // Surfaces follow static import reachability from the package entries: modules
 // reachable only from client entries are "client"; only from server entries
 // (runtime.server.ts, octane/server, octane/signals/server, ...) are "server".
@@ -197,6 +197,7 @@ const CLIENT_ONLY_MODULES = new Set([
 	'signals/transition-candidate.ts',
 ]);
 const SERVER_ONLY_MODULES = new Set([
+	'static/node.ts',
 	'signals/native-read-server.ts',
 	'signals/server.ts',
 	'server/external-snapshot-preparation.ts',
@@ -547,7 +548,7 @@ function validateFrameworkErrorConstruction(
 
 function runtimeSources() {
 	const sourceDir = join(root, 'packages/octane/src');
-	const filenames = ['.', 'signals', 'hydration', 'server'].flatMap((directory) =>
+	const filenames = ['.', 'signals', 'hydration', 'server', 'static'].flatMap((directory) =>
 		readdirSync(join(sourceDir, directory))
 			.filter((name) => name.endsWith('.ts') && !name.endsWith('.d.ts'))
 			.map((name) => (directory === '.' ? name : `${directory}/${name}`)),
