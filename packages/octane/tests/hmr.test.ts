@@ -323,6 +323,18 @@ describe('hmr — runtime wrapper', () => {
 			local: 'const Child = api.component;',
 			after: 'function Helper() @{ <p>child:VERSION</p> }',
 		},
+		{
+			name: 'constructor evaluated only during rendering',
+			before: 'function expose() { return Helper; }',
+			local: 'const Child = new expose();',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'tag evaluated only during rendering',
+			before: 'function expose() { return Helper; }',
+			local: 'const Child = expose``;',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
 	])(
 		'self-accepts deferred component references through $name',
 		({ name, before, local, after }) => {
@@ -1272,6 +1284,12 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 			'class H { static get c() { return Counter; } static { capture(this.c); } }',
 			'class B { static get c() { return Counter; } } class H extends B { static x = capture(super.c); }',
 			'const api = { get component() { return Counter; } }; let v; v = api; capture(v.component);',
+			'function expose() { return Counter; } const Initial = new expose(); capture(Initial);',
+			'function expose() { return Counter; } const Initial = expose``; capture(Initial);',
+			'function expose() { return Counter; } const Initial = expose?.(); capture(Initial);',
+			'class H { get c() { return Counter; } constructor() { capture(this.c); } } new H();',
+			'function t() { capture(Counter); } t``;',
+			'function expose() { return Counter; } const Initial = (0, expose)(); capture(Initial);',
 		]
 			.map<{ capture: string; target?: string }>((capture) => ({ capture }))
 			.concat({

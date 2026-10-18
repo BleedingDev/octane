@@ -9900,15 +9900,34 @@ function collectHotComponentExportFlows(input) {
 			(position ?? node.start) < aggregateStart(node)
 		)
 			return true;
-		if (!aggregate && node.type === 'CallExpression') {
-			let callee = unwrapTsExpr(node.callee);
+		if (
+			!aggregate &&
+			(node.type === 'CallExpression' ||
+				node.type === 'OptionalCallExpression' ||
+				node.type === 'NewExpression' ||
+				node.type === 'TaggedTemplateExpression')
+		) {
+			const tagged = node.type === 'TaggedTemplateExpression';
+			let callee = unwrapTsExpr(tagged ? node.tag : node.callee);
 			const aliases = new Set();
-			while (rootReference(callee) && !aliases.has(callee.name)) {
-				aliases.add(callee.name);
-				callee = unwrapTsExpr(
-					bindings.get(callee.name)?.item.init ?? opaqueDeclarations.get(callee.name),
-				);
+			while (callee) {
+				if (callee.type === 'SequenceExpression') {
+					callee = unwrapTsExpr(callee.expressions.at(-1));
+				} else if (rootReference(callee) && !aliases.has(callee.name)) {
+					aliases.add(callee.name);
+					callee = unwrapTsExpr(
+						bindings.get(callee.name)?.item.init ?? opaqueDeclarations.get(callee.name),
+					);
+				} else break;
 			}
+			const callPosition = position ?? node.start;
+			if (
+				node.type === 'NewExpression' &&
+				(callee?.type === 'ClassDeclaration' || callee?.type === 'ClassExpression') &&
+				(earlyCapture(node.arguments, callPosition, new Set(), node, 'arguments', true) ||
+					callPosition < aggregateStart(callee))
+			)
+				return true;
 			if (
 				callee &&
 				['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(
@@ -9917,9 +9936,9 @@ function collectHotComponentExportFlows(input) {
 				!active.has(callee)
 			) {
 				const executing = new Set([...active, callee]);
-				const callPosition = position ?? node.start;
+				const args = tagged ? node.quasi.expressions : node.arguments;
 				if (
-					earlyCapture(node.arguments, callPosition, new Set(), node, 'arguments', true) ||
+					earlyCapture(args, callPosition, new Set(), node, tagged ? 'quasi' : 'arguments', true) ||
 					earlyCapture(callee.params, callPosition, executing, callee, 'params') ||
 					earlyCapture(callee.body, callPosition, executing, callee, 'body')
 				)
