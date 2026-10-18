@@ -481,25 +481,31 @@ export function assertDefaultRouterRenderHost(router: AnyRouter, allowRewrite = 
 export function createRouterRenderRouteTree(routes: readonly RouterRenderRoute[]): AnyRoute {
 	const rootDescriptor = routes.find((route) => route.parentRouteId === null);
 	if (!rootDescriptor) throw invalid('missing root');
+	const routesByParent = new Map<string, RouterRenderRoute[]>();
+	for (const route of routes) {
+		const parentId = route.parentRouteId;
+		if (parentId === null) continue;
+		const siblings = routesByParent.get(parentId);
+		if (siblings) siblings.push(route);
+		else routesByParent.set(parentId, [route]);
+	}
 	const staticData = (route: RouterRenderRoute) =>
 		route.ultramodernRouteId === undefined
 			? {}
 			: { staticData: { ultramodernRouteId: route.ultramodernRouteId } };
 	const root = createRootRoute(staticData(rootDescriptor));
 	const children = (parent: AnyRoute, parentId: string): AnyRoute[] =>
-		routes
-			.filter((route) => route.parentRouteId === parentId)
-			.map((route) => {
-				const child =
-					route.path === undefined
-						? createRoute({
-								getParentRoute: () => parent,
-								id: string(route.pathlessId),
-								...staticData(route),
-							})
-						: createRoute({ getParentRoute: () => parent, path: route.path, ...staticData(route) });
-				return child.addChildren(children(child, route.routeId));
-			});
+		(routesByParent.get(parentId) ?? []).map((route) => {
+			const child =
+				route.path === undefined
+					? createRoute({
+							getParentRoute: () => parent,
+							id: string(route.pathlessId),
+							...staticData(route),
+						})
+					: createRoute({ getParentRoute: () => parent, path: route.path, ...staticData(route) });
+			return child.addChildren(children(child, route.routeId));
+		});
 	return root.addChildren(children(root, rootDescriptor.routeId));
 }
 function geometry(router: AnyRouter): readonly RouterRenderRoute[] {

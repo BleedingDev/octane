@@ -27,7 +27,7 @@ import {
 	defaultStringifySearch,
 } from '@tanstack/router-core';
 import { createRequestHandler, getSsrStatus } from '@tanstack/router-core/ssr/server';
-import type { AnyRouter } from '@tanstack/router-core';
+import type { AnyRoute, AnyRouter } from '@tanstack/router-core';
 import * as nativeHistory from '@octanejs/tanstack-router/history';
 import { RouterRenderSnapshotSurface } from './router-render-snapshot.tsrx';
 
@@ -140,6 +140,49 @@ function publicMatches(router: AnyRouter) {
 }
 
 describe('native router context across server render boundaries', () => {
+	it('rebuilds interleaved route descriptors with their parent, order and static identity', () => {
+		const tree = createRouterRenderRouteTree([
+			{ routeId: 'detail', parentRouteId: 'layout', path: 'detail', ultramodernRouteId: 'detail' },
+			{ routeId: 'about', parentRouteId: 'root', path: 'about' },
+			{ routeId: 'root', parentRouteId: null, ultramodernRouteId: 'root' },
+			{ routeId: 'index', parentRouteId: 'layout', path: '/' },
+			{ routeId: 'layout', parentRouteId: 'root', pathlessId: '_layout' },
+		]);
+		const history = createMemoryHistory({ initialEntries: ['/detail'] });
+		const router = createRouter({ routeTree: tree, history, isServer: true });
+		hosts.add(router);
+		const [about, layout] = tree.children ?? [];
+		const [detail, index] = layout.children ?? [];
+
+		expect(tree.options.staticData).toEqual({ ultramodernRouteId: 'root' });
+		expect(about.path).toBe('about');
+		expect(layout.id).toBe('/_layout');
+		expect(layout.parentRoute).toBe(tree);
+		expect(detail.path).toBe('detail');
+		expect(detail.parentRoute).toBe(layout);
+		expect(detail.options.staticData).toEqual({ ultramodernRouteId: 'detail' });
+		expect(index.path).toBe('/');
+		expect(index.parentRoute).toBe(layout);
+	});
+
+	it('rebuilds a 4096-route snapshot without dropping or reordering siblings', () => {
+		const leaves = Array.from({ length: 4095 }, (_, index) => ({
+			routeId: `route-${index}`,
+			parentRouteId: 'root',
+			path: `route-${index}`,
+		}));
+		const tree = createRouterRenderRouteTree([...leaves, { routeId: 'root', parentRouteId: null }]);
+
+		expect(
+			tree.children?.map((route: AnyRoute) =>
+				'path' in route.options ? route.options.path : undefined,
+			),
+		).toEqual(leaves.map((route) => route.path));
+		expect(
+			tree.children?.every((route: AnyRoute) => route.options.getParentRoute?.() === tree),
+		).toBe(true);
+	});
+
 	it('restores native state, loader values, hooks and links without rerunning host loaders', async () => {
 		const { profile } = defaultProfile();
 		const calls: string[] = [];
