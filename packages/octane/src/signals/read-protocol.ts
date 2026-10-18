@@ -218,10 +218,18 @@ let nativeAdoptionResolver: NativeAdoptionResolver | null = null;
 // here: the signal engine must not make renderer seed decoding reachable.
 export let nativeSignalHydration = false;
 let signalDeclarationsEnabled = false;
-let earlySignalHydrationStarter: ((ownerDocument: Document) => void) | null = null;
-let earlySignalHydrationDocuments: Set<WeakRef<Document>> | null = null;
-let earlySignalHydrationSeen: WeakSet<Document> | null = null;
-let earlySignalHydrationFinalizer: FinalizationRegistry<WeakRef<Document>> | null = null;
+/** The hydration bridge needs only its host window; shared signals also run without DOM types. */
+export interface EarlySignalHydrationDocument {
+	readonly defaultView: object | null;
+}
+
+let earlySignalHydrationStarter: ((ownerDocument: EarlySignalHydrationDocument) => void) | null =
+	null;
+let earlySignalHydrationDocuments: Set<WeakRef<EarlySignalHydrationDocument>> | null = null;
+let earlySignalHydrationSeen: WeakSet<EarlySignalHydrationDocument> | null = null;
+let earlySignalHydrationFinalizer: FinalizationRegistry<
+	WeakRef<EarlySignalHydrationDocument>
+> | null = null;
 
 export function registerNativeSignalHydration(): void {
 	nativeSignalHydration = true;
@@ -257,17 +265,26 @@ export function registerEarlySignalHydration(): void {
 
 /** Only a hydration entry supplies the shared, capture-free control bridge. */
 export function startEarlySignalHydration(
-	ownerDocument: Document,
-	start: (ownerDocument: Document) => void,
+	ownerDocument: EarlySignalHydrationDocument,
+	start: (ownerDocument: EarlySignalHydrationDocument) => void,
 ): void {
 	if (signalDeclarationsEnabled) {
 		start(ownerDocument);
 		return;
 	}
-	const mailbox = (
-		ownerDocument.defaultView as { __octaneEarlySignalControls?: { q?: unknown } } | null
-	)?.__octaneEarlySignalControls;
-	if (!Array.isArray(mailbox?.q) || earlySignalHydrationSeen?.has(ownerDocument)) return;
+	const view = ownerDocument.defaultView;
+	const mailbox =
+		view !== null && '__octaneEarlySignalControls' in view
+			? view.__octaneEarlySignalControls
+			: undefined;
+	if (
+		mailbox === null ||
+		typeof mailbox !== 'object' ||
+		!('q' in mailbox) ||
+		!Array.isArray(mailbox.q) ||
+		earlySignalHydrationSeen?.has(ownerDocument)
+	)
+		return;
 	(earlySignalHydrationSeen ??= new WeakSet()).add(ownerDocument);
 	earlySignalHydrationStarter = start;
 	const reference = new WeakRef(ownerDocument);

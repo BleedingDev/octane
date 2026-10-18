@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, startTransition } from 'octane';
 import { earlySignalBootstrapScript } from '../../src/server/early-signals.js';
+import type { EarlySignalHydrationDocument } from '../../src/signals/read-protocol.js';
 import {
 	applyHydrationControlCandidate,
 	captureHydrationControlCandidate,
@@ -103,8 +104,8 @@ describe('early hydration control handoff', () => {
 		vi.resetModules();
 		const protocol = await import('../../src/signals/read-protocol.js');
 		const earlyValues = await import('../../src/signals/early-values.js');
-		const starts: Document[] = [];
-		const start = (ownerDocument: Document) => {
+		const starts: EarlySignalHydrationDocument[] = [];
+		const start = (ownerDocument: EarlySignalHydrationDocument) => {
 			starts.push(ownerDocument);
 			if (starts.length === 1) protocol.registerEarlySignalHydration();
 			earlyValues.installEarlyControlBridge(ownerDocument);
@@ -170,8 +171,8 @@ describe('early hydration control handoff', () => {
 		vi.resetModules();
 		const protocol = await import('../../src/signals/read-protocol.js');
 		const failure = new Error('first bridge failed');
-		const starts: Document[] = [];
-		const start = (ownerDocument: Document) => {
+		const starts: EarlySignalHydrationDocument[] = [];
+		const start = (ownerDocument: EarlySignalHydrationDocument) => {
 			starts.push(ownerDocument);
 			if (ownerDocument === documents[0]) throw failure;
 		};

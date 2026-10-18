@@ -1,4 +1,5 @@
 import { SIGNAL_CONTROL_ATTR } from '../hydration-markers.js';
+import type { EarlySignalHydrationDocument } from './read-protocol.js';
 import type { SignalBindingIdentity, SignalOwner, SignalRendererOwnerIdentity } from './types.js';
 
 type ControlChannel = 'value' | 'checked';
@@ -204,7 +205,7 @@ function publishEarlyHydrationControlSignalValues(control: Element, revision: nu
  * Idempotent: a repeat installs the same writer and finds the queue empty.
  */
 export function installEarlyControlBridge(
-	ownerDocument: Document,
+	ownerDocument: EarlySignalHydrationDocument,
 	target: Record<string, unknown> | null = ownerDocument.defaultView as unknown as Record<
 		string,
 		unknown
