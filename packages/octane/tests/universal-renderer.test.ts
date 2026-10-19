@@ -7,6 +7,7 @@ import { compile } from '../src/compiler/compile.js';
 import { lowerUniversalRendererRegionAst } from '../src/compiler/compile-universal.js';
 import { normalizeRendererConfig } from '../src/compiler/renderers.js';
 import * as UniversalRuntime from '../src/universal.js';
+import * as InternalClientRuntime from '../src/internal/client.js';
 import * as Signals from '../src/signals/index.js';
 import { act } from '../src/index.js';
 import {
@@ -3336,7 +3337,7 @@ export default function Default() @{ <scene version={1} /> }`);
 					? undefined
 					: {
 							octane: domRuntime,
-							'octane/internal/client': domRuntime,
+							'octane/internal/client': InternalClientRuntime,
 							'octane/universal': UniversalRuntime,
 							[bridge]: { Canvas: UniversalRuntime.createUniversalHostBoundary('object') },
 						};
@@ -3544,7 +3545,7 @@ export default (function Counter({ depth }) @{
 			});
 			const modules = {
 				octane: domRuntime,
-				'octane/internal/client': domRuntime,
+				'octane/internal/client': InternalClientRuntime,
 				'octane/universal': {
 					...UniversalRuntime,
 					registerThreadFunction(
