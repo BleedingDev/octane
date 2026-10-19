@@ -22,3 +22,5 @@ Avoid mutating non-extensible hoisted component functions when adding developmen
 Conservatively propagate hot updates to importers when early local calls, constructors, tagged templates, Reflect invocations, getters, local aliases or arguments, destructuring/defaults, static class initializers, spreads, iteration or decorators can capture a hoisted component. Iterative, cached local aggregate checks handle deep binding chains without recursive stack exhaustion. These checks include all reachable closures: unrelated early property reads, alias/closure assignments, static initializers and local lazy-helper arguments may also propagate, while ordinary initializer reads deferred until rendering remain eligible. Opaque calls and early JSX evaluation remain pre-existing analysis limitations.
 
 Reuse the host document's registered streamed-signal transport when hydrating native or external publishers, including viewless documents with an explicit transport target.
+
+Keep ordinary imports and calls without cancellation usable when the host lacks a native AbortSignal getter. Supplied cancellation signals still require native brand validation.

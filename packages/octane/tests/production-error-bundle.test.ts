@@ -3,6 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { build } from 'esbuild';
+import { Window } from 'happy-dom';
 import { JSDOM } from 'jsdom';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
@@ -101,7 +102,7 @@ async function bundleFormatter(
 	return { code, messages: module.messages };
 }
 
-async function bundleRpcClient(mode: 'development' | 'production') {
+async function bundleRpcClient(mode: 'development' | 'production', instance = '') {
 	const result = await build({
 		stdin: {
 			contents: "export { __serverRpc, __serverRpcStream } from './server-rpc-client.ts';",
@@ -121,7 +122,7 @@ async function bundleRpcClient(mode: 'development' | 'production') {
 	});
 	const code = result.outputFiles[0].text;
 	const client = (await import(
-		`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
+		`data:text/javascript;base64,${Buffer.from(code).toString('base64')}#${instance}`
 	)) as typeof import('../src/server-rpc-client.js');
 	return { code, client };
 }
@@ -332,6 +333,47 @@ function decodedErrorUrl(message: string): URL {
 }
 
 describe('production error bundles', () => {
+	it.each(['development', 'production'] as const)(
+		'allows calls without cancellation when AbortSignal is unavailable or polyfilled in %s bundles',
+		async (mode) => {
+			const window = new Window();
+			const abortSignal = Object.getOwnPropertyDescriptor(globalThis, 'AbortSignal')!;
+			const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
+			const fetch = vi.spyOn(globalThis, 'fetch');
+			Object.defineProperty(globalThis, 'location', {
+				configurable: true,
+				value: { href: 'https://octane.test/' },
+			});
+			try {
+				for (const implementation of [undefined, window.AbortSignal]) {
+					Object.defineProperty(globalThis, 'AbortSignal', {
+						configurable: true,
+						value: implementation,
+					});
+					const { client } = await bundleRpcClient(
+						mode,
+						implementation === undefined ? 'missing-signal' : 'polyfilled-signal',
+					);
+					fetch.mockResolvedValueOnce(new Response('[{"value":1},"ready"]'));
+					await expect(client.__serverRpc('read', [])).resolves.toBe('ready');
+					fetch.mockClear();
+					for (const signal of [{ aborted: false }, new window.AbortController().signal]) {
+						await expect(
+							Reflect.apply(client.__serverRpc, undefined, ['read', [], { signal }]),
+						).rejects.toBeInstanceOf(TypeError);
+					}
+					expect(fetch).not.toHaveBeenCalled();
+				}
+			} finally {
+				fetch.mockRestore();
+				Object.defineProperty(globalThis, 'AbortSignal', abortSignal);
+				if (location === undefined) Reflect.deleteProperty(globalThis, 'location');
+				else Object.defineProperty(globalThis, 'location', location);
+				await window.happyDOM.close();
+			}
+		},
+	);
+
 	it.each(['development', 'production'] as const)(
 		'preserves RPC error classes, HTTP outcomes and foreign messages in %s bundles',
 		async (mode) => {

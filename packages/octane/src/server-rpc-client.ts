@@ -13,9 +13,12 @@ import { enqueueServerCall } from './server-rpc-batch-client.js';
 
 // The native getter checks the AbortSignal brand across same-origin realms.
 const signalAborted = /* @__PURE__ */ (() =>
-	Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!)();
+	typeof AbortSignal === 'undefined'
+		? undefined
+		: Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')?.get)();
 
 function isAbortSignal(signal: unknown): signal is AbortSignal {
+	if (signalAborted === undefined) return false;
 	try {
 		signalAborted.call(signal);
 		return true;
