@@ -187,21 +187,34 @@ it.each(['', 'query-app-'])(
 	},
 );
 
-it.each([
-	{ snapshot: false, later: false, renders: ['accepted server result'] },
-	{ snapshot: false, later: true, renders: ['accepted server result', 'later server result'] },
-	{
-		snapshot: true,
-		later: false,
-		renders: ['accepted server result:open', 'accepted server result:complete'],
-	},
-])(
+it.each(
+	(['iframe', 'viewless'] as const).flatMap((realm) =>
+		[
+			{ snapshot: false, later: false, renders: ['accepted server result'] },
+			{ snapshot: false, later: true, renders: ['accepted server result', 'later server result'] },
+			{
+				snapshot: true,
+				later: false,
+				renders: ['accepted server result:open', 'accepted server result:complete'],
+			},
+		].map((test) => ({ ...test, realm })),
+	),
+)(
 	'renders a streamed reader again only when what it read changed (%j)',
-	async ({ snapshot, later, renders: expected }) => {
+	async ({ snapshot, later, renders: expected, realm }) => {
 		const producer = controlledStream<string>();
 		const controller = new AbortController();
-		const responseDocument = createStreamedDocument();
-		const { container } = responseDocument;
+		const responseDocument = realm === 'iframe' ? createStreamedDocument() : undefined;
+		const ownerDocument =
+			responseDocument?.document ?? document.implementation.createHTMLDocument('Streamed response');
+		const container =
+			responseDocument?.container ??
+			ownerDocument.body.appendChild(ownerDocument.createElement('div'));
+		const target = (ownerDocument.defaultView as unknown as Record<string, unknown> | null) ?? {};
+		const browserLoad = vi.fn(async function* () {
+			yield 'duplicate browser result';
+		});
+		const diagnostics: unknown[] = [];
 		let root: Root | undefined;
 		let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 		try {
@@ -228,38 +241,44 @@ it.each([
 			producer.end();
 			await drainProducers();
 			container.innerHTML = await collector.ended;
-			activateStreamedMarkup(container);
+			activateStreamedMarkup(container, { target });
 			const output = container.querySelector('output');
 			expect(output?.textContent).toBe(expected[0]);
 			hydration = bootstrapStreamedSignalHydration({
 				buildId: 'rendered-query-build',
 				documentId: 'rendered-query-document',
-				document: responseDocument.document,
+				document: ownerDocument,
+				target,
 			});
 			const renders: string[] = [];
 			root = hydrateRoot(
 				container,
 				client.RenderedStreamedQuery,
 				{
-					load: async function* () {
-						yield 'duplicate browser result';
-					},
+					load: browserLoad,
 					render: (value: string) => renders.push(value),
 					snapshot,
 				},
-				{ signalOwner: hydration.signalOwner },
+				{
+					signalOwner: hydration.signalOwner,
+					onRecoverableError: (error) => diagnostics.push(error),
+					onUncaughtError: (error) => diagnostics.push(error),
+				},
 			);
 			await drainProducers();
 			flushSync(() => {});
 			expect(renders).toEqual(expected);
 			expect(container.querySelector('output')).toBe(output);
 			expect(output?.textContent).toBe(expected.at(-1));
+			expect(browserLoad).not.toHaveBeenCalled();
+			expect(diagnostics).toEqual([]);
 		} finally {
 			producer.end();
 			controller.abort();
 			root?.unmount();
 			hydration?.dispose();
-			responseDocument.dispose();
+			container.remove();
+			responseDocument?.dispose();
 		}
 	},
 );

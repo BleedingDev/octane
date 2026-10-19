@@ -11,6 +11,19 @@ import {
 import { readServerResult } from './server-rpc-stream-client.js';
 import { enqueueServerCall } from './server-rpc-batch-client.js';
 
+// The native getter checks the AbortSignal brand across same-origin realms.
+const signalAborted = /* @__PURE__ */ (() =>
+	Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!)();
+
+function isAbortSignal(signal: unknown): signal is AbortSignal {
+	try {
+		signalAborted.call(signal);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Compiler target for browser calls to a `module server` export.
  * @internal
@@ -56,7 +69,7 @@ async function dispatchServerRpc(
 		options === null ||
 		typeof options !== 'object' ||
 		Object.keys(options).some((key) => key !== 'signal') ||
-		(options.signal !== undefined && !(options.signal instanceof AbortSignal))
+		(options.signal !== undefined && !isAbortSignal(options.signal))
 	)
 		throw new TypeError(formatClientError(364));
 	options.signal?.throwIfAborted();

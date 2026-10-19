@@ -44696,6 +44696,14 @@ interface TryOps {
 }
 let TRY_OPS: TryOps | null = null;
 
+// A viewless document's live bootstrap owns its explicit transport target.
+function streamedBoundaryStash(state: TrySlot): Record<string, string> | undefined {
+	const document = state.start.ownerDocument;
+	const target =
+		parentStreamedAuthority(state.parentBlock, document)?.target ?? document.defaultView;
+	return (target as { $OCTS?: Record<string, string> } | null)?.$OCTS;
+}
+
 function takeInitialSuspenseHydration(
 	state: TrySlot,
 	hydration: HydrationCapability,
@@ -44709,9 +44717,7 @@ function takeInitialSuspenseHydration(
 		if (!hydration.isOpen(start)) return null;
 		const end = hydration.close(start);
 		const owner = marker as Comment;
-		const stash = (
-			owner.ownerDocument.defaultView as (Window & { $OCTS?: Record<string, string> }) | null
-		)?.$OCTS;
+		const stash = streamedBoundaryStash(state);
 		let payload = initialStreamedPayloads?.get(owner);
 		if (payload === undefined) {
 			payload = {
@@ -45128,9 +45134,7 @@ function mountTry(state: TrySlot, claimsRetryOwners = false): void {
 		streamedBoundaryId = (
 			STAGED_DOM ? STAGED_DOM.view(adoptCursor as Comment) : (adoptCursor as Comment)
 		).data.slice(STREAM_SEED_COMMENT.length);
-		const stash = (
-			state.start.ownerDocument.defaultView as (Window & { $OCTS?: Record<string, string> }) | null
-		)?.$OCTS;
+		const stash = streamedBoundaryStash(state);
 		const raw = stash !== undefined ? stash[streamedBoundaryId] : undefined;
 		if (typeof raw === 'string') scopedSeeds = hydration.parseSeeds(raw);
 		const nativeRaw = stash?.[streamedBoundaryId + '$signals'];
@@ -45193,10 +45197,7 @@ function mountTry(state: TrySlot, claimsRetryOwners = false): void {
 	if (hydrating && scopedNativeRaw !== undefined && !freshBoundary) {
 		const boundaryId = streamedBoundaryId!;
 		nativeAdoption = ownNativeAdoption(b, scopedNativeRaw, () => {
-			const stash = (
-				state.start.ownerDocument.defaultView as
-					(Window & { $OCTS?: Record<string, string> }) | null
-			)?.$OCTS;
+			const stash = streamedBoundaryStash(state);
 			if (stash !== undefined) {
 				delete stash[boundaryId + '$signals'];
 				delete stash[boundaryId];
