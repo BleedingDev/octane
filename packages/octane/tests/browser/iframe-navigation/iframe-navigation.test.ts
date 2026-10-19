@@ -306,7 +306,7 @@ describe.sequential('RPC cancellation across same-origin iframe realms in Chromi
 						Array.from({ length: 3 }, () => ({
 							name: 'TypeError',
 							message: dev
-								? 'Server function options accept only a local AbortSignal'
+								? 'Server function options accept only a genuine AbortSignal'
 								: expect.stringContaining('Minified Octane error #364'),
 						})),
 					);

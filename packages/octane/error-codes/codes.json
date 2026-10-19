@@ -2184,7 +2184,7 @@
       "status": "active"
     },
     "364": {
-      "message": "Server function options accept only a local AbortSignal",
+      "message": "Server function options accept only a genuine AbortSignal",
       "argumentCount": 0,
       "runtime": ["client"],
       "status": "active"

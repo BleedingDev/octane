@@ -1484,7 +1484,7 @@ export function formatClientError<Code extends keyof ClientErrorArguments>(
 				);
 			case 364:
 				return formatDevErrorMessage(
-					'Server function options accept only a local AbortSignal',
+					'Server function options accept only a genuine AbortSignal',
 					args,
 				);
 			case 365:
