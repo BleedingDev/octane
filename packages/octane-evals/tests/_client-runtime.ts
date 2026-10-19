@@ -10,6 +10,7 @@
 // submissions cannot make.
 export * from '../../octane/src/index.js';
 export {
+	__stampHmrComponent,
 	__delegateEvents,
 	__delegateCaptureEvents,
 	enableSignalBindings,
