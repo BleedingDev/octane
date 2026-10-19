@@ -27284,9 +27284,9 @@ function writeDirectSignalText(
 	kind: DirectSignalBindingKind,
 	previous: unknown,
 ): Text {
-	if (previous instanceof Text) {
-		setText(previous, value);
-		return previous;
+	if ((previous as Text | null | undefined)?.nodeType === 3) {
+		setText(previous as Text, value);
+		return previous as Text;
 	}
 	// The compiler owns this distinction: an empty sibling text hole can
 	// point at the next element while hydrating, not an only-child parent.
@@ -27569,7 +27569,10 @@ function bindDirectSignal(
 		}
 		if (TRANSITION_JOURNAL !== null) journalBag();
 		const scalarTarget =
-			(kind === 'text' || kind === 'textOnlyChild') && previous instanceof Text ? previous : target;
+			(kind === 'text' || kind === 'textOnlyChild') &&
+			(previous as Text | null | undefined)?.nodeType === 3
+				? (previous as Text)
+				: target;
 		return policy.write(scalarTarget, value, kind, previous, name, attributeKind);
 	}
 	if (
@@ -27615,7 +27618,10 @@ function bindDirectSignal(
 		return token;
 	}
 	const signalTarget =
-		(kind === 'text' || kind === 'textOnlyChild') && previous instanceof Text ? previous : target;
+		(kind === 'text' || kind === 'textOnlyChild') &&
+		(previous as Text | null | undefined)?.nodeType === 3
+			? (previous as Text)
+			: target;
 	const binding = createDirectSignalBinding(
 		scope,
 		signalTarget,
@@ -27625,7 +27631,8 @@ function bindDirectSignal(
 		name,
 		attributeKind,
 		kind === 'text' || kind === 'textOnlyChild'
-			? (prior?.text ?? (previous instanceof Text ? previous : undefined))
+			? (prior?.text ??
+					((previous as Text | null | undefined)?.nodeType === 3 ? (previous as Text) : undefined))
 			: undefined,
 	);
 	if (prior !== null) {
@@ -27659,12 +27666,13 @@ export function bindSignalText(
 	// signal token must still re-enter the read path even when its handle is
 	// unchanged, so pending/error recovery is not hidden by this scalar guard.
 	// A supplied previousValue may itself be undefined, so count arguments.
-	if (previous instanceof Text && !isSignalHandle(value)) {
+	// An adopted Text may belong to another document's realm.
+	if ((previous as Text | null | undefined)?.nodeType === 3 && !isSignalHandle(value)) {
 		if (arguments.length > 6 && previousValue === value) return previous;
 		// A scalar over the Text this hole already owns is bindDirectSignal's
 		// unbound scalar write without its policy dispatch. setText journals the
 		// text and this binding bag.
-		setText(previous, value);
+		setText(previous as Text, value);
 		return previous;
 	}
 	if (previous === undefined && bindingMarker !== undefined) {
@@ -27684,13 +27692,14 @@ export function bindSignalText(
 		(!hydrating || activeHydration() === null)
 	) {
 		const text = getFirstChild(position);
-		if (text instanceof Text) previous = text;
+		if (text?.nodeType === 3) previous = text;
 	}
 	const prior = previous as DirectSignalBinding | undefined;
 	return bindDirectSignal(
 		scope,
 		previous,
-		prior?.target ?? (previous instanceof Text ? previous : position),
+		prior?.target ??
+			((previous as Text | null | undefined)?.nodeType === 3 ? (previous as Text) : position),
 		value,
 		site,
 		onlyChild ? DIRECT_SIGNAL_TEXT_ONLY_POLICY : DIRECT_SIGNAL_TEXT_POLICY,
@@ -40802,7 +40811,11 @@ export function bindSignalChild(
 			: null;
 	const cachedText =
 		prior?.text ??
-		(previous instanceof Text ? previous : textToken ? (getFirstChild(domParent) as Text) : null);
+		((previous as Text | null | undefined)?.nodeType === 3
+			? (previous as Text)
+			: textToken
+				? (getFirstChild(domParent) as Text)
+				: null);
 	if (!isSignalHandle(value)) {
 		const type = typeof value;
 		// An ordinary marker-bounded hole keeps textHoleUpdate's fast path: its
@@ -44695,8 +44708,10 @@ function takeInitialSuspenseHydration(
 		const start = getNextSibling(marker);
 		if (!hydration.isOpen(start)) return null;
 		const end = hydration.close(start);
-		const stash = typeof window !== 'undefined' ? (window as any).$OCTS : undefined;
 		const owner = marker as Comment;
+		const stash = (
+			owner.ownerDocument.defaultView as (Window & { $OCTS?: Record<string, string> }) | null
+		)?.$OCTS;
 		let payload = initialStreamedPayloads?.get(owner);
 		if (payload === undefined) {
 			payload = {
@@ -45113,7 +45128,9 @@ function mountTry(state: TrySlot, claimsRetryOwners = false): void {
 		streamedBoundaryId = (
 			STAGED_DOM ? STAGED_DOM.view(adoptCursor as Comment) : (adoptCursor as Comment)
 		).data.slice(STREAM_SEED_COMMENT.length);
-		const stash = typeof window !== 'undefined' ? (window as any).$OCTS : undefined;
+		const stash = (
+			state.start.ownerDocument.defaultView as (Window & { $OCTS?: Record<string, string> }) | null
+		)?.$OCTS;
 		const raw = stash !== undefined ? stash[streamedBoundaryId] : undefined;
 		if (typeof raw === 'string') scopedSeeds = hydration.parseSeeds(raw);
 		const nativeRaw = stash?.[streamedBoundaryId + '$signals'];
@@ -45176,7 +45193,10 @@ function mountTry(state: TrySlot, claimsRetryOwners = false): void {
 	if (hydrating && scopedNativeRaw !== undefined && !freshBoundary) {
 		const boundaryId = streamedBoundaryId!;
 		nativeAdoption = ownNativeAdoption(b, scopedNativeRaw, () => {
-			const stash = typeof window !== 'undefined' ? (window as any).$OCTS : undefined;
+			const stash = (
+				state.start.ownerDocument.defaultView as
+					(Window & { $OCTS?: Record<string, string> }) | null
+			)?.$OCTS;
 			if (stash !== undefined) {
 				delete stash[boundaryId + '$signals'];
 				delete stash[boundaryId];

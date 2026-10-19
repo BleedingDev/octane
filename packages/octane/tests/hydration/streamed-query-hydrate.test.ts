@@ -7,8 +7,8 @@ import { loadServerFixture } from '../_server-fixture.js';
 import {
 	activateStreamedMarkup,
 	createPipeableCollector,
+	createStreamedDocument,
 	deferred,
-	resetStreamRuntimeGlobals,
 } from '../_server-stream.js';
 import { controlledStream, drainProducers } from '../_fixtures/signals-async-controls.js';
 import * as client from '../_fixtures/automatic-signal-stream.tsrx';
@@ -51,8 +51,8 @@ it.each(
 			load: serverLoad,
 			...(component === 'NestedStreamedRootQuery' ? { gate: gate.promise } : {}),
 		};
-		const container = document.createElement('div');
-		document.body.append(container);
+		const responseDocument = createStreamedDocument();
+		const { container } = responseDocument;
 		const consoleErrors = vi.spyOn(console, 'error');
 		let root: Root | undefined;
 		let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
@@ -80,6 +80,7 @@ it.each(
 			hydration = bootstrapStreamedSignalHydration({
 				buildId: 'root-query-build',
 				documentId: 'root-query-document',
+				document: responseDocument.document,
 			});
 			root = hydrateRoot(
 				container,
@@ -114,8 +115,7 @@ it.each(
 			root?.unmount();
 			hydration?.dispose();
 			consoleErrors.mockRestore();
-			container.remove();
-			resetStreamRuntimeGlobals();
+			responseDocument.dispose();
 		}
 	},
 );
@@ -127,8 +127,8 @@ it.each(['', 'query-app-'])(
 		const browserLoad = vi.fn(async function* () {
 			yield 'duplicate browser result';
 		});
-		const container = document.createElement('div');
-		document.body.append(container);
+		const responseDocument = createStreamedDocument();
+		const { container } = responseDocument;
 		const consoleErrors = vi.spyOn(console, 'error');
 		let root: Root | undefined;
 		let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
@@ -154,6 +154,7 @@ it.each(['', 'query-app-'])(
 			hydration = bootstrapStreamedSignalHydration({
 				buildId: 'pending-query-build',
 				documentId: 'pending-query-document',
+				document: responseDocument.document,
 			});
 			root = hydrateRoot(
 				container,
@@ -181,8 +182,7 @@ it.each(['', 'query-app-'])(
 			root?.unmount();
 			hydration?.dispose();
 			consoleErrors.mockRestore();
-			container.remove();
-			resetStreamRuntimeGlobals();
+			responseDocument.dispose();
 		}
 	},
 );
@@ -200,8 +200,8 @@ it.each([
 	async ({ snapshot, later, renders: expected }) => {
 		const producer = controlledStream<string>();
 		const controller = new AbortController();
-		const container = document.createElement('div');
-		document.body.append(container);
+		const responseDocument = createStreamedDocument();
+		const { container } = responseDocument;
 		let root: Root | undefined;
 		let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 		try {
@@ -234,6 +234,7 @@ it.each([
 			hydration = bootstrapStreamedSignalHydration({
 				buildId: 'rendered-query-build',
 				documentId: 'rendered-query-document',
+				document: responseDocument.document,
 			});
 			const renders: string[] = [];
 			root = hydrateRoot(
@@ -258,8 +259,7 @@ it.each([
 			controller.abort();
 			root?.unmount();
 			hydration?.dispose();
-			container.remove();
-			resetStreamRuntimeGlobals();
+			responseDocument.dispose();
 		}
 	},
 );

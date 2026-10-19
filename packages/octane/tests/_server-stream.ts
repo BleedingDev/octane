@@ -17,6 +17,24 @@ export interface Deferred<T> {
 	reject(reason?: unknown): void;
 }
 
+/** Separate responses need separate document authority, including their early mailboxes. */
+export function createStreamedDocument(): {
+	container: HTMLDivElement;
+	document: Document;
+	dispose(): void;
+} {
+	const iframe = document.createElement('iframe');
+	document.body.append(iframe);
+	const ownerDocument = iframe.contentDocument;
+	if (ownerDocument === null) {
+		iframe.remove();
+		throw new Error('Streamed response fixture requires an iframe document');
+	}
+	const container = ownerDocument.createElement('div');
+	ownerDocument.body.append(container);
+	return { container, document: ownerDocument, dispose: () => iframe.remove() };
+}
+
 export function deferred<T>(): Deferred<T> {
 	let resolve!: (value: T | PromiseLike<T>) => void;
 	let reject!: (reason?: unknown) => void;

@@ -234,8 +234,7 @@ async function hydrateServerOutput(
 	const { bootstrapStreamedSignalHydration } =
 		await import('../../src/hydration/streamed-signals.js');
 	const { loadCompiledFixtureSource } = await import('../_server-fixture.js');
-	const { activateStreamedMarkup, resetStreamRuntimeGlobals } =
-		await import('../_server-stream.js');
+	const { activateStreamedMarkup, createStreamedDocument } = await import('../_server-stream.js');
 	const { drainProducers } = await import('../_fixtures/signals-async-controls.js');
 	const compileOptions = {
 		id: '/src/signal-declaration-owner.tsrx',
@@ -250,8 +249,8 @@ async function hydrateServerOutput(
 		buildId: 'signal-declaration-owner',
 		documentId: 'signal-declaration-owner',
 	};
-	const container = document.createElement('div');
-	document.body.append(container);
+	const response = createStreamedDocument();
+	const { container } = response;
 	let root: ReturnType<typeof client.hydrateRoot> | undefined;
 	let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 	try {
@@ -267,7 +266,10 @@ async function hydrateServerOutput(
 		expect(outputs.map((node) => node.textContent)).not.toEqual([]);
 		expect(new Set(outputs.map((node) => node.textContent))).toEqual(new Set(['server result']));
 		const errors: unknown[] = [];
-		hydration = bootstrapStreamedSignalHydration(streamedSignals);
+		hydration = bootstrapStreamedSignalHydration({
+			...streamedSignals,
+			document: response.document,
+		});
 		const props = { ...PROPS, load: browserLoad, when: condition(!options.deferred) };
 		root = client.hydrateRoot(container, clientModule.App, props, {
 			signalOwner: hydration.signalOwner,
@@ -288,8 +290,7 @@ async function hydrateServerOutput(
 	} finally {
 		root?.unmount();
 		hydration?.dispose();
-		container.remove();
-		resetStreamRuntimeGlobals();
+		response.dispose();
 	}
 }
 
@@ -1205,7 +1206,7 @@ export function App(props) @{
 			const { bootstrapStreamedSignalHydration } =
 				await import('../../src/hydration/streamed-signals.js');
 			const { loadCompiledFixtureSource } = await import('../_server-fixture.js');
-			const { activateStreamedMarkup, resetStreamRuntimeGlobals } =
+			const { activateStreamedMarkup, createStreamedDocument } =
 				await import('../_server-stream.js');
 			const { drainProducers } = await import('../_fixtures/signals-async-controls.js');
 			const text = producerSource(
@@ -1228,8 +1229,8 @@ export function App(props) @{
 				buildId: 'signal-declaration-owner',
 				documentId: 'signal-declaration-owner',
 			};
-			const container = document.createElement('div');
-			document.body.append(container);
+			const response = createStreamedDocument();
+			const { container } = response;
 			let root: ReturnType<typeof client.hydrateRoot> | undefined;
 			let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 			try {
@@ -1247,7 +1248,10 @@ export function App(props) @{
 				expect(nodes.map((node) => node.textContent)).toEqual(expected);
 				expect(label.textContent).toBe('initial');
 				const errors: unknown[] = [];
-				hydration = bootstrapStreamedSignalHydration(streamedSignals);
+				hydration = bootstrapStreamedSignalHydration({
+					...streamedSignals,
+					document: response.document,
+				});
 				const props = { ...PROPS, load: browserLoad, label: 'initial' };
 				root = client.hydrateRoot(container, clientModule.App, props, {
 					signalOwner: hydration.signalOwner,
@@ -1273,8 +1277,7 @@ export function App(props) @{
 			} finally {
 				root?.unmount();
 				hydration?.dispose();
-				container.remove();
-				resetStreamRuntimeGlobals();
+				response.dispose();
 			}
 		},
 	);
