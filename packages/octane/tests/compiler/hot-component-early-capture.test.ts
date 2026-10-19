@@ -154,6 +154,55 @@ export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as s
 		).toBeUndefined();
 	});
 
+	it.each([
+		'[Symbol.toPrimitive]() { capture(Counter); return "node:path"; }',
+		'toString() { capture(Counter); return "node:path"; }',
+		'toString() { return {}; }, valueOf() { capture(Counter); return "node:path"; }',
+	])('fences component capture during dynamic-import specifier coercion: %s', (coercion) => {
+		const source = `import { useSignal$ } from 'octane/signals/client';
+import { capture } from './capture';
+const key = { ${coercion} };
+import(key);
+export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as string}</p> }`;
+		expect(
+			compile(source, '/src/Counter.tsrx', { hmr: 'webpack', dev: true }).hotSignalModule,
+		).toBeUndefined();
+	});
+
+	it('fences component capture while evaluating dynamic-import options', () => {
+		const source = `import { useSignal$ } from 'octane/signals/client';
+import { capture } from './capture';
+import("node:path", (() => { capture(Counter); return {}; })());
+export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as string}</p> }`;
+		expect(
+			compile(source, '/src/Counter.tsrx', { hmr: 'webpack', dev: true }).hotSignalModule,
+		).toBeUndefined();
+	});
+
+	it.each([
+		'{ get with() { capture(Counter); throw new Error("stop"); } }',
+		'{ with: { get type() { capture(Counter); throw new Error("stop"); } } }',
+	])('fences component capture by dynamic-import option getters: %s', (options) => {
+		const source = `import { useSignal$ } from 'octane/signals/client';
+import { capture } from './capture';
+import("node:path", ${options});
+export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as string}</p> }`;
+		expect(
+			compile(source, '/src/Counter.tsrx', { hmr: 'webpack', dev: true }).hotSignalModule,
+		).toBeUndefined();
+	});
+
+	it('admits dynamic-import specifier coercion deferred in an uncalled helper', () => {
+		const source = `import { useSignal$ } from 'octane/signals/client';
+import { capture } from './capture';
+const key = { [Symbol.toPrimitive]() { capture(Counter); return "node:path"; } };
+function load() { return import(key); }
+export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as string}</p> }`;
+		expect(
+			compile(source, '/src/Counter.tsrx', { hmr: 'webpack', dev: true }).hotSignalModule,
+		).toBeDefined();
+	});
+
 	it('admits later component references evaluated only when a component renders', () => {
 		const source = `import { useSignal$ } from 'octane/signals/client';
 export function App() @{ <Slot component={Counter} /> }

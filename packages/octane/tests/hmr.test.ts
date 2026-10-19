@@ -1469,6 +1469,16 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 			.map<{ capture: string; target?: string; after?: string; canonicalCapture?: boolean }>(
 				(capture) => ({ capture }),
 			)
+			.concat(
+				[
+					'const key = { [Symbol.toPrimitive]() { capture(Counter); throw new Error("coercion stop"); } }; const pending = import(key);',
+					'const key = { toString() { capture(Counter); throw new Error("coercion stop"); } }; const pending = import(key);',
+					'const key = { toString() { return {}; }, valueOf() { capture(Counter); throw new Error("coercion stop"); } }; const pending = import(key);',
+					'const pending = import("data:text/javascript,", (() => { capture(Counter); return {}; })());',
+					'const pending = import("data:text/javascript,", { get with() { capture(Counter); throw new Error("options stop"); } });',
+					'const pending = import("data:text/javascript,", { with: { get type() { capture(Counter); throw new Error("attribute stop"); } } });',
+				].map((capture) => ({ capture, after: 'pending.catch(() => {});' })),
+			)
 			.concat({
 				capture:
 					'function expose(value) { capture(Counter); return value; } @expose class Holder {}',

@@ -9858,6 +9858,8 @@ function collectHotComponentExportFlows(input) {
 		// Operators can synchronously invoke authored conversion or @@hasInstance
 		// callbacks. Boolean tests and strict identity do not coerce object values.
 		if (!aggregate) {
+			// Specifier coercion and import-option getters run synchronously.
+			if (node.type === 'ImportExpression') return (position ?? node.start) < aggregateStart(node);
 			const coercion =
 				(node.type === 'UnaryExpression' &&
 					(node.operator === '+' || node.operator === '-' || node.operator === '~')) ||

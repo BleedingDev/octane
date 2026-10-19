@@ -7,3 +7,5 @@ Propagate development hot updates when module-time calls receive local callable 
 Inspect computed property keys for local coercion callbacks that capture a hoisted component before initialization, so development updates propagate to importers instead of retaining a stale component identity.
 
 Inspect local coercion callbacks reached by numeric, arithmetic, comparison, update, compound-assignment and template operations, plus custom `instanceof` predicates, before admitting a hot boundary. Boolean tests, strict identity and logical operations remain noncoercing controls.
+
+Dynamic imports also inspect specifier coercion and import-option getters before accepting a hot boundary, while imports deferred inside uncalled helpers remain eligible.
