@@ -54022,7 +54022,16 @@ export function createIndependentHydrateActivator(
 	body: ComponentBody,
 ): IndependentHydrateActivator {
 	return (context: IndependentHydrateActivationContext) => {
-		const { captures, element, manifest, signalOwner, initialDocumentSignals } = context;
+		const { captures, element, manifest, initialDocumentSignals } = context;
+		const signalOwner =
+			context.signalOwner ?? (signalDocumentEnabled ? documentSignalOwner(element) : undefined);
+		const documentOwner =
+			(signalOwner as SignalRendererOwnerIdentity | undefined)?.documentOwner ?? signalOwner;
+		// Publisher authority comes from this actual document's live bootstrap, never island markup.
+		const authority =
+			documentOwner === undefined
+				? undefined
+				: getNativeStreamedAuthority(documentOwner, element.ownerDocument);
 		// The island appends later intent here until this replay takes it or the
 		// root unmounts. Suspended retries replace the root block, not its owner.
 		let intents: HydrationReplayIntent[] | null =
@@ -54108,6 +54117,9 @@ export function createIndependentHydrateActivator(
 			signalInstancePrefix: manifest.boundaryId,
 			...(signalOwner === undefined ? {} : { signalOwner }),
 			...(initialDocumentSignals === undefined ? {} : { initialDocumentSignals }),
+			...(authority === undefined
+				? {}
+				: { externalSnapshots: { documentId: authority.documentId } }),
 		});
 		if (notify !== null) {
 			// A root that failed during hydrateRoot owes nothing; never capture for it.
