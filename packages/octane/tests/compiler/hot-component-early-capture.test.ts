@@ -41,6 +41,21 @@ export function Counter() @{ <p>{count$.get() as string}</p> }`;
 		).toBeUndefined();
 	});
 
+	it.each([
+		'[Symbol.toPrimitive]() { capture(Counter); return "x"; }',
+		'toString() { return {}; }, valueOf() { capture(Counter); return "x"; }',
+		'toString() { capture(Counter); return "x"; }',
+	])('fences component capture during computed member key coercion: %s', (coercion) => {
+		const source = `import { useSignal$ } from 'octane/signals/client';
+import { capture } from './capture';
+const key = { ${coercion} };
+({})[key];
+export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as string}</p> }`;
+		expect(
+			compile(source, '/src/Counter.tsrx', { hmr: 'webpack', dev: true }).hotSignalModule,
+		).toBeUndefined();
+	});
+
 	it('admits later component references evaluated only when a component renders', () => {
 		const source = `import { useSignal$ } from 'octane/signals/client';
 export function App() @{ <Slot component={Counter} /> }

@@ -392,6 +392,12 @@ describe('hmr — runtime wrapper', () => {
 			after: 'function Helper() @{ <p>child:VERSION</p> }',
 		},
 		{
+			name: 'computed member key coerced only during rendering',
+			before: "const key = { [Symbol.toPrimitive]() { const Child = Helper; return 'child'; } };",
+			local: 'const Child = ({ child: Helper })[key];',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
 			name: 'ordinary data passed to an imported helper',
 			before:
 				"import { opaqueData } from './invoke'; const label = opaqueData({ label: 'child', values: [1, 2] });",
@@ -1397,6 +1403,14 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 			'function read() { return Counter; } const Initial = Reflect.apply(read, null, []); capture(Initial);',
 			'function read() { return Counter; } const Initial = Reflect.construct(read, []); capture(Initial);',
 			"Reflect.getOwnPropertyDescriptor({}, { toString() { capture(Counter); return 'x'; } });",
+			"const key = { [Symbol.toPrimitive]() { capture(Counter); return 'x'; } }; ({})[key];",
+			"const key = { toString() { capture(Counter); return 'x'; } }; ({})[key];",
+			"const key = { toString() { return {}; }, valueOf() { capture(Counter); return 'x'; } }; ({})[key];",
+			"const key = { [Symbol.toPrimitive]() { capture(Counter); return 'x'; } }; ({})?.[key];",
+			"const key = { [Symbol.toPrimitive]() { capture(Counter); return 'x'; } }; ({ [key]: null });",
+			"const key = { [Symbol.toPrimitive]() { capture(Counter); return 'x'; } }; ({ [key]() {} });",
+			"const key = { [Symbol.toPrimitive]() { capture(Counter); return 'x'; } }; class Holder { [key]() {} }",
+			"const key = { [Symbol.toPrimitive]() { capture(Counter); return 'x'; } }; class Holder { [key] = null; }",
 			'function expose() { return Counter; } const Initial = (true ? expose : () => null)(); capture(Initial);',
 			'function expose() { return Counter; } const Initial = (false ? () => null : expose)(); capture(Initial);',
 			'function expose() { return Counter; } const Initial = (false || expose)(); capture(Initial);',

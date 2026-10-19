@@ -9855,6 +9855,18 @@ function collectHotComponentExportFlows(input) {
 			const value = bindings.get(node.name)?.item.init ?? opaqueDeclarations.get(node.name);
 			if (value) return (position ?? node.start) < aggregateStart(value);
 		}
+		// Computed property names can execute authored ToPropertyKey coercion.
+		if (
+			!aggregate &&
+			node.computed &&
+			(node.type === 'MemberExpression' ||
+				node.type === 'OptionalMemberExpression' ||
+				node.type === 'Property' ||
+				node.type === 'MethodDefinition' ||
+				node.type === 'PropertyDefinition') &&
+			(position ?? node.start) < aggregateStart(node.property ?? node.key)
+		)
+			return true;
 		// A local aggregate may expose an executing method/getter through aliases
 		// or rewritten properties, destructuring or spread. Inspect its reachable
 		// closures without trusting a selected property shape; unrelated early
