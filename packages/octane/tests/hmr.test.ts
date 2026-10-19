@@ -317,6 +317,18 @@ describe('hmr — runtime wrapper', () => {
 			after: 'function Helper() @{ <p>child:VERSION</p> }',
 		},
 		{
+			name: 'optional receiver method evaluated only during rendering',
+			before: 'const api = { read: () => Helper };',
+			local: 'const Child = api?.read();',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'optional receiver getter evaluated only during rendering',
+			before: 'const api = { get component() { return Helper; } };',
+			local: 'const Child = api?.component;',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
 			name: 'getter evaluated only during rendering',
 			before:
 				'const api = { get component() { return Helper; } }; function deferred() { return api.component; }',
@@ -1365,6 +1377,10 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 			'const Initial = (() => Counter)(); capture(Initial);',
 			'const Initial = read(); function read() { return Counter; } capture(Initial);',
 			'const api = { read: () => Counter }; const Initial = api.read(); capture(Initial);',
+			'const api = { read: () => Counter }; const Initial = api?.read(); capture(Initial);',
+			'const api = { get component() { return Counter; } }; const Initial = api?.component; capture(Initial);',
+			'const api = { read: () => Counter }; const alias = api; const Initial = alias?.read(); capture(Initial);',
+			'const api = { read: () => Counter }; const Initial = api?.["read"](); capture(Initial);',
 			'const api = { read: () => null }; api.read = () => Counter; const Initial = api.read(); capture(Initial);',
 			'const api = { read: () => Counter }; const Initial = api["read"](); capture(Initial);',
 			'const api = { get component() { return Counter; } }; const Initial = api.component; capture(Initial);',
