@@ -24191,6 +24191,14 @@ class HydrationCapability {
 		return parseSeedJson(raw);
 	}
 
+	// Keep transport authority lookup behind the hydration-only capability.
+	streamedBoundaryStash(state: TrySlot): Record<string, string> | undefined {
+		const document = state.start.ownerDocument;
+		const target =
+			parentStreamedAuthority(state.parentBlock, document)?.target ?? document.defaultView;
+		return (target as { $OCTS?: Record<string, string> } | null)?.$OCTS;
+	}
+
 	isRejection(error: unknown): error is HydrationRejectionException {
 		return isHydrationRejection(error);
 	}
@@ -44696,14 +44704,6 @@ interface TryOps {
 }
 let TRY_OPS: TryOps | null = null;
 
-// A viewless document's live bootstrap owns its explicit transport target.
-function streamedBoundaryStash(state: TrySlot): Record<string, string> | undefined {
-	const document = state.start.ownerDocument;
-	const target =
-		parentStreamedAuthority(state.parentBlock, document)?.target ?? document.defaultView;
-	return (target as { $OCTS?: Record<string, string> } | null)?.$OCTS;
-}
-
 function takeInitialSuspenseHydration(
 	state: TrySlot,
 	hydration: HydrationCapability,
@@ -44717,7 +44717,7 @@ function takeInitialSuspenseHydration(
 		if (!hydration.isOpen(start)) return null;
 		const end = hydration.close(start);
 		const owner = marker as Comment;
-		const stash = streamedBoundaryStash(state);
+		const stash = hydration.streamedBoundaryStash(state);
 		let payload = initialStreamedPayloads?.get(owner);
 		if (payload === undefined) {
 			payload = {
@@ -45134,7 +45134,7 @@ function mountTry(state: TrySlot, claimsRetryOwners = false): void {
 		streamedBoundaryId = (
 			STAGED_DOM ? STAGED_DOM.view(adoptCursor as Comment) : (adoptCursor as Comment)
 		).data.slice(STREAM_SEED_COMMENT.length);
-		const stash = streamedBoundaryStash(state);
+		const stash = hydration.streamedBoundaryStash(state);
 		const raw = stash !== undefined ? stash[streamedBoundaryId] : undefined;
 		if (typeof raw === 'string') scopedSeeds = hydration.parseSeeds(raw);
 		const nativeRaw = stash?.[streamedBoundaryId + '$signals'];
@@ -45196,8 +45196,9 @@ function mountTry(state: TrySlot, claimsRetryOwners = false): void {
 	let nativeAdoption: NativeAdoptionState | undefined;
 	if (hydrating && scopedNativeRaw !== undefined && !freshBoundary) {
 		const boundaryId = streamedBoundaryId!;
+		const streamedStash = hydration!.streamedBoundaryStash;
 		nativeAdoption = ownNativeAdoption(b, scopedNativeRaw, () => {
-			const stash = streamedBoundaryStash(state);
+			const stash = streamedStash(state);
 			if (stash !== undefined) {
 				delete stash[boundaryId + '$signals'];
 				delete stash[boundaryId];
