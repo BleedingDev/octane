@@ -42904,6 +42904,13 @@ let HMR_RETAINED_BLOCKS: WeakMap<Block, HmrRetention> | null = null;
 let HMR_RESTART_PRIMARIES: WeakSet<Block> | null = null;
 const HMR_COMPONENT_IDENTITY = /* @__PURE__ */ Symbol.for('octane.hmr.identity');
 
+/** Private compiler ABI: stamp module-time identity outside authored lexical bindings. */
+export function __stampHmrComponent<P>(fn: ComponentBody<P>, identity: string): ComponentBody<P> {
+	// Earlier module code can make a hoisted declaration non-extensible.
+	if (Object.isExtensible(fn)) (fn as any)[HMR_COMPONENT_IDENTITY] = identity;
+	return fn;
+}
+
 function hmrRetentionPath(scope: Scope, root: Scope): unknown[] | null {
 	const path = signalRetryPath(scope, root);
 	if (path === null) return null;

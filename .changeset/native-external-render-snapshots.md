@@ -17,7 +17,7 @@ Router capture requires the server-load pending-state fix in TanStack/router#874
 
 Keep `octane/server` declarations usable without Node ambient types by isolating the unchanged Node stream adapter behind `octane/static`.
 
-Avoid mutating non-extensible hoisted component functions when adding development/HMR identity metadata.
+Avoid mutating non-extensible hoisted component functions when adding development/HMR identity metadata. Keep those identity operations outside authored Object, Symbol and globalThis bindings so valid modules also evaluate during development hot updates.
 
 Conservatively propagate hot updates to importers when early local calls, constructors, tagged templates, Reflect invocations, getters, local aliases or arguments, destructuring/defaults, static class initializers, spreads, iteration or decorators can capture a hoisted component. Iterative, cached local aggregate checks handle deep binding chains without recursive stack exhaustion. These checks include all reachable closures: unrelated early property reads, alias/closure assignments, static initializers and local lazy-helper arguments may also propagate, while ordinary initializer reads deferred until rendering remain eligible. Opaque calls and early JSX evaluation remain pre-existing analysis limitations.
 

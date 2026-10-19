@@ -196,7 +196,68 @@ function webpackHotModule(
 }
 
 describe('hmr — runtime wrapper', () => {
+	it.each(
+		(['webpack', 'vite'] as const).flatMap((dialect) =>
+			['before', 'after'].flatMap((position) =>
+				[false, true].map((returned) => ({ dialect, position, returned })),
+			),
+		),
+	)(
+		'updates with shadowed stamp globals in $dialect, declared $position, return JSX $returned',
+		({ dialect, position, returned }) => {
+			const data: Record<string, unknown> = {};
+			let dispose: ((data: Record<string, unknown>) => void) | undefined;
+			const hot: TestHotContext = {
+				data,
+				dispose(callback) {
+					dispose = callback;
+				},
+				accept() {},
+				invalidate() {
+					throw new Error('A compatible edit should stay hot');
+				},
+			};
+			const load = (version: number) => {
+				dispose?.(data);
+				dispose = undefined;
+				const shadow = 'const Object = null, Symbol = null, globalThis = null;';
+				const button = `<button onClick={props.click}>{'v${version}:' + props.count as string}</button>`;
+				const declaration = `export function Counter(props) ${returned ? '{' : '@{'} ${returned ? 'return ' : ''}${button}${returned ? ';' : ''} }`;
+				return loadCompiledFixtureSource<{ Counter: ComponentBody<any> }>(
+					`${position === 'before' ? shadow : ''} ${declaration} ${position === 'after' ? shadow : ''}`,
+					{
+						id: `/src/shadowed-stamp-${dialect}-${position}-${returned}.tsrx`,
+						mode: 'client',
+						compileOptions: { dev: true, hmr: dialect },
+						runtimeModules: { 'octane/signals': Signals },
+						importMeta: dialect === 'vite' ? { hot } : { webpackHot: hot },
+					},
+				).Counter;
+			};
+			const initial = load(1);
+			const click = vi.fn();
+			const r = mount(initial, { count: 1, click });
+			try {
+				expect(r.find('button').textContent).toBe('v1:1');
+				expect(load(2)).toBe(initial);
+				flushSync(() => {});
+				expect(r.find('button').textContent).toBe('v2:1');
+				r.click('button');
+				expect(click).toHaveBeenCalledOnce();
+				r.update(initial, { count: 2, click });
+				expect(r.find('button').textContent).toBe('v2:2');
+			} finally {
+				r.unmount();
+			}
+		},
+	);
+
 	it.each([
+		{
+			name: 'shadowed Object with native signal state',
+			declaration: 'const Object = null; export function Counter() @{ BODY }',
+			exported: 'Counter',
+		},
 		{
 			name: 'named block component',
 			declaration: 'export function Counter() @{ BODY }',
@@ -2984,45 +3045,10 @@ export const v2 = (_props: any, scope: any, _extra: any) => {
 
 	it('webpack HMR preserves named and default wrapper identity across repeated updates', async () => {
 		const { compile } = await import('octane/compiler');
-		const signals = await import('octane/signals');
-		const runtime = new Proxy(
-			{ hmr, HMR },
-			{
-				get(target, property) {
-					return (target as any)[property] ?? (() => undefined);
-				},
-			},
-		);
-		const compileVersion = (version: number) =>
-			compile(
-				`export function Named() @{ <span>{'named ${version}'}</span> }\n` +
-					`export default function Default() @{ <b>{'default ${version}'}</b> }\n`,
-				'file.tsrx',
-				{ hmr: 'webpack' },
-			).code;
-		const evaluate = (code: string, data: Record<string, any> | undefined) => {
-			const transformed =
-				code
-					.replace(/^import\s*\{([^}]*)\}\s*from\s*(['"])octane\2;/m, (_match, imports: string) => {
-						const properties = imports
-							.split(',')
-							.map((specifier) => specifier.trim().replace(/\s+as\s+/, ': '))
-							.join(', ');
-						return `const { ${properties} } = runtime;`;
-					})
-					.replace(
-						/^import\s*\{([^}]*)\}\s*from\s*(['"])octane\/signals\2;/gm,
-						(_match, imports: string) => {
-							const properties = imports
-								.split(',')
-								.map((specifier) => specifier.trim().replace(/\s+as\s+/, ': '))
-								.join(', ');
-							return `const { ${properties} } = signals;`;
-						},
-					)
-					.replace(/\bexport let /g, 'let ')
-					.replace(/export\s*\{\s*Default\s+as\s+default\s*\};/g, '')
-					.replaceAll('import.meta.webpackHot', 'hot') + '\nreturn { Named, default: Default };';
+		const source = (version: number) =>
+			`export function Named() @{ <span>{'named ${version}'}</span> }\n` +
+			`export default function Default() @{ <b>{'default ${version}'}</b> }\n`;
+		const evaluate = (source: string, data: Record<string, any> | undefined) => {
 			let dispose: ((value: Record<string, any>) => void) | undefined;
 			let accepted = false;
 			let invalidated = false;
@@ -3038,10 +3064,13 @@ export const v2 = (_props: any, scope: any, _extra: any) => {
 					invalidated = true;
 				},
 			};
-			const exports = Function('runtime', 'signals', 'hot', transformed)(runtime, signals, hot) as {
-				Named: any;
-				default: any;
-			};
+			const exports = loadCompiledFixtureSource<{ Named: any; default: any }>(source, {
+				id: 'file.tsrx',
+				mode: 'client',
+				compileOptions: { hmr: 'webpack' },
+				runtimeModules: { 'octane/signals': Signals },
+				importMeta: { webpackHot: hot },
+			});
 			const nextData: Record<string, any> = {};
 			dispose?.(nextData);
 			expect(accepted).toBe(true);
@@ -3049,10 +3078,10 @@ export const v2 = (_props: any, scope: any, _extra: any) => {
 			return { exports, data: nextData };
 		};
 
-		const first = evaluate(compileVersion(1), undefined);
+		const first = evaluate(source(1), undefined);
 		const firstNamedBody = first.exports.Named[HMR].fn;
 		const firstDefaultBody = first.exports.default[HMR].fn;
-		const second = evaluate(compileVersion(2), first.data);
+		const second = evaluate(source(2), first.data);
 		expect(second.exports.Named).toBe(first.exports.Named);
 		expect(second.exports.default).toBe(first.exports.default);
 		expect(second.exports.Named[HMR].fn).not.toBe(firstNamedBody);
@@ -3060,13 +3089,13 @@ export const v2 = (_props: any, scope: any, _extra: any) => {
 
 		const secondNamedBody = second.exports.Named[HMR].fn;
 		const secondDefaultBody = second.exports.default[HMR].fn;
-		const third = evaluate(compileVersion(3), second.data);
+		const third = evaluate(source(3), second.data);
 		expect(third.exports.Named).toBe(first.exports.Named);
 		expect(third.exports.default).toBe(first.exports.default);
 		expect(third.exports.Named[HMR].fn).not.toBe(secondNamedBody);
 		expect(third.exports.default[HMR].fn).not.toBe(secondDefaultBody);
 
-		const output = compileVersion(3);
+		const output = compile(source(3), 'file.tsrx', { hmr: 'webpack' }).code;
 		expect(output).toContain('const _$webpackHot = import.meta.webpackHot;');
 		expect(output).toContain('_$webpackHot.dispose');
 		expect(output).toContain('_$webpackHot.accept();');
