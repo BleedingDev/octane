@@ -372,6 +372,12 @@ describe('hmr — runtime wrapper', () => {
 			after: '',
 		},
 		{
+			name: 'direct eval evaluated only during rendering',
+			before: 'function read() { return eval("Helper"); }',
+			local: 'const Child = read();',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
 			name: 'member helper evaluated only during rendering',
 			before: 'const api = { read: () => Helper }; function deferred() { return api.read(); }',
 			local: 'const Child = api.read();',
@@ -1403,6 +1409,41 @@ export function App(props) @{ <section>@if (props.visible) { <Slot component={pr
 		}
 	});
 
+	it('self-accepts direct eval after every component is initialized', () => {
+		let captured: ComponentBody<any> | undefined;
+		const hot = webpackHotModule(
+			'/src/late-eval-capture.tsrx',
+			{ dev: true },
+			{
+				'./capture': {
+					capture: (component: ComponentBody<any>) => {
+						captured = component;
+					},
+				},
+			},
+		);
+		const source = (version: number) => `import { useState } from 'octane';
+import { capture } from './capture';
+export function App() @{ const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{'v${version}:' + count as string}</button> }
+capture(eval("App"));`;
+		hot.load(source(1));
+		expect(hot.accepted).toBe(true);
+		const r = mount(captured!);
+		try {
+			r.click('button');
+			expect(r.find('button').textContent).toBe('v1:1');
+			hot.load(source(2));
+			flushSync(() => {});
+			expect(hot.accepted).toBe(true);
+			expect(hot.invalidated).toBe(false);
+			expect(r.find('button').textContent).toBe('v2:1');
+			r.click('button');
+			expect(r.find('button').textContent).toBe('v2:2');
+		} finally {
+			r.unmount();
+		}
+	});
+
 	it('self-accepts a deep module aggregate without exhausting the compiler stack', () => {
 		const bindings = Array.from(
 			{ length: 1500 },
@@ -1437,6 +1478,9 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 			'const Initial = Counter; capture(Initial);',
 			'const Initial = opaqueInvoke(read); function read() { return Counter; } capture(Initial);',
 			'const Initial = opaqueInvoke(() => Counter); capture(Initial);',
+			'const Initial = eval("Counter"); capture(Initial);',
+			'function read() { return eval("Counter"); } const Initial = read(); capture(Initial);',
+			'function read() { return eval("Counter"); } const Initial = opaqueInvoke(read); capture(Initial);',
 			'function read() { return Counter; } const Initial = opaqueObjectInvoke({ read }); capture(Initial);',
 			'class Registry { static read() { return Counter; } } const Initial = opaqueObjectInvoke(Registry); capture(Initial);',
 			'namespace Registry { export function read() { return Counter; } } const Initial = opaqueObjectInvoke(Registry); capture(Initial);',

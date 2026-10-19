@@ -9645,6 +9645,7 @@ function collectHotComponentExportFlows(input) {
 	const immutable = collectImmutableModuleFunctions(ast.body);
 	const opaqueDeclarations = new Map();
 	const components = new Map();
+	let lastComponentStart = -Infinity;
 	const bindings = new Map();
 	const memoImports = new Set();
 	const namespaces = new Set();
@@ -9653,8 +9654,10 @@ function collectHotComponentExportFlows(input) {
 			statement.type === 'ExportNamedDeclaration' || statement.type === 'ExportDefaultDeclaration'
 				? statement.declaration
 				: statement;
-		if (isComponentFunction(declaration) || isReturnJsxFunction(declaration))
+		if (isComponentFunction(declaration) || isReturnJsxFunction(declaration)) {
 			components.set(declaration.id?.name, declaration);
+			lastComponentStart = Math.max(lastComponentStart, declaration.start);
+		}
 		if (
 			declaration?.id?.type === 'Identifier' &&
 			[
@@ -9794,6 +9797,14 @@ function collectHotComponentExportFlows(input) {
 	// are declared. Only evaluation before that binding initializes can retain
 	// a raw component; follow local calls and IIFEs at their call-site position.
 	const aggregateStarts = new Map();
+	const isDirectEval = (node) => {
+		const callee = node.type === 'CallExpression' && !node.optional && unwrapTsExpr(node.callee);
+		return (
+			callee?.type === 'Identifier' &&
+			callee.name === 'eval' &&
+			lexical.resolveBinding(lexical.nodeScopes.get(callee) ?? lexical.rootScope, 'eval') === null
+		);
+	};
 	const aggregateStart = (value) => {
 		if (aggregateStarts.has(value)) return aggregateStarts.get(value);
 		// Complete each value's reachability query independently. A partial
@@ -9814,6 +9825,8 @@ function collectHotComponentExportFlows(input) {
 				continue;
 			}
 			if (node.type === 'ImportDeclaration' || node.type === 'ExportSpecifier') continue;
+			// Direct eval can read any lexical component without naming it in this AST.
+			if (isDirectEval(node)) latest = Math.max(latest, lastComponentStart);
 			if (rootReference(node) && isIdentifierReference(node, parent, key, lexical)) {
 				const component = components.get(node.name);
 				if (component) latest = Math.max(latest, component.start);
@@ -9846,6 +9859,7 @@ function collectHotComponentExportFlows(input) {
 			node.type === 'ExportSpecifier'
 		)
 			return false;
+		if (isDirectEval(node) && (position ?? node.start) < lastComponentStart) return true;
 		if (
 			rootReference(node) &&
 			isIdentifierReference(node, parent, key, lexical) &&
