@@ -3625,6 +3625,116 @@
       "message": "The hot signal generation has no current native publisher admission.",
       "runtime": ["client", "server"],
       "status": "active"
+    },
+    "364": {
+      "message": "Server function options accept only a local AbortSignal",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "365": {
+      "message": "Server function timed out",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "366": {
+      "message": "An error occurred while trying to call the Octane server function.",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "367": {
+      "message": "Server function call failed with status %s",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "368": {
+      "message": "The server does not support the requested result protocol",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "369": {
+      "message": "The server function endpoint returned an empty response. Is the Octane server running?",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "370": {
+      "message": "Server function returned an empty response",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "371": {
+      "message": "Server function canceled",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "372": {
+      "message": "Invalid one-shot server result",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "373": {
+      "message": "Invalid server result opening frame",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "374": {
+      "message": "A server result stream supports one consumer",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "375": {
+      "message": "Invalid server result continuation",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "376": {
+      "message": "Invalid server argument protocol",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "377": {
+      "message": "Invalid server arguments",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "378": {
+      "message": "Server function outcome is uncertain",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "379": {
+      "message": "A server-call batch requires independent reads and authority/document keys",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "380": {
+      "message": "Server result limits must be positive safe integers",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "381": {
+      "message": "A server result frame cannot exceed the total response budget",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "382": {
+      "message": "Invalid or out-of-order server result frame",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "383": {
+      "message": "Invalid server result frame",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "384": {
+      "message": "Server result ended without a terminal frame",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "385": {
+      "message": "Server result exceeded its response budget",
+      "runtime": ["client", "server"],
+      "status": "active"
     }
   },
   "strongDiagnostics": {

@@ -1,3 +1,4 @@
+import { formatClientError } from './error-codes.client.generated.js';
 import { yieldForHostBudget } from './host-budget.js';
 import { decodeSignalValue, encodeSignalValue } from './data-encoding.js';
 import type { EncodedSignalValue } from './signals/types.js';
@@ -12,10 +13,10 @@ export function encodeServerArguments(args: unknown[]): string {
 export function decodeServerArguments(body: string): unknown[] {
 	const envelope: unknown = JSON.parse(body);
 	if (!Array.isArray(envelope) || envelope.length !== 2 || envelope[0] !== 1) {
-		throw new Error('Invalid server argument protocol');
+		throw new Error(formatClientError(376));
 	}
 	const args = decodeSignalValue(envelope[1] as EncodedSignalValue);
-	if (!Array.isArray(args)) throw new Error('Invalid server arguments');
+	if (!Array.isArray(args)) throw new Error(formatClientError(377));
 	return args;
 }
 
@@ -23,7 +24,7 @@ export function decodeServerArguments(body: string): unknown[] {
 export class ServerCallUncertainError extends Error {
 	readonly code = 'OCTANE_RPC_UNCERTAIN';
 	constructor(cause: unknown) {
-		super(cause instanceof Error ? cause.message : 'Server function outcome is uncertain', {
+		super(cause instanceof Error ? cause.message : formatClientError(378), {
 			cause,
 		});
 		this.name = 'ServerCallUncertainError';
@@ -49,9 +50,7 @@ export interface ServerCallBatchOptions extends ServerResultLimits {
 
 export function validateServerCallBatch(options: ServerCallBatchOptions): void {
 	if (options.kind !== 'independent-reads' || !options.authority || !options.document) {
-		throw new TypeError(
-			'A server-call batch requires independent reads and authority/document keys',
-		);
+		throw new TypeError(formatClientError(379));
 	}
 	serverResultLimits(options);
 }
@@ -70,11 +69,11 @@ export function serverResultLimits(limits: ServerResultLimits = {}): ResolvedSer
 	};
 	for (const value of Object.values(result)) {
 		if (!Number.isSafeInteger(value) || value <= 0) {
-			throw new RangeError('Server result limits must be positive safe integers');
+			throw new RangeError(formatClientError(380));
 		}
 	}
 	if (result.maxFrameBytes > result.maxTotalBytes) {
-		throw new RangeError('A server result frame cannot exceed the total response budget');
+		throw new RangeError(formatClientError(381));
 	}
 	return result;
 }
@@ -97,7 +96,7 @@ export function encodeServerResultFrame(sequence: number, frame: ServerResultFra
 export function decodeServerResultFrame(line: string, sequence: number): ServerResultFrame {
 	const frame: unknown = JSON.parse(line);
 	if (!Array.isArray(frame) || frame.length !== 4 || frame[0] !== 1 || frame[1] !== sequence) {
-		throw new Error('Invalid or out-of-order server result frame');
+		throw new Error(formatClientError(382));
 	}
 	const [, , kind, payload] = frame;
 	if (kind === 'value') {
@@ -105,7 +104,7 @@ export function decodeServerResultFrame(line: string, sequence: number): ServerR
 	}
 	if (kind === 'error' && typeof payload === 'string') return { kind, error: payload };
 	if ((kind === 'stream' || kind === 'complete') && payload === null) return { kind };
-	throw new Error('Invalid server result frame');
+	throw new Error(formatClientError(383));
 }
 
 /**
@@ -133,7 +132,7 @@ export function serverResultReader(
 			}
 			if (offset === chunk.length) {
 				const next = await reader.read();
-				if (next.done) throw new Error('Server result ended without a terminal frame');
+				if (next.done) throw new Error(formatClientError(384));
 				chunk = next.value;
 				offset = 0;
 				// Ready transport results re-enter the shared budget and retirement guard.
@@ -145,7 +144,7 @@ export function serverResultReader(
 			bytes += part.length;
 			totalBytes += part.length;
 			if (bytes > limits.maxFrameBytes || totalBytes > limits.maxTotalBytes) {
-				throw new Error('Server result exceeded its response budget');
+				throw new Error(formatClientError(385));
 			}
 			parts.push(part);
 			offset = end;

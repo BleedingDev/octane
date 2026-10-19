@@ -1,3 +1,4 @@
+import { formatClientError } from './error-codes.client.generated.js';
 import {
 	serverResultLimits,
 	serverResultReader,
@@ -10,8 +11,7 @@ export async function readServerResult(
 	response: Response,
 	options: ServerResultLimits & { signal?: AbortSignal | undefined } = {},
 ): Promise<unknown> {
-	if (response.body === null)
-		throw new ServerCallUncertainError(new Error('Server function returned an empty response'));
+	if (response.body === null) throw new ServerCallUncertainError(new Error(formatClientError(370)));
 	const limits = serverResultLimits(options);
 	const reader = response.body.getReader();
 	let finished = false;
@@ -36,13 +36,13 @@ export async function readServerResult(
 	};
 	const abort = () => {
 		failure = new ServerCallUncertainError(
-			options.signal?.reason ?? new DOMException('Server function canceled', 'AbortError'),
+			options.signal?.reason ?? new DOMException(formatClientError(371), 'AbortError'),
 		);
 		void close();
 	};
 	const timer = setTimeout(() => {
 		failure = new ServerCallUncertainError(
-			new DOMException('Server function timed out', 'TimeoutError'),
+			new DOMException(formatClientError(365), 'TimeoutError'),
 		);
 		void close();
 	}, limits.timeoutMs);
@@ -67,15 +67,15 @@ export async function readServerResult(
 	try {
 		const first = await next();
 		if (first.kind === 'value') {
-			if ((await next()).kind !== 'complete') throw new Error('Invalid one-shot server result');
+			if ((await next()).kind !== 'complete') throw new Error(formatClientError(372));
 			await close();
 			return first.value;
 		}
-		if (first.kind !== 'stream') throw new Error('Invalid server result opening frame');
+		if (first.kind !== 'stream') throw new Error(formatClientError(373));
 		let claimed = false;
 		return {
 			[Symbol.asyncIterator]() {
-				if (claimed) throw new Error('A server result stream supports one consumer');
+				if (claimed) throw new Error(formatClientError(374));
 				claimed = true;
 				let pulls: Promise<unknown> = Promise.resolve();
 				const pull = async (): Promise<IteratorResult<unknown>> => {
@@ -84,7 +84,7 @@ export async function readServerResult(
 					const frame = await next();
 					if (frame.kind === 'value') return { done: false, value: frame.value };
 					await close();
-					if (frame.kind !== 'complete') throw new Error('Invalid server result continuation');
+					if (frame.kind !== 'complete') throw new Error(formatClientError(375));
 					return { done: true, value: undefined };
 				};
 				return {

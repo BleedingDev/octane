@@ -4,14 +4,15 @@ import test from 'node:test';
 import { build } from 'esbuild';
 import { compile } from '../../packages/octane/src/compiler/compile.js';
 
-async function bundleCall(contextual) {
+async function bundleCall(contextual, batching = false) {
 	const directory = path.resolve('packages/octane');
 	const source = `module server {
 ${contextual ? "import type { ServerCallContext } from 'octane/server';" : ''}
 export function read(value: string${contextual ? ', context: ServerCallContext' : ''}) { return value; }
 }
 import { read } from 'server';
-export { read };`;
+export { read };
+${batching ? "export { batchServerCalls } from 'octane';" : ''}`;
 	const { code } = compile(source, path.join(directory, 'RpcClient.tsrx'), {
 		mode: 'client',
 		dev: false,
@@ -46,6 +47,16 @@ function devalueBytes(result) {
 test('compiled contextual RPC clients omit the unused legacy serializer and preserve local options', async (t) => {
 	const contextual = await bundleCall(true);
 	const legacy = await bundleCall(false);
+	const batched = await bundleCall(true, true);
+	const batchProtocol = 'application/x-octane-rpc-batch+ndjson';
+	assert.ok(
+		!contextual.outputFiles[0].text.includes(batchProtocol),
+		'ordinary RPC omits the optional batch transport',
+	);
+	assert.ok(
+		batched.outputFiles[0].text.includes(batchProtocol),
+		'an explicit batch export retains its transport',
+	);
 	assert.ok(devalueBytes(legacy) > 0, 'the legacy protocol still carries its required serializer');
 	assert.equal(
 		devalueBytes(contextual),

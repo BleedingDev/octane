@@ -222,6 +222,40 @@ describe('finite server-call batches through the HTTP authorization boundary', (
 		expect(invoke).not.toHaveBeenCalled();
 	});
 
+	it('restores an outer collection after a nested batch and keeps later calls unbatched', async () => {
+		const { requests } = endpoint({
+			aaaaaaaa: () => 'outer first',
+			bbbbbbbb: () => 'inner',
+			cccccccc: () => 'outer last',
+			dddddddd: () => 'ordinary',
+		});
+		const calls = batchServerCalls(policy, () => [
+			__serverRpc('aaaaaaaa', [], {}, true),
+			batchServerCalls({ ...policy, document: 'document:B' }, () =>
+				__serverRpc('bbbbbbbb', [], {}, true),
+			),
+			__serverRpc('cccccccc', [], {}, true),
+		]);
+		const ordinary = __serverRpc('dddddddd', [], {}, true);
+		await expect(Promise.all([...calls, ordinary])).resolves.toEqual([
+			'outer first',
+			'inner',
+			'outer last',
+			'ordinary',
+		]);
+		expect(requests).toHaveLength(3);
+		const batches = requests.filter(
+			(request) => request.headers.get('Accept') === 'application/x-octane-rpc-batch+ndjson',
+		);
+		expect(batches.map((request) => new URL(request.url).pathname).sort()).toEqual([
+			'/_$_ripple_rpc_$_/aaaaaaaa',
+			'/_$_ripple_rpc_$_/bbbbbbbb',
+		]);
+		expect(
+			requests.find((request) => request.url.endsWith('/dddddddd'))!.headers.get('Accept'),
+		).toBe('application/x-octane-rpc+ndjson');
+	});
+
 	it('settles all 32 staggered finite results without retaining a subscription', async () => {
 		const count = 32;
 		const functions = Object.fromEntries(

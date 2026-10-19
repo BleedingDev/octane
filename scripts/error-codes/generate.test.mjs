@@ -443,3 +443,64 @@ test('keeps the static Node adapter on the server error surface', () => {
 		/constructs Error without a direct formatServerError/,
 	);
 });
+
+test('validates RPC catalog calls while preserving foreign protocol errors', () => {
+	for (const [filename, surface, runtime] of [
+		['server-rpc-client.ts', 'client', ['client']],
+		['server-rpc-stream-client.ts', 'shared', ['client', 'server']],
+	]) {
+		const input = catalog({ codes: { 1: { ...catalog().codes[1], runtime } } });
+		assert.equal(frameworkErrorSurface(filename), surface);
+		assert.doesNotThrow(() =>
+			validateRuntimeUsages(input, [
+				[
+					filename,
+					'const message = response.body; void formatClientError(1, value); throw new Error(message);',
+				],
+			]),
+		);
+		for (const [source, failure] of [
+			['void formatClientError(2);', /references unknown client code 2/],
+			['void formatClientError(1);', /passes 0 arguments/],
+			['void formatClientError(code, value);', /must reference a literal/],
+			['void formatServerError(1, value);', /cannot use the server formatter/],
+		]) {
+			assert.throws(() => validateRuntimeUsages(input, [[filename, source]]), failure);
+		}
+		assert.throws(
+			() => validateRuntimeUsages(input, [[filename, 'throw new Error(frame.error);']]),
+			/has no runtime call site/,
+		);
+	}
+	assert.throws(
+		() =>
+			validateRuntimeUsages(catalog(), [
+				['server-rpc-stream-client.ts', 'throw new Error(formatClientError(1, value));'],
+			]),
+		/not registered for server/,
+	);
+});
+
+test('requires coded protocol diagnostics on both client and server surfaces', () => {
+	const filename = 'server-rpc-protocol.ts';
+	const shared = catalog({
+		codes: { 1: { ...catalog().codes[1], runtime: ['client', 'server'] } },
+	});
+	assert.equal(frameworkErrorSurface(filename), 'shared');
+	assert.doesNotThrow(() =>
+		validateRuntimeUsages(shared, [
+			[filename, 'throw new RangeError(formatClientError(1, value));'],
+		]),
+	);
+	assert.throws(
+		() => validateRuntimeUsages(shared, [[filename, "throw new RangeError('uncatalogued');"]]),
+		/constructs RangeError without a direct formatClientError/,
+	);
+	assert.throws(
+		() =>
+			validateRuntimeUsages(catalog(), [
+				[filename, 'throw new RangeError(formatClientError(1, value));'],
+			]),
+		/not registered for server/,
+	);
+});

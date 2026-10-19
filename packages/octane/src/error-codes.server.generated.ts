@@ -266,6 +266,23 @@ type ServerErrorArguments = {
 	361: [];
 	362: [];
 	363: [];
+	365: [];
+	370: [];
+	371: [];
+	372: [];
+	373: [];
+	374: [];
+	375: [];
+	376: [];
+	377: [];
+	378: [];
+	379: [];
+	380: [];
+	381: [];
+	382: [];
+	383: [];
+	384: [];
+	385: [];
 };
 
 export function formatServerError<Code extends keyof ServerErrorArguments>(
@@ -1106,6 +1123,46 @@ export function formatServerError<Code extends keyof ServerErrorArguments>(
 					'The hot signal generation has no current native publisher admission.',
 					args,
 				);
+			case 365:
+				return formatDevErrorMessage('Server function timed out', args);
+			case 370:
+				return formatDevErrorMessage('Server function returned an empty response', args);
+			case 371:
+				return formatDevErrorMessage('Server function canceled', args);
+			case 372:
+				return formatDevErrorMessage('Invalid one-shot server result', args);
+			case 373:
+				return formatDevErrorMessage('Invalid server result opening frame', args);
+			case 374:
+				return formatDevErrorMessage('A server result stream supports one consumer', args);
+			case 375:
+				return formatDevErrorMessage('Invalid server result continuation', args);
+			case 376:
+				return formatDevErrorMessage('Invalid server argument protocol', args);
+			case 377:
+				return formatDevErrorMessage('Invalid server arguments', args);
+			case 378:
+				return formatDevErrorMessage('Server function outcome is uncertain', args);
+			case 379:
+				return formatDevErrorMessage(
+					'A server-call batch requires independent reads and authority/document keys',
+					args,
+				);
+			case 380:
+				return formatDevErrorMessage('Server result limits must be positive safe integers', args);
+			case 381:
+				return formatDevErrorMessage(
+					'A server result frame cannot exceed the total response budget',
+					args,
+				);
+			case 382:
+				return formatDevErrorMessage('Invalid or out-of-order server result frame', args);
+			case 383:
+				return formatDevErrorMessage('Invalid server result frame', args);
+			case 384:
+				return formatDevErrorMessage('Server result ended without a terminal frame', args);
+			case 385:
+				return formatDevErrorMessage('Server result exceeded its response budget', args);
 			default:
 				return formatUnknownDevErrorMessage(code);
 		}
