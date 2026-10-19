@@ -23,6 +23,15 @@ describe('published package export contract', () => {
 		);
 	});
 
+	it('retains the static Node stream API through its separate implementation', () => {
+		expect(() => assertRequiredPublicValueExports('./static', ['prerender'])).toThrow(
+			'./static omitted required named exports: prerenderToNodeStream',
+		);
+		expect(() =>
+			assertRequiredPublicValueExports('./static', ['prerender', 'prerenderToNodeStream']),
+		).not.toThrow();
+	});
+
 	it('checks every JavaScript branch of conditional exports', () => {
 		const entries = publishedRuntimeEntries({
 			'./feature': {

@@ -205,6 +205,50 @@ test('native exceptions are specific operations, not blanket function exemptions
 	);
 });
 
+test('publisher hydration exemptions retain operation and owner boundaries', () => {
+	const findings = inspectStagedDOM(`
+	function remountPublisherHydration(document: Document, wrapper: Element) {
+	 const start = document.createComment('hydrate');
+	 wrapper.append(start);
+	 wrapper.textContent = 'early';
+	 wrapper.removeAttribute('title');
+	}
+	class HydrationCapability {
+	 allowAttribute(el: Element) {
+	  const current = Element.prototype.getAttributeNS.call(el, 'namespace', 'title');
+	  el.setAttributeNS('namespace', 'title', 'early');
+	  return current;
+	 }
+	 saveAttribute(el: Element) {
+	  const current = Element.prototype.getAttribute.call(el, 'title');
+	  const methods = Element.prototype;
+	  methods.removeAttributeNS.call(el, 'namespace', 'title');
+	  methods.removeAttribute.call(el, 'title');
+	  methods.setAttributeNS.call(el, 'namespace', 'title', current!);
+	  methods.setAttribute.call(el, 'title', current!);
+	  el.setAttribute('title', 'early');
+	 }
+	}
+	function renderHost(document: Document, wrapper: Element) {
+	 function remountPublisherHydration() {
+	  const start = document.createComment('hydrate');
+	  wrapper.append(start);
+	 }
+	 remountPublisherHydration();
+	}`);
+	assert.deepEqual(
+		findings.map((finding) => [finding.owner, finding.operation]),
+		[
+			['remountPublisherHydration', 'write:textContent'],
+			['remountPublisherHydration', 'call:removeAttribute'],
+			['HydrationCapability.allowAttribute', 'call:setAttributeNS'],
+			['HydrationCapability.saveAttribute', 'call:setAttribute'],
+			['<nested>.remountPublisherHydration', 'call:createComment'],
+			['<nested>.remountPublisherHydration', 'call:append'],
+		],
+	);
+});
+
 test('nested declarations cannot reuse a reviewed native-operation exemption', () => {
 	const findings = inspectStagedDOM(`
 	function renderHost(el: HTMLElement) {

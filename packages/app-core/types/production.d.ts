@@ -92,13 +92,13 @@ export interface ServerManifest {
 export interface HandlerOptions {
 	/** `renderToReadableStream` from 'octane/server' (the streaming engine dev SSR uses) */
 	renderToReadableStream: (
-		component: Function,
+		component: (...args: any[]) => any,
 		props?: unknown,
 		options?: StreamOptions,
 	) => Promise<ReadableStream<Uint8Array>>;
 	/** `prerender` from 'octane/static' (the buffered await-everything fallback) */
 	prerender: (
-		component: Function,
+		component: (...args: any[]) => any,
 		props?: unknown,
 		options?: RenderOptions,
 	) => Promise<RenderResult>;

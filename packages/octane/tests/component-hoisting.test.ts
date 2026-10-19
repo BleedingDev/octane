@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { compile } from 'octane/compiler';
 import * as ServerRuntime from 'octane/server';
 import { mount } from './_helpers.js';
-import { loadServerFixture } from './_server-fixture.js';
+import { loadCompiledFixtureSource, loadServerFixture } from './_server-fixture.js';
 // Client compile of the same module: importing it at all is half the contract —
 // a TDZ lowering would throw during module evaluation, before any test runs.
 import { Registry } from './_fixtures/hoisted-component-ref.tsrx';
@@ -19,7 +19,7 @@ describe('component hoisting (reference above declaration)', () => {
 	it('client: the early capture is the live component and renders', () => {
 		expect(typeof Registry.component).toBe('function');
 		expect(typeof Registry.fallback).toBe('function');
-		const mounted = mount(Registry.component as any, { title: 'Hoisted' });
+		const mounted = mount(Registry.component, { title: 'Hoisted' });
 		try {
 			expect(mounted.find('.card h2').textContent).toBe('Hoisted');
 			expect(mounted.find('.empty').textContent).toBe('nothing yet');
@@ -29,7 +29,7 @@ describe('component hoisting (reference above declaration)', () => {
 	});
 
 	it('server: the same module evaluates and renders through octane/server', () => {
-		const server = loadServerFixture(FIXTURE);
+		const server = loadServerFixture<{ Registry: typeof Registry }>(FIXTURE);
 		expect(typeof server.Registry.component).toBe('function');
 		const { html } = ServerRuntime.renderToString(server.Registry.component, {
 			title: 'Hoisted',
@@ -37,6 +37,66 @@ describe('component hoisting (reference above declaration)', () => {
 		expect(html).toContain('Hoisted');
 		expect(html).toContain('nothing yet');
 	});
+});
+
+describe.each([
+	['block', `function Counter() @{ BODY }`],
+	['returned JSX', `function Counter() { BODY }`],
+])('early non-extensible %s components', (_syntax, declaration) => {
+	it.each(
+		(['freeze', 'seal', 'preventExtensions'] as const).flatMap((operation) =>
+			(
+				[
+					{ mode: 'client', hmr: false },
+					{ mode: 'client', hmr: 'vite' },
+					{ mode: 'client', hmr: 'webpack' },
+					{ mode: 'server', hmr: false },
+				] as const
+			).map((options) => ({ operation, ...options })),
+		),
+	)(
+		'preserves Object.$operation before declaration in $mode with HMR $hmr',
+		({ operation, mode, hmr }) => {
+			const output = `<><button id="early" onClick={() => setCount(count + 1)}>{'early:' + count}</button><span>captured</span></>`;
+			const body = `const [count, setCount] = useState(0); ${_syntax === 'block' ? output : `return ${output};`}`;
+			const source = `import { useState } from 'octane';
+export const Registry = { component: Counter };
+Object.${operation}(Counter);
+${declaration.replace('BODY', body)}
+export function Neighbor() @{
+	const [count, setCount] = useState(0);
+	<button id="neighbor" onClick={() => setCount(count + 1)}>{'neighbor:' + count}</button>
+}
+export function App() @{
+	const Captured = Registry.component;
+	<main><Captured/><Neighbor/></main>
+}`;
+			const { App, Registry } = loadCompiledFixtureSource(source, {
+				id: '/early-non-extensible-component.tsrx',
+				mode,
+				compileOptions: { hmr, dev: hmr !== false },
+				importMeta: {},
+			});
+			expect(Object.isExtensible(Registry.component)).toBe(false);
+			if (mode === 'server') {
+				const { html } = ServerRuntime.renderToString(App);
+				expect(html).toContain('early:0');
+				expect(html).toContain('neighbor:0');
+				return;
+			}
+			const mounted = mount(App);
+			try {
+				expect(mounted.find('#early').textContent).toBe('early:0');
+				expect(mounted.find('#neighbor').textContent).toBe('neighbor:0');
+				mounted.click('#early');
+				mounted.click('#neighbor');
+				expect(mounted.find('#early').textContent).toBe('early:1');
+				expect(mounted.find('#neighbor').textContent).toBe('neighbor:1');
+			} finally {
+				mounted.unmount();
+			}
+		},
+	);
 });
 
 // Emission-shape pins for two hoisting-path hazards. These assert narrow,

@@ -115,6 +115,14 @@ export function pluginOctane(value) {
 			const appliesToEnvironment = (environment) =>
 				(options.environments === undefined || options.environments.includes(environment.name)) &&
 				(!options.application || /^(?:lynx|web)(?:-|$)/.test(environment.name));
+			api.modifyEnvironmentConfig?.((config, { name, mergeEnvironmentConfig }) => {
+				if (!appliesToEnvironment({ name })) return;
+				// Published Octane is ESNext JavaScript, so Rspeedy's node_modules
+				// exclusion would otherwise leave syntax unsupported by the Lynx encoder.
+				return mergeEnvironmentConfig(config, {
+					source: { include: [/[\\/]node_modules[\\/]octane[\\/]dist[\\/]/] },
+				});
+			});
 			if (options.application) {
 				exposeLynxTemplatePlugin(api);
 				configureLynxCSS(api, options.environments);

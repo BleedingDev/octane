@@ -97,8 +97,7 @@ async function hydrateScenario(options: {
 	const { bootstrapStreamedSignalHydration } =
 		await import('../../src/hydration/streamed-signals.js');
 	const { loadCompiledFixtureSource } = await import('../_server-fixture.js');
-	const { activateStreamedMarkup, resetStreamRuntimeGlobals } =
-		await import('../_server-stream.js');
+	const { activateStreamedMarkup, createStreamedDocument } = await import('../_server-stream.js');
 	const { drainProducers } = await import('../_fixtures/signals-async-controls.js');
 	const signalModules = {
 		'octane/signals': signals,
@@ -129,8 +128,8 @@ async function hydrateScenario(options: {
 	};
 	let setId: ((id: string) => void) | undefined;
 	const streamedSignals = { buildId: 'query-get', documentId: 'query-get' };
-	const container = document.createElement('div');
-	document.body.append(container);
+	const responseDocument = createStreamedDocument();
+	const { container } = responseDocument;
 	let root: ReturnType<typeof client.hydrateRoot> | undefined;
 	let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 	try {
@@ -147,7 +146,10 @@ async function hydrateScenario(options: {
 		expect(result.textContent).toBe(`server ${options.serverId}`);
 		const recoverable: Error[] = [];
 		const uncaught: unknown[] = [];
-		hydration = bootstrapStreamedSignalHydration(streamedSignals);
+		hydration = bootstrapStreamedSignalHydration({
+			...streamedSignals,
+			document: responseDocument.document,
+		});
 		root = client.hydrateRoot(
 			container,
 			clientModule.App,
@@ -180,7 +182,7 @@ async function hydrateScenario(options: {
 		root?.unmount();
 		hydration?.dispose();
 		container.remove();
-		resetStreamRuntimeGlobals();
+		responseDocument.dispose();
 	}
 }
 

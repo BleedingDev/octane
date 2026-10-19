@@ -1,3 +1,4 @@
+import { formatClientError } from './error-codes.client.generated.js';
 import * as devalue from 'devalue';
 import type { ServerCallOptions } from './server-call.js';
 import {
@@ -10,29 +11,75 @@ import {
 import { readServerResult } from './server-rpc-stream-client.js';
 import { enqueueServerCall } from './server-rpc-batch-client.js';
 
+// The native getter checks the AbortSignal brand across same-origin realms.
+const signalAborted = /* @__PURE__ */ (() =>
+	typeof AbortSignal === 'undefined'
+		? undefined
+		: Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')?.get)();
+
+function isAbortSignal(signal: unknown): signal is AbortSignal {
+	if (signalAborted === undefined) return false;
+	try {
+		signalAborted.call(signal);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Compiler target for browser calls to a `module server` export.
  * @internal
  */
-export async function __serverRpc(
+export function __serverRpc(
 	hash: string,
 	args: unknown[],
 	options: ServerCallOptions = {},
 	stream = false,
 	limits?: ServerResultLimits,
 ): Promise<unknown> {
+	return dispatchServerRpc(
+		hash,
+		args,
+		options,
+		stream,
+		limits,
+		stream ? encodeServerArguments : devalue.stringify,
+		stream ? undefined : devalue.parse,
+	);
+}
+
+/** @internal Compiler target when ServerCallContext proves the bounded protocol. */
+export function __serverRpcStream(
+	hash: string,
+	args: unknown[],
+	options: ServerCallOptions = {},
+	limits?: ServerResultLimits,
+): Promise<unknown> {
+	return dispatchServerRpc(hash, args, options, true, limits, encodeServerArguments);
+}
+
+async function dispatchServerRpc(
+	hash: string,
+	args: unknown[],
+	options: ServerCallOptions,
+	stream: boolean,
+	limits: ServerResultLimits | undefined,
+	encode: (args: unknown[]) => string,
+	decodeLegacy?: (body: string) => { value: unknown },
+): Promise<unknown> {
 	if (
 		options === null ||
 		typeof options !== 'object' ||
 		Object.keys(options).some((key) => key !== 'signal') ||
-		(options.signal !== undefined && !(options.signal instanceof AbortSignal))
+		(options.signal !== undefined && !isAbortSignal(options.signal))
 	)
-		throw new TypeError('Server function options accept only a local AbortSignal');
+		throw new TypeError(formatClientError(364));
 	options.signal?.throwIfAborted();
 	const resolvedLimits = stream ? serverResultLimits(limits) : undefined;
 	// Encoding can fail (for example an unresolved Promise); never dispatch first.
-	const payload = stream ? encodeServerArguments(args) : devalue.stringify(args);
-	if (stream) {
+	const payload = encode(args);
+	if (stream && enqueueServerCall) {
 		const batched = enqueueServerCall(hash, payload, options, limits);
 		if (batched !== undefined) return batched;
 	}
@@ -42,7 +89,7 @@ export async function __serverRpc(
 		resolvedLimits === undefined
 			? undefined
 			: setTimeout(() => {
-					cancellation!.abort(new DOMException('Server function timed out', 'TimeoutError'));
+					cancellation!.abort(new DOMException(formatClientError(365), 'TimeoutError'));
 				}, resolvedLimits.timeoutMs);
 	const signal =
 		cancellation === undefined
@@ -64,13 +111,11 @@ export async function __serverRpc(
 				signal: signal ?? null,
 			});
 		} catch (cause) {
-			throw new ServerCallUncertainError(
-				new Error('An error occurred while trying to call the Octane server function.', { cause }),
-			);
+			throw new ServerCallUncertainError(new Error(formatClientError(366), { cause }));
 		}
 
 		if (!response.ok) {
-			let message = `Server function call failed with status ${response.status}`;
+			let message = formatClientError(367, response.status);
 			// Unframed HTTP error bodies have no result budget or completion
 			// contract. In the bounded protocol, status/outcome are sufficient;
 			// cleanup cannot delay settlement or expose private server diagnostics.
@@ -100,15 +145,13 @@ export async function __serverRpc(
 		if (stream) {
 			if (response.headers.get('content-type')?.split(';', 1)[0] !== SERVER_RESULT_CONTENT_TYPE) {
 				void response.body?.cancel().catch(() => {});
-				throw new ServerCallUncertainError(
-					new Error('The server does not support the requested result protocol'),
-				);
+				throw new ServerCallUncertainError(new Error(formatClientError(368)));
 			}
 			const remaining = deadline! - Date.now();
 			if (remaining <= 0) {
 				void response.body?.cancel().catch(() => {});
 				throw new ServerCallUncertainError(
-					new DOMException('Server function timed out', 'TimeoutError'),
+					new DOMException(formatClientError(365), 'TimeoutError'),
 				);
 			}
 			// The reader inherits the same absolute deadline. For a returned iterable,
@@ -123,14 +166,10 @@ export async function __serverRpc(
 			throw new ServerCallUncertainError(error);
 		}
 		if (body === '') {
-			throw new ServerCallUncertainError(
-				new Error(
-					'The server function endpoint returned an empty response. Is the Octane server running?',
-				),
-			);
+			throw new ServerCallUncertainError(new Error(formatClientError(369)));
 		}
 		try {
-			return devalue.parse(body).value;
+			return decodeLegacy!(body).value;
 		} catch (error) {
 			throw new ServerCallUncertainError(error);
 		}

@@ -102,7 +102,7 @@ export function createPackedJavascriptConsumerManifest(archiveSpecs) {
 	};
 }
 
-const packedRuntimeConsumerPackages = [
+export const PACKED_RUNTIME_CONSUMER_PACKAGES = [
 	'@octanejs/alien-signals',
 	'@octanejs/apollo-client',
 	'@octanejs/dropzone',
@@ -118,7 +118,7 @@ export function createPackedRuntimeConsumerDependencies(manifests, archiveSpecs)
 	const dependencies = {};
 	for (const packageName of findPackedWorkspaceDependencyClosure(
 		manifests,
-		packedRuntimeConsumerPackages,
+		PACKED_RUNTIME_CONSUMER_PACKAGES,
 	)) {
 		const archiveSpec = archiveSpecs[packageName];
 		if (typeof archiveSpec !== 'string' || !archiveSpec.startsWith('file:')) {
@@ -127,6 +127,84 @@ export function createPackedRuntimeConsumerDependencies(manifests, archiveSpecs)
 		dependencies[packageName] = archiveSpec;
 	}
 	return dependencies;
+}
+
+function renderPackedExternalSnapshotConsumerProbe() {
+	return `async function verifyPackedExternalSnapshots() {
+	for (const name of ['externalSnapshotBoundary', 'registerExternalSnapshotContext', 'decodeExternalSnapshot', 'serializeExternalSnapshotRequest']) {
+		assert.equal(typeof octane[name], 'function', name);
+	}
+	const authority = { publisherBuildId: 'packed-publisher', runtimeABI: 1 };
+	const Theme = server.createContext('missing host context');
+	const decoded = [];
+	const disposed = [];
+	const requests = [];
+	const leases = [];
+	const unregister = server.registerExternalSnapshotContext(Theme, {
+		key: 'packed-theme',
+		encode: value => value,
+		decode: value => { decoded.push(value); return value; },
+		dispose: value => { disposed.push(value); },
+	});
+	try {
+		const Remote = props => server.createElement('output', {
+			children: server.useContext(Theme) + ':' + props.label,
+		});
+		const Boundary = server.externalSnapshotBoundary({
+			authority,
+			component: Remote,
+			contextKeys: ['packed-theme'],
+			async snapshot(request, signal) {
+				const wire = octane.serializeExternalSnapshotRequest(request);
+				const admitted = server.decodeExternalSnapshotRequest(wire, authority);
+				assert.deepEqual(admitted, request);
+				requests.push(wire);
+				const prepared = await server.prepareExternalSnapshotRequest(wire, { authority, signal });
+				leases.push(prepared);
+				try {
+					const snapshot = await server.renderExternalSnapshot(Remote, prepared);
+					return octane.decodeExternalSnapshot(server.serializeExternalSnapshot(snapshot));
+				} finally {
+					await server.releasePreparedExternalSnapshotRequest(prepared);
+					await server.releasePreparedExternalSnapshotRequest(prepared);
+				}
+			},
+		});
+		const Host = () => server.createElement(Theme, {
+			value: 'host context',
+			children: server.createElement(Boundary, { label: 'packed publisher' }),
+		});
+		const stream = await server.renderToReadableStream(Host, undefined, {
+			externalSnapshots: { documentId: 'packed-document' },
+		});
+		const html = await new Response(stream).text();
+		assert.match(html, /host context:packed publisher/);
+		assert.ok(requests.length > 0);
+		assert.ok(decoded.length > 0);
+		for (const value of decoded) assert.equal(value, 'host context');
+		assert.deepEqual(disposed, decoded);
+		for (const lease of leases) assert.equal(lease.signal.aborted, true);
+		for (const wire of requests) {
+			assert.equal(server.decodeExternalSnapshotRequest(wire).documentId, 'packed-document');
+		}
+		const acquired = decoded.length;
+		await assert.rejects(server.prepareExternalSnapshotRequest(requests[0], {
+			authority: { publisherBuildId: 'foreign-publisher', runtimeABI: 1 },
+		}));
+		const controller = new AbortController();
+		const reason = new Error('packed request cancelled');
+		controller.abort(reason);
+		await assert.rejects(server.prepareExternalSnapshotRequest(requests[0], {
+			authority, signal: controller.signal,
+		}), error => error === reason);
+		assert.equal(decoded.length, acquired);
+		assert.deepEqual(disposed, decoded);
+		return { rendered: true, rejectedAuthority: true, cancelled: true, released: true };
+	} finally {
+		unregister();
+	}
+}
+`;
 }
 
 export function renderPackedCommonjsConsumerSource() {
@@ -142,12 +220,16 @@ assert.equal(typeof floating.useFloating, 'function');
 assert.equal(typeof radix.Accordion, 'object');
 const ssr = server.renderToString(() => 'conditions');
 assert.deepEqual(ssr, { html: 'conditions', css: '' });
+${renderPackedExternalSnapshotConsumerProbe()}
+verifyPackedExternalSnapshots().then(externalSnapshots => {
 process.stdout.write(JSON.stringify({
 	floating: Object.keys(floating),
 	octane: Object.keys(octane),
 	radix: Object.keys(radix),
 	ssr,
+	externalSnapshots,
 }));
+}).catch(error => { console.error(error); process.exitCode = 1; });
 `;
 }
 
@@ -170,12 +252,15 @@ assert.equal(typeof StoreInspector, 'function');
 assert.equal(typeof radix.Accordion, 'object');
 const ssr = server.renderToString(() => 'conditions');
 assert.deepEqual(ssr, { html: 'conditions', css: '' });
+${renderPackedExternalSnapshotConsumerProbe()}
+const externalSnapshots = await verifyPackedExternalSnapshots();
 process.stdout.write(JSON.stringify({
 	base: Object.keys(base),
 	floating: Object.keys(floating),
 	octane: Object.keys(octane),
 	radix: Object.keys(radix),
 	ssr,
+	externalSnapshots,
 }));
 `;
 }
@@ -200,6 +285,7 @@ export const PACKED_STRICT_BROWSER_SOURCE_PACKAGES = [
 	'@octanejs/remix-router',
 	'@octanejs/visx',
 	'@octanejs/recharts',
+	'@octanejs/tanstack-router',
 ];
 
 const strictBrowserSourcePackages = new Set(PACKED_STRICT_BROWSER_SOURCE_PACKAGES);
@@ -631,7 +717,12 @@ export function assertPackedTsrxLaneSentinelReported(result, label) {
 // These packages have deliberate API assertions in the hand-authored consumer
 // probes. Keep them installed even when source compilation is temporarily
 // deferred for one of them.
+export const PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS = [
+	{ packageName: '@octanejs/mdx', sourceFile: 'src/server.tsrx' },
+];
+
 export const PACKED_TSRX_PROBE_PACKAGES = [
+	...PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS.map(({ packageName }) => packageName),
 	'@octanejs/cmdk',
 	'@octanejs/input-otp',
 	'@octanejs/recharts',
@@ -640,6 +731,7 @@ export const PACKED_TSRX_PROBE_PACKAGES = [
 	'@octanejs/syntax-highlighter',
 	'@octanejs/textarea-autosize',
 	'@octanejs/tiptap',
+	'@octanejs/tanstack-router',
 	'octane',
 ];
 
@@ -707,8 +799,112 @@ void packedIsWrong;
 `;
 }
 
+function renderPackedSnapshotTypeProbe() {
+	return `import {
+	decodeExternalSnapshot,
+ publisherBoundary,
+	registerExternalSnapshotContext,
+	serializeExternalSnapshotRequest,
+	type ExternalSnapshotContextCodec,
+	type ExternalSnapshotRequest,
+	type RootOptions,
+} from 'octane';
+import {
+	prepareExternalSnapshotRequest,
+ publisherBoundary as serverPublisherBoundary,
+	releasePreparedExternalSnapshotRequest,
+	renderExternalSnapshot,
+	serializeExternalSnapshot,
+	type ExternalSnapshotRenderOptions,
+	type PreparedExternalSnapshotRequest,
+} from 'octane/server';
+import { type HotSignalModuleManifest, type HotSignalModuleStamp, __hotSignalModule, __registerHotSignalComponent, __remountHotSignalComponent } from 'octane/signals';
+import {
+	assertDefaultRouterRenderHost,
+	associateRouterRenderProfile,
+	captureRouterRenderSnapshot,
+	createRouterRenderRouteTree,
+	defaultParseSearch,
+	defaultStringifySearch,
+	disposeRouterRenderSnapshot,
+	getRouterRenderProfile,
+	registerRouterRenderProfile,
+	restoreRouterRenderSnapshot,
+	type RouterRenderJsonRecord,
+	type RouterRenderProfile,
+} from '@octanejs/tanstack-router';
+
+type SnapshotAssertNotAny<T> = 0 extends 1 & T ? never : true;
+const publisherBoundaryIsTyped: SnapshotAssertNotAny<ReturnType<typeof publisherBoundary>> = true;
+const hotSignalStampIsTyped: SnapshotAssertNotAny<HotSignalModuleStamp> = true;
+const packedHotSignalManifest: HotSignalModuleManifest = {
+ version: 1, moduleId: 'packed/publisher', generation: 'packed-generation', hookSlots: [],
+ declarations: [{ site: 'g:packed', key: 'g:packed', scope: 'document', kind: 'signal', factory: '__signalAt' }],
+};
+// @ts-expect-error A module generation must remain a string.
+const invalidPackedHotSignalManifest: HotSignalModuleManifest = { ...packedHotSignalManifest, generation: 1 };
+export function verifyPackedPublisherTypes(component: Parameters<typeof publisherBoundary>[0], serverComponent: Parameters<typeof serverPublisherBoundary>[0]) {
+ const client = publisherBoundary(component, { publisherKey: 'packed/publisher' });
+ const server = serverPublisherBoundary(serverComponent, { publisherKey: 'packed/publisher' });
+ // @ts-expect-error Publisher identity must remain a string.
+ const invalid = publisherBoundary(component, { publisherKey: 1 });
+ return { client, server, invalid };
+}
+const snapshotRequestIsTyped: SnapshotAssertNotAny<ExternalSnapshotRequest> = true;
+const snapshotDocumentIsTyped: SnapshotAssertNotAny<NonNullable<RootOptions['externalSnapshots']>['documentId']> = true;
+const routerSnapshotIsTyped: SnapshotAssertNotAny<ReturnType<typeof captureRouterRenderSnapshot>> = true;
+const snapshotRootOptions: RootOptions = { externalSnapshots: { documentId: 'packed-document' } };
+// @ts-expect-error The host document authority must remain a string.
+const invalidSnapshotRootOptions: RootOptions = { externalSnapshots: { documentId: 1 } };
+const snapshotCodec: ExternalSnapshotContextCodec<string> = {
+	key: 'packed-context',
+	encode: value => value,
+	decode(value) {
+		if (typeof value !== 'string') throw new TypeError('Expected context text');
+		return value;
+	},
+};
+const routerPublicContext: RouterRenderJsonRecord = { locale: 'en', nested: { retained: true } };
+// @ts-expect-error Public routing context must remain JSON data.
+const invalidRouterPublicContext: RouterRenderJsonRecord = { callback: () => 'not JSON' };
+const packedRouterProfile: RouterRenderProfile = {
+	id: { key: 'packed-router', version: '1' },
+	assertHost: router => assertDefaultRouterRenderHost(router),
+	createRoutingTree: snapshot => createRouterRenderRouteTree(snapshot.routes),
+	routingOptions: () => ({ parseSearch: defaultParseSearch, stringifySearch: defaultStringifySearch }),
+};
+export async function verifyPackedSnapshotTypes(request: ExternalSnapshotRequest, options: ExternalSnapshotRenderOptions, component: Parameters<typeof renderExternalSnapshot>[0]) {
+	const prepared: PreparedExternalSnapshotRequest = await prepareExternalSnapshotRequest(serializeExternalSnapshotRequest(request), options);
+	try {
+		const signal: AbortSignal = prepared.signal;
+		// @ts-expect-error Prepared cancellation must not degrade to any.
+		const invalidSignal: number = prepared.signal;
+		const snapshot = await renderExternalSnapshot(component, prepared);
+		const wire: string = serializeExternalSnapshot(snapshot);
+		const html: string = decodeExternalSnapshot(wire).html;
+		// @ts-expect-error Snapshot HTML must not degrade to any.
+		const invalidHtml: number = decodeExternalSnapshot(wire).html;
+		return { html, invalidHtml, signal, invalidSignal };
+	} finally {
+		await releasePreparedExternalSnapshotRequest(prepared);
+	}
+}
+export const packedSnapshotContracts = {
+	snapshotRootOptions, invalidSnapshotRootOptions, snapshotCodec,
+ publisherBoundaryIsTyped, hotSignalStampIsTyped, packedHotSignalManifest, invalidPackedHotSignalManifest,
+ __hotSignalModule, __registerHotSignalComponent, __remountHotSignalComponent,
+	snapshotRequestIsTyped, snapshotDocumentIsTyped, routerSnapshotIsTyped,
+	routerPublicContext, invalidRouterPublicContext, packedRouterProfile,
+	registerExternalSnapshotContext, associateRouterRenderProfile,
+	captureRouterRenderSnapshot, disposeRouterRenderSnapshot,
+	getRouterRenderProfile, registerRouterRenderProfile, restoreRouterRenderSnapshot,
+};
+`;
+}
+
 export function renderPackedStrictBrowserConsumerTypeProbe() {
 	return `${renderPackedOctaneIsTypeProbe()}
+${renderPackedSnapshotTypeProbe()}
 import { sumTypedPair } from './App.tsrx';
 import { compileToVolarMappings, compileTypesInspection } from 'octane/compiler/volar';
 import { atom, useAtom } from '@octanejs/jotai';
@@ -1038,6 +1234,7 @@ export function PublishedSourceConsumer() @{
 
 export function renderPackedTsrxConsumerTypeProbe() {
 	return `${renderPackedOctaneIsTypeProbe()}
+${renderPackedSnapshotTypeProbe()}
 import { Command, type CommandProps } from '@octanejs/cmdk';
 import {
 	Bar,

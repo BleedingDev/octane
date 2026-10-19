@@ -29,6 +29,7 @@ import {
 import { PLAYGROUND_REACT_VERSION } from '../src/lib/playground-sandbox.ts';
 import { LYNX_EXAMPLES } from '../src/content/lynx-examples.ts';
 import {
+	getServerOutput,
 	spawnServer as spawnServerIn,
 	startServerOnFreePort,
 	stopServer,
@@ -176,6 +177,7 @@ async function installReactCdnMirror(
 // One shared browser for both the development and production passes.
 let chromium: typeof import('playwright').chromium;
 let browser: import('playwright').Browser;
+let developmentServer: ChildProcess | undefined;
 
 beforeAll(async () => {
 	try {
@@ -225,10 +227,12 @@ async function loadRoute(
 		if (m.type() === 'error') errors.push(m.text());
 	});
 	page.on('pageerror', (e) => errors.push('pageerror: ' + String(e)));
+	let navigationResponse: import('playwright').Response | null = null;
 	let navigationStatus: number | undefined;
 	try {
 		await options.beforeNavigation?.(page, errors);
-		navigationStatus = (await page.goto(base + path, { waitUntil: 'load' }))?.status();
+		navigationResponse = await page.goto(base + path, { waitUntil: 'load' });
+		navigationStatus = navigationResponse?.status();
 		// The dev server can replace the document AFTER `load`: Vite reloads the
 		// page when a request resolves against a stale optimized-dependency hash,
 		// which is its normal recovery, not something the caller asked about. That
@@ -265,21 +269,36 @@ async function loadRoute(
 		// A readiness timeout alone cannot distinguish a missing route from an
 		// error document or stalled browser. Keep diagnostic collection bounded.
 		let diagnosticTimer: ReturnType<typeof setTimeout> | undefined;
-		const snapshot = await Promise.race([
-			page.evaluate(() => ({
-				readyState: document.readyState,
-				visibilityState: document.visibilityState,
-				mainChildPresent: document.querySelector('main > *') !== null,
-				main: document.querySelector('main')?.outerHTML.slice(0, 4000),
-				bodyText: document.body?.textContent?.slice(0, 2000),
-			})),
+		const details = await Promise.race([
+			Promise.all([
+				page
+					.evaluate(() => ({
+						readyState: document.readyState,
+						visibilityState: document.visibilityState,
+						mainChildPresent: document.querySelector('main > *') !== null,
+						main: document.querySelector('main')?.outerHTML.slice(0, 4000),
+						bodyText: document.body?.textContent?.slice(0, 2000),
+					}))
+					.catch(() => null),
+				navigationResponse
+					?.text()
+					.then((body) => body.slice(0, 4000))
+					.catch(() => undefined),
+			]),
 			new Promise<null>((resolve) => {
 				diagnosticTimer = setTimeout(() => resolve(null), 250);
 			}),
 		])
 			.catch(() => null)
 			.finally(() => clearTimeout(diagnosticTimer));
-		const diagnostics = JSON.stringify({ url: page.url(), navigationStatus, errors, snapshot });
+		const diagnostics = JSON.stringify({
+			url: page.url().slice(0, 2000),
+			navigationStatus,
+			errors,
+			snapshot: details?.[0],
+			responseBody: details?.[1],
+			serverOutput: getServerOutput(developmentServer),
+		});
 		await page.close().catch(() => {});
 		throw new Error(`Failed to load ${base + path}: ${diagnostics}`, { cause: error });
 	}
@@ -957,7 +976,6 @@ async function assertControlFlowKeywordMapping(baseUrl: string) {
 // `it.sequential` — declared last, it runs after the concurrent batch drains.
 // maxConcurrency lives on the project config.
 describe('website dev-SSR → hydration (real browser)', { concurrent: false }, () => {
-	let server: ChildProcess;
 	let DEV_PORT: number;
 
 	beforeAll(async () => {
@@ -979,7 +997,7 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 		// times out while the server is still starting.
 		DEV_PORT = await startServerOnFreePort(
 			(port) =>
-				(server = spawnServer(
+				(developmentServer = spawnServer(
 					['exec', 'vite', '--configLoader', 'runner', '--port', String(port), '--strictPort'],
 					// Vitest's NODE_ENV=test disables the devtools event client. Run
 					// the dev server in the same environment as an ordinary Vite boot.
@@ -1031,7 +1049,8 @@ describe('website dev-SSR → hydration (real browser)', { concurrent: false }, 
 	}, 540_000);
 
 	afterAll(async () => {
-		await stopServer(server);
+		await stopServer(developmentServer);
+		developmentServer = undefined;
 	});
 
 	it.concurrent.for(ROUTES)(

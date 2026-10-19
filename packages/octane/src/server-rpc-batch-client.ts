@@ -31,8 +31,12 @@ interface Batch {
 // ownership across await, or merge unrelated documents/accounts by a timer.
 let collecting: Batch | undefined;
 
+/** @internal Unbatched calls do not retain the optional collection transport. */
+export let enqueueServerCall: typeof collectServerCall | undefined;
+
 export function batchServerCalls<T>(options: ServerCallBatchOptions, callback: () => T): T {
 	validateServerCallBatch(options);
+	enqueueServerCall ??= collectServerCall;
 	const previous = collecting;
 	collecting = { options: { ...options }, members: [] };
 	try {
@@ -43,7 +47,7 @@ export function batchServerCalls<T>(options: ServerCallBatchOptions, callback: (
 }
 
 /** @internal Called only after local argument encoding and abort validation. */
-export function enqueueServerCall(
+function collectServerCall(
 	hash: string,
 	body: string,
 	options: ServerCallOptions,
@@ -54,7 +58,7 @@ export function enqueueServerCall(
 	if (batch === undefined || limits !== undefined) return undefined;
 	if (batch.members.length === 32) {
 		collecting = { options: batch.options, members: [] };
-		return enqueueServerCall(hash, body, options);
+		return collectServerCall(hash, body, options);
 	}
 	if (batch.members.length === 0)
 		queueMicrotask(() => {

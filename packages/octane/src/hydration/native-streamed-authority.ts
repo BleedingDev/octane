@@ -1,0 +1,101 @@
+import { formatClientError } from '../error-codes.client.generated.js';
+import type { SignalOwnerIdentity } from '../signals/types.js';
+import type { bootstrapStreamedSignalHydration } from './streamed-signals.js';
+
+/** @internal Installed only when the native stream implementation is evaluated. */
+export let nativeStreamedSignalBootstrap: typeof bootstrapStreamedSignalHydration | undefined;
+export function installNativeStreamedSignalBootstrap(
+	bootstrap: typeof bootstrapStreamedSignalHydration,
+): void {
+	nativeStreamedSignalBootstrap = bootstrap;
+}
+
+export interface NativeStreamedAuthority {
+	readonly buildId: string;
+	readonly documentId: string;
+	readonly ownerKey: string;
+	readonly document: Document;
+	readonly target: Record<string, unknown>;
+}
+
+interface AuthorityRegistration {
+	readonly authority: NativeStreamedAuthority;
+	leases: number;
+	readonly retired: (() => boolean) | undefined;
+}
+
+const authorities = /* @__PURE__ */ new WeakMap<SignalOwnerIdentity, AuthorityRegistration>();
+
+function validKey(value: unknown): value is string {
+	return typeof value === 'string' && value.length > 0 && value.length <= 1024;
+}
+
+/** Called only after the native bootstrap has successfully claimed its authority. */
+export function registerNativeStreamedAuthority(
+	owner: SignalOwnerIdentity,
+	authority: Omit<NativeStreamedAuthority, 'document' | 'target'>,
+	document: Document,
+	target: Record<string, unknown>,
+	retired?: () => boolean,
+): () => void {
+	if (
+		owner === null ||
+		typeof owner !== 'object' ||
+		authority === null ||
+		typeof authority !== 'object' ||
+		document === null ||
+		typeof document !== 'object' ||
+		target === null ||
+		typeof target !== 'object'
+	)
+		throw new TypeError(formatClientError(266));
+	const { buildId, documentId, ownerKey } = authority;
+	if (
+		!validKey(buildId) ||
+		!validKey(documentId) ||
+		typeof ownerKey !== 'string' ||
+		ownerKey.length === 0 ||
+		owner.scopeKey !== ownerKey
+	)
+		throw new TypeError(formatClientError(266));
+
+	let entry = authorities.get(owner);
+	if (entry === undefined) {
+		entry = {
+			authority: Object.freeze({ buildId, documentId, ownerKey, document, target }),
+			leases: 0,
+			retired,
+		};
+		authorities.set(owner, entry);
+	} else if (
+		entry.authority.buildId !== buildId ||
+		entry.authority.documentId !== documentId ||
+		entry.authority.ownerKey !== ownerKey ||
+		entry.authority.document !== document ||
+		entry.authority.target !== target
+	)
+		throw new Error(formatClientError(124));
+
+	const registration = entry;
+	registration.leases++;
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		registration.leases--;
+		// An old release must never retire a later registration for this identity.
+		if (registration.leases === 0 && authorities.get(owner) === registration)
+			authorities.delete(owner);
+	};
+}
+
+export function getNativeStreamedAuthority(
+	owner: SignalOwnerIdentity,
+	document: Document,
+): NativeStreamedAuthority | undefined {
+	const registration = authorities.get(owner);
+	const authority = registration?.authority;
+	return authority?.document === document && registration?.retired?.() !== true
+		? authority
+		: undefined;
+}

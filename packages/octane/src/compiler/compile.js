@@ -1623,6 +1623,7 @@ function requireRuntimeForContext(ctx, name) {
 	ctx.runtimeNeeded.add(name);
 	if (
 		name === 'isContext' ||
+		name === '__stampHmrComponent' ||
 		name === '__delegateEvents' ||
 		name === '__delegateCaptureEvents' ||
 		name === METHOD_DEP_IMPORT ||
@@ -1727,6 +1728,7 @@ const NATIVE_READ_RUNTIME_HELPERS = new Set([
 	'nativeCreateScopedElement',
 ]);
 const INTERNAL_CLIENT_RUNTIME_HELPERS = new Set([
+	'__stampHmrComponent',
 	'__createVoidRootDefaultOptions',
 	'__createRootDefaultOptions',
 	'__delegateEvents',
@@ -9634,6 +9636,464 @@ function bindDefaultComponent(ast) {
 	return { ...ast, body };
 }
 
+// A memo/default export can expose a private component without an exported
+// declaration. Follow only immutable module aliases and actual Octane memo
+// imports; arbitrary HOCs or mutable/conditional exports retain the hot fence.
+function collectHotComponentExportFlows(input) {
+	const ast = bindDefaultComponent(normalizeArrowComponents(input));
+	const lexical = createLexicalAnalysis(ast);
+	const immutable = collectImmutableModuleFunctions(ast.body);
+	const opaqueDeclarations = new Map();
+	const components = new Map();
+	let lastComponentStart = -Infinity;
+	const bindings = new Map();
+	const memoImports = new Set();
+	const namespaces = new Set();
+	for (const statement of ast.body) {
+		const declaration =
+			statement.type === 'ExportNamedDeclaration' || statement.type === 'ExportDefaultDeclaration'
+				? statement.declaration
+				: statement;
+		if (isComponentFunction(declaration) || isReturnJsxFunction(declaration)) {
+			components.set(declaration.id?.name, declaration);
+			lastComponentStart = Math.max(lastComponentStart, declaration.start);
+		}
+		if (
+			declaration?.id?.type === 'Identifier' &&
+			[
+				'FunctionDeclaration',
+				'ClassDeclaration',
+				'TSModuleDeclaration',
+				'TSEnumDeclaration',
+			].includes(declaration.type)
+		)
+			opaqueDeclarations.set(declaration.id.name, declaration);
+		if (declaration?.type === 'VariableDeclaration') {
+			for (const item of declaration.declarations) {
+				if (item.id?.type === 'Identifier')
+					bindings.set(item.id.name, { item, immutable: declaration.kind === 'const' });
+			}
+		}
+		if (statement.type !== 'ImportDeclaration' || statement.source.value !== 'octane') continue;
+		if (statement.importKind === 'type') continue;
+		for (const specifier of statement.specifiers) {
+			if (specifier.importKind === 'type') continue;
+			if (specifier.type === 'ImportNamespaceSpecifier') namespaces.add(specifier.local.name);
+			if ((specifier.imported?.name ?? specifier.imported?.value) === 'memo')
+				memoImports.add(specifier.local.name);
+		}
+	}
+	const rootReference = (node) =>
+		node?.type === 'Identifier' &&
+		lexical.resolveBinding(lexical.nodeScopes.get(node) ?? lexical.rootScope, node.name)?.scope ===
+			lexical.rootScope;
+	const trustedMemo = (callee) => {
+		callee = unwrapTsExpr(callee);
+		return (
+			(rootReference(callee) && memoImports.has(callee.name)) ||
+			(callee?.type === 'MemberExpression' &&
+				!callee.computed &&
+				!callee.optional &&
+				callee.property?.name === 'memo' &&
+				rootReference(callee.object) &&
+				namespaces.has(callee.object.name))
+		);
+	};
+	const resolve = (expression, active = new Set()) => {
+		const node = unwrapTsExpr(expression);
+		if (rootReference(node)) {
+			const component = components.get(node.name);
+			if (component) {
+				return immutable.has(node.name) && component.end <= node.start ? node.name : null;
+			}
+			const binding = bindings.get(node.name);
+			if (!binding?.immutable || binding.item.end > node.start || active.has(node.name))
+				return null;
+			return resolve(binding.item.init, new Set([...active, node.name]));
+		}
+		if (
+			node?.type === 'CallExpression' &&
+			!node.optional &&
+			trustedMemo(node.callee) &&
+			node.arguments.length === 1 &&
+			!node.arguments.some((argument) => argument.type === 'SpreadElement')
+		)
+			return resolve(node.arguments[0], active);
+		return null;
+	};
+	const containsComponent = (node, active = new Set()) => {
+		if (node === null || typeof node !== 'object') return false;
+		if (Array.isArray(node)) return node.some((child) => containsComponent(child, active));
+		if (node.body?.type === 'JSXCodeBlock' || isReturnJsxFunction(node)) return true;
+		if (rootReference(node)) {
+			if (components.has(node.name)) return true;
+			const binding = bindings.get(node.name);
+			const value = binding?.item.init ?? opaqueDeclarations.get(node.name);
+			if (value && !active.has(node.name))
+				return containsComponent(value, new Set([...active, node.name]));
+		}
+		for (const key in node) {
+			if (!AST_WALK_SKIP_KEYS.has(key) && containsComponent(node[key], active)) return true;
+		}
+		return false;
+	};
+	const selected = new Set();
+	const componentExports = new Set();
+	let eligible = true;
+	const admit = (expression, exported) => {
+		const component = resolve(expression);
+		if (component !== null) {
+			selected.add(component);
+			componentExports.add(exported);
+		} else if (containsComponent(expression)) eligible = false;
+	};
+	for (const statement of ast.body) {
+		if (statement.exportKind === 'type') continue;
+		if (statement.type === 'ExportDefaultDeclaration') {
+			if (components.has(statement.declaration.id?.name)) {
+				if (!immutable.has(statement.declaration.id?.name)) eligible = false;
+			} else admit(statement.declaration, 'default');
+		} else if (statement.type === 'ExportNamedDeclaration' && statement.source == null) {
+			if (components.has(statement.declaration?.id?.name)) {
+				if (!immutable.has(statement.declaration.id.name)) eligible = false;
+			} else if (statement.declaration?.type === 'VariableDeclaration') {
+				for (const item of statement.declaration.declarations) {
+					if (statement.declaration.kind !== 'const' && containsComponent(item.init))
+						eligible = false;
+					else admit(item.init, item.id?.name);
+				}
+			} else if (containsComponent(statement.declaration)) {
+				eligible = false;
+			}
+			for (const specifier of statement.specifiers ?? []) {
+				if (specifier.exportKind !== 'type')
+					admit(specifier.local, specifier.exported?.name ?? specifier.exported?.value);
+			}
+		}
+	}
+	const unsafeIdentity = (node) => {
+		if (node === null || typeof node !== 'object') return false;
+		if (Array.isArray(node)) return node.some(unsafeIdentity);
+		if (node.type === 'AssignmentExpression' && containsComponent(node.right)) return true;
+		if (
+			node.type === 'VariableDeclarator' &&
+			(node.id?.type !== 'Identifier' || bindings.get(node.id.name)?.item !== node) &&
+			(containsComponent(node.init) || containsComponent(node.id))
+		)
+			return true;
+		if (
+			(node.type === 'ForOfStatement' || node.type === 'ForInStatement') &&
+			containsComponent(node.right)
+		)
+			return true;
+		if (node.type === 'TSImportEqualsDeclaration' && containsComponent(node.moduleReference))
+			return true;
+		for (const key in node) {
+			if (!AST_WALK_SKIP_KEYS.has(key) && unsafeIdentity(node[key])) return true;
+		}
+		return false;
+	};
+	// Function bodies read the canonical binding when called, not where they
+	// are declared. Only evaluation before that binding initializes can retain
+	// a raw component; follow local calls and IIFEs at their call-site position.
+	const aggregateStarts = new Map();
+	const isDirectEval = (node) => {
+		const callee = node.type === 'CallExpression' && !node.optional && unwrapTsExpr(node.callee);
+		return (
+			callee?.type === 'Identifier' &&
+			callee.name === 'eval' &&
+			lexical.resolveBinding(lexical.nodeScopes.get(callee) ?? lexical.rootScope, 'eval') === null
+		);
+	};
+	const aggregateStart = (value) => {
+		if (aggregateStarts.has(value)) return aggregateStarts.get(value);
+		// Complete each value's reachability query independently. A partial
+		// answer from a cycle cannot safely be cached for another entry point.
+		const seen = new Set();
+		const pending = [[value, undefined, undefined]];
+		let latest = -Infinity;
+		while (pending.length) {
+			const [node, parent, key] = pending.pop();
+			if (node === null || typeof node !== 'object' || seen.has(node)) continue;
+			seen.add(node);
+			if (aggregateStarts.has(node)) {
+				latest = Math.max(latest, aggregateStarts.get(node));
+				continue;
+			}
+			if (Array.isArray(node)) {
+				for (const child of node) pending.push([child, parent, key]);
+				continue;
+			}
+			if (node.type === 'ImportDeclaration' || node.type === 'ExportSpecifier') continue;
+			// Direct eval can read any lexical component without naming it in this AST.
+			if (isDirectEval(node)) latest = Math.max(latest, lastComponentStart);
+			if (rootReference(node) && isIdentifierReference(node, parent, key, lexical)) {
+				const component = components.get(node.name);
+				if (component) latest = Math.max(latest, component.start);
+				else
+					pending.push([
+						bindings.get(node.name)?.item.init ?? opaqueDeclarations.get(node.name),
+						undefined,
+						undefined,
+					]);
+			}
+			for (const childKey in node) {
+				const child = node[childKey];
+				if (!AST_WALK_SKIP_KEYS.has(childKey) && child !== null && typeof child === 'object')
+					pending.push([child, node, childKey]);
+			}
+		}
+		aggregateStarts.set(value, latest);
+		return latest;
+	};
+	const earlyCapture = (node, position, active = new Set(), parent, key, aggregate = false) => {
+		if (node === null || typeof node !== 'object') return false;
+		if (Array.isArray(node))
+			return node.some((child) => earlyCapture(child, position, active, parent, key, aggregate));
+		if (
+			(!aggregate &&
+				(node.type === 'FunctionDeclaration' ||
+					node.type === 'FunctionExpression' ||
+					node.type === 'ArrowFunctionExpression')) ||
+			node.type === 'ImportDeclaration' ||
+			node.type === 'ExportSpecifier'
+		)
+			return false;
+		if (isDirectEval(node) && (position ?? node.start) < lastComponentStart) return true;
+		if (
+			rootReference(node) &&
+			isIdentifierReference(node, parent, key, lexical) &&
+			components.has(node.name) &&
+			(position ?? node.start) < components.get(node.name).start
+		)
+			return true;
+		if (aggregate && rootReference(node) && isIdentifierReference(node, parent, key, lexical)) {
+			const value = bindings.get(node.name)?.item.init ?? opaqueDeclarations.get(node.name);
+			if (value) return (position ?? node.start) < aggregateStart(value);
+		}
+		// Operators can synchronously invoke authored conversion or @@hasInstance
+		// callbacks. Boolean tests and strict identity do not coerce object values.
+		if (!aggregate) {
+			// Import coercion/getters and await assimilation can invoke authored callbacks.
+			if (node.type === 'ImportExpression' || node.type === 'AwaitExpression')
+				return (position ?? node.start) < aggregateStart(node);
+			const coercion =
+				(node.type === 'UnaryExpression' &&
+					(node.operator === '+' || node.operator === '-' || node.operator === '~')) ||
+				node.type === 'UpdateExpression'
+					? node.argument
+					: node.type === 'BinaryExpression' && node.operator === 'in'
+						? node.left
+						: node.type === 'BinaryExpression' && node.operator === 'instanceof'
+							? node.right
+							: node.type === 'TemplateLiteral' && parent?.type !== 'TaggedTemplateExpression'
+								? node.expressions
+								: null;
+			const coercesBoth =
+				(node.type === 'BinaryExpression' &&
+					node.operator !== '===' &&
+					node.operator !== '!==' &&
+					node.operator !== 'in' &&
+					node.operator !== 'instanceof') ||
+				(node.type === 'AssignmentExpression' &&
+					node.operator !== '=' &&
+					node.operator !== '&&=' &&
+					node.operator !== '||=' &&
+					node.operator !== '??=');
+			if (coercesBoth)
+				return (
+					(position ?? node.start) < aggregateStart(node.left) ||
+					(position ?? node.start) < aggregateStart(node.right)
+				);
+			if (coercion) {
+				if ((position ?? node.start) < aggregateStart(coercion)) return true;
+				// Reachability already covered the coerced operand. The other
+				// operand of in/instanceof still executes without being coerced.
+				if (node.type !== 'BinaryExpression') return false;
+				const other = node.operator === 'in' ? 'right' : 'left';
+				return earlyCapture(node[other], position, active, node, other);
+			}
+		}
+		// Computed property names can execute authored ToPropertyKey coercion.
+		if (
+			!aggregate &&
+			node.computed &&
+			(node.type === 'MemberExpression' ||
+				node.type === 'OptionalMemberExpression' ||
+				node.type === 'Property' ||
+				node.type === 'MethodDefinition' ||
+				node.type === 'PropertyDefinition') &&
+			(position ?? node.start) < aggregateStart(node.property ?? node.key)
+		)
+			return true;
+		// A local aggregate may expose an executing method/getter through aliases
+		// or rewritten properties, destructuring or spread. Inspect its reachable
+		// closures without trusting a selected property shape; unrelated early
+		// property reads and assigned closures also conservatively propagate.
+		const pattern = node.type === 'VariableDeclarator' ? node.id : node.left;
+		const capturesPattern =
+			pattern?.type === 'ObjectPattern' ||
+			pattern?.type === 'ArrayPattern' ||
+			(pattern?.type === 'Identifier' && bindings.get(pattern.name)?.item !== node);
+		const aggregateKey =
+			node.type === 'Decorator'
+				? 'expression'
+				: node.type === 'MemberExpression'
+					? 'object'
+					: node.type === 'SpreadElement'
+						? 'argument'
+						: node.type === 'VariableDeclarator' && capturesPattern
+							? 'init'
+							: node.type === 'ForOfStatement'
+								? 'right'
+								: node.type === 'AssignmentPattern'
+									? 'right'
+									: node.type === 'AssignmentExpression' &&
+										  (node.left.type === 'Identifier' ||
+												capturesPattern ||
+												node.left.type === 'MemberExpression')
+										? 'right'
+										: null;
+		if (
+			!aggregate &&
+			aggregateKey &&
+			earlyCapture(node[aggregateKey], position ?? node.start, new Set(), node, aggregateKey, true)
+		)
+			return true;
+		// Static initializers can invoke getters through this or super, neither
+		// of which names the class binding. Inspect the class and its heritage.
+		if (
+			!aggregate &&
+			(node.type === 'ClassDeclaration' || node.type === 'ClassExpression') &&
+			node.body.body.some(
+				(item) => item.type === 'StaticBlock' || (item.static && item.type !== 'MethodDefinition'),
+			) &&
+			(position ?? node.start) < aggregateStart(node)
+		)
+			return true;
+		if (
+			!aggregate &&
+			(node.type === 'CallExpression' ||
+				node.type === 'OptionalCallExpression' ||
+				node.type === 'NewExpression' ||
+				node.type === 'TaggedTemplateExpression')
+		) {
+			const tagged = node.type === 'TaggedTemplateExpression';
+			let callee = unwrapTsExpr(tagged ? node.tag : node.callee);
+			const aliases = new Set();
+			while (callee) {
+				if (callee.type === 'SequenceExpression') {
+					callee = unwrapTsExpr(callee.expressions.at(-1));
+				} else if (rootReference(callee) && !aliases.has(callee.name)) {
+					aliases.add(callee.name);
+					callee = unwrapTsExpr(
+						bindings.get(callee.name)?.item.init ?? opaqueDeclarations.get(callee.name),
+					);
+				} else break;
+			}
+			const callPosition = position ?? node.start;
+			const reflect = unwrapTsExpr(callee?.object);
+			const reflectMethod =
+				(node.type === 'CallExpression' || node.type === 'OptionalCallExpression') &&
+				(callee?.type === 'MemberExpression' || callee?.type === 'OptionalMemberExpression') &&
+				reflect?.type === 'Identifier' &&
+				reflect.name === 'Reflect' &&
+				lexical.resolveBinding(lexical.nodeScopes.get(reflect) ?? lexical.rootScope, 'Reflect') ===
+					null
+					? staticMemberName(callee)
+					: null;
+			// An unresolved callee may synchronously invoke callbacks in local
+			// containers. Descriptor inspection does not execute target values,
+			// but its key can run authored coercion code.
+			const callbacks = tagged
+				? [...node.quasi.expressions]
+				: node.arguments.slice(reflectMethod === 'getOwnPropertyDescriptor' ? 1 : 0);
+			const seenCallbacks = new Set();
+			while (callbacks.length) {
+				const callback = unwrapTsExpr(callbacks.pop());
+				if (!callback || seenCallbacks.has(callback)) continue;
+				seenCallbacks.add(callback);
+				if (rootReference(callback)) {
+					callbacks.push(
+						bindings.get(callback.name)?.item.init ?? opaqueDeclarations.get(callback.name),
+					);
+				} else if (callback.type === 'SequenceExpression') {
+					callbacks.push(callback.expressions.at(-1));
+				} else if (callback.type === 'ConditionalExpression') {
+					callbacks.push(callback.consequent, callback.alternate);
+				} else if (callback.type === 'LogicalExpression') {
+					callbacks.push(callback.left, callback.right);
+				} else if (
+					[
+						'FunctionDeclaration',
+						'FunctionExpression',
+						'ArrowFunctionExpression',
+						'ObjectExpression',
+						'ArrayExpression',
+						'ClassDeclaration',
+						'ClassExpression',
+						'TSModuleDeclaration',
+					].includes(callback.type) &&
+					callPosition < aggregateStart(callback)
+				)
+					return true;
+			}
+			// A selected callee can execute either reachable local closure.
+			if (
+				(callee?.type === 'ConditionalExpression' || callee?.type === 'LogicalExpression') &&
+				callPosition < aggregateStart(callee)
+			)
+				return true;
+			// Reflect invokes its target argument, which ordinary member traversal
+			// does not enter. Only the unshadowed intrinsic has this call contract.
+			if (
+				(reflectMethod === 'apply' || reflectMethod === 'construct') &&
+				earlyCapture(node.arguments, callPosition, new Set(), node, 'arguments', true)
+			)
+				return true;
+			if (
+				node.type === 'NewExpression' &&
+				(callee?.type === 'ClassDeclaration' || callee?.type === 'ClassExpression') &&
+				(earlyCapture(node.arguments, callPosition, new Set(), node, 'arguments', true) ||
+					callPosition < aggregateStart(callee))
+			)
+				return true;
+			if (
+				callee &&
+				['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(
+					callee.type,
+				) &&
+				!active.has(callee)
+			) {
+				const executing = new Set([...active, callee]);
+				const args = tagged ? node.quasi.expressions : node.arguments;
+				if (
+					earlyCapture(args, callPosition, new Set(), node, tagged ? 'quasi' : 'arguments', true) ||
+					earlyCapture(callee.params, callPosition, executing, callee, 'params') ||
+					earlyCapture(callee.body, callPosition, executing, callee, 'body')
+				)
+					return true;
+			}
+		}
+		for (const key in node) {
+			if (
+				!AST_WALK_SKIP_KEYS.has(key) &&
+				earlyCapture(node[key], position, active, node, key, aggregate)
+			)
+				return true;
+		}
+		return false;
+	};
+	const capturesBeforeInitialization = earlyCapture(ast);
+	if (unsafeIdentity(ast) || capturesBeforeInitialization) eligible = false;
+	return {
+		eligible,
+		capturesBeforeInitialization,
+		components: [...selected],
+		componentExports: [...componentExports],
+	};
+}
+
 // A top-level statement that carries NO runtime value — pure TypeScript type
 // surface (`interface`, `type` alias, `declare …` ambients, `import type` /
 // `export type`). The runtime compile (client/server) must DROP these: esrap
@@ -10059,9 +10519,10 @@ function emitServerModuleClientStubs(info, ctx) {
 			const imported = identifierName(specifier.imported);
 			const local = specifier.local?.name;
 			if (!imported || !local) continue;
-			ctx.runtimeNeeded.add('__serverRpc');
 			const hash = strongHash(info.filename + '#' + imported);
 			const contextIndex = info.contexts.get(imported);
+			const helper = contextIndex === undefined ? '__serverRpc' : '__serverRpcStream';
+			ctx.runtimeNeeded.add(helper);
 			const rpcArgs =
 				contextIndex === undefined
 					? [b.literal(hash, JSON.stringify(hash)), b.id('args')]
@@ -10069,11 +10530,10 @@ function emitServerModuleClientStubs(info, ctx) {
 							b.literal(hash, JSON.stringify(hash)),
 							b.call(b.member(b.id('args'), 'slice'), b.literal(0), b.literal(contextIndex)),
 							b.member(b.id('args'), b.literal(contextIndex), true),
-							b.literal(true, 'true'),
 						];
 			nodes.push(
 				inheritOriginLoc(
-					b.const(local, b.arrow([b.rest(b.id('args'))], b.call('_$__serverRpc', ...rpcArgs))),
+					b.const(local, b.arrow([b.rest(b.id('args'))], b.call('_$' + helper, ...rpcArgs))),
 					specifier,
 				),
 			);
@@ -11381,6 +11841,16 @@ function compileAuthored(source, filename, options, bundlerMetadata, analyzed = 
 			)
 		: analyzedAst;
 	const attemptAst = lowerSignalAttemptReads(bindingAst);
+	const hotComponentExports =
+		mode === 'client' && options?.hmr === 'webpack'
+			? collectHotComponentExportFlows(attemptAst)
+			: undefined;
+	if (hotComponentExports !== undefined) {
+		options = {
+			...options,
+			__hotComponentEarlyCapture: hotComponentExports.capturesBeforeInitialization,
+		};
+	}
 	const signalAst = lowerSignalDeclarations(
 		startIndependentSignalReads(
 			attemptAst,
@@ -11390,6 +11860,7 @@ function compileAuthored(source, filename, options, bundlerMetadata, analyzed = 
 		),
 		cleanFilename,
 		{ hmr: mode === 'client' && Boolean(options?.hmr) },
+		hotComponentExports === undefined ? undefined : { source, ...hotComponentExports },
 	);
 	if (bundlerMetadata !== null) bundlerMetadata.hydrateAst = signalAst;
 	const memoizedAst = strongModeEnabled
@@ -11942,6 +12413,8 @@ function compileInternal(
 		// own component marker pair instead of borrowing the Hydrate block range.
 		hydrateBoundaryModule: options?.__hydrateBoundaryModule === true,
 		hmr: hmrEnabled, // gates Symbol.for vs Symbol() hook slots (allocHookSymbol)
+		hotSignalModule: ast._octaneHotSignalModule,
+		hotSignalHookSlots: ast._octaneHotSignalModule === undefined ? null : [],
 		isVoidComponentImport:
 			typeof options?.isVoidComponentImport === 'function' ? options.isVoidComponentImport : null,
 		isLiteComponentImport:
@@ -12280,6 +12753,7 @@ function compileInternal(
 	// and the `import.meta.hot.accept` block after walking the body, so the
 	// wrapping sits AFTER each component's `const Comp = …;` declaration.
 	const hmrComponents = [];
+	const capturedHotComponents = new Set(ctx.hotSignalModule?.components ?? []);
 
 	// === Design (c) v0 pre-pass: classify same-module components as
 	// hookless+eligible for componentSlotLite. Two sweeps:
@@ -12841,9 +13315,13 @@ function compileInternal(
 			continue;
 		}
 		if (isComponentFunction(node)) {
-			// `function Foo() @{ ... }` (new TSRX shape) — non-exported helper. HMR
-			// doesn't wrap these (they're not user-visible across module boundaries).
-			bodyNodes.push(...compileComponent(node, ctx).nodes);
+			// A private component exposed by a proven memo/alias export needs the
+			// same canonical identity as a directly exported declaration.
+			const captured = capturedHotComponents.has(node.id.name);
+			bodyNodes.push(
+				...compileComponent(node, ctx, captured ? { ...compileOpts, hmrCaptured: true } : {}).nodes,
+			);
+			if (captured) hmrComponents.push({ name: node.id.name, exportKind: 'named' });
 		} else if (node.type === 'ExportDefaultDeclaration' && isComponentFunction(node.declaration)) {
 			// `export default function Foo() @{...}` → emit as named const + `export default Foo;`.
 			const c = node.declaration;
@@ -12855,8 +13333,9 @@ function compileInternal(
 			bodyNodes.push(...compileComponent({ ...c, export: true }, ctx, compileOpts).nodes);
 			if (hmrEnabled) hmrComponents.push({ name: c.id.name, exportKind: 'named' });
 		} else if (isReturnJsxFunction(node)) {
-			// `function Foo() { …hooks…; return <jsx>; }` — a plain return-JSX function.
-			bodyNodes.push(...compileReturnJsxFunction(node, ctx, {}).nodes);
+			const captured = capturedHotComponents.has(node.id.name);
+			bodyNodes.push(...compileReturnJsxFunction(node, ctx, captured ? compileOpts : {}).nodes);
+			if (captured) hmrComponents.push({ name: node.id.name, exportKind: 'named' });
 		} else if (node.type === 'ExportNamedDeclaration' && isReturnJsxFunction(node.declaration)) {
 			bodyNodes.push(
 				...compileReturnJsxFunction(node.declaration, ctx, {
@@ -12919,6 +13398,50 @@ function compileInternal(
 			// Top-level passthrough (imports, plain consts/functions): already a
 			// rewritten statement node — embedded directly in the module AST.
 			bodyNodes.push(lowered);
+		}
+		const declaration = node.declaration ?? node;
+		if (capturedHotComponents.has(declaration.id?.name)) {
+			const component = hmrComponents.find((entry) => entry.name === declaration.id.name);
+			if (component !== undefined) {
+				component.freshName = allocCompilerName(ctx, `_$hotBody${component.name}`);
+				const hotName = allocCompilerName(ctx, `_$hotCapture${component.name}`);
+				const hot = b.id(hotName);
+				const store = (optional = false) =>
+					b.member(b.member(hot, 'data'), '__octaneComponents', false, optional);
+				const key = component.exportKind === 'default' ? 'default' : component.name;
+				bodyNodes.push(
+					inheritOriginLoc(b.const(component.freshName, b.id(component.name)), declaration),
+					inheritOriginLoc(
+						b.const(
+							hotName,
+							b.member(
+								{ type: 'MetaProperty', meta: b.id('import'), property: b.id('meta') },
+								'webpackHot',
+							),
+						),
+						declaration,
+					),
+					inheritOriginLoc(
+						b.if(
+							b.logical(
+								'&&',
+								hot,
+								b.logical(
+									'&&',
+									store(true),
+									b.call(
+										b.member(b.member(b.object([]), 'hasOwnProperty'), 'call'),
+										store(),
+										b.literal(key),
+									),
+								),
+							),
+							b.stmt(b.assignment('=', b.id(component.name), b.member(store(), b.id(key)))),
+						),
+						declaration,
+					),
+				);
+			}
 		}
 		if (ctx.typescriptWeb && node.leadingComments && bodyNodes.length > firstStatement) {
 			bodyNodes[firstStatement] = {
@@ -13047,13 +13570,33 @@ function compileInternal(
 				),
 				b.block([
 					b.if(
-						b.unary(
-							'!',
-							b.call(
-								b.member(b.member(previousComponent(c), b.id('_$HMR'), true), 'update'),
-								b.id(c.name),
-							),
-						),
+						ctx.hotSignalModule === undefined
+							? b.unary(
+									'!',
+									b.call(
+										b.member(b.member(previousComponent(c), b.id('_$HMR'), true), 'update'),
+										b.id(c.freshName ?? c.name),
+									),
+								)
+							: b.logical(
+									'&&',
+									b.unary(
+										'!',
+										b.call(
+											b.member(b.member(previousComponent(c), b.id('_$HMR'), true), 'update'),
+											b.id(c.freshName ?? c.name),
+										),
+									),
+									b.unary(
+										'!',
+										b.call(
+											ctx.hotSignalModule.remountHelper,
+											b.id(ctx.hotSignalModule.stampName),
+											previousComponent(c),
+											b.id(c.freshName ?? c.name),
+										),
+									),
+								),
 						b.block([b.stmt(b.call(b.member(hot(), 'invalidate')))]),
 						b.block([b.stmt(b.assignment('=', b.id(c.name), previousComponent(c)))]),
 					),
@@ -13100,10 +13643,17 @@ function compileInternal(
 		]);
 		const valueExports = runtimeExportBindings(
 			ctx.output === 'ts' ? dropTypeOnlyStatements(ast.body) : ast.body,
-		).filter(([, local]) => !componentLocals.has(local));
+		).filter(
+			([exported, local]) =>
+				!componentLocals.has(local) && !ctx.hotSignalModule?.componentExports.includes(exported),
+		);
 		let accept = null;
 		if (webpackHotName !== null) {
-			if (valueExports.length === 0) accept = b.stmt(b.call(b.member(hot(), 'accept')));
+			// A hoisted component may already have escaped as its raw function.
+			// Rebinding the export cannot update that capture, so its importer must
+			// re-evaluate instead of stopping at this component boundary.
+			if (valueExports.length === 0 && !options?.__hotComponentEarlyCapture)
+				accept = b.stmt(b.call(b.member(hot(), 'accept')));
 		} else {
 			const hmrModuleName = allocCompilerName(ctx, '_$hmrModule');
 			const changed = valueExports.some(([, local]) => local === null)
@@ -13165,6 +13715,22 @@ function compileInternal(
 		}
 	}
 
+	const hotSignalRegistrationNodes =
+		ctx.hotSignalModule === undefined
+			? []
+			: hmrComponents.map((component) =>
+					inheritOriginLoc(
+						b.stmt(
+							b.call(
+								ctx.hotSignalModule.registerHelper,
+								b.id(ctx.hotSignalModule.stampName),
+								b.id(component.name),
+								b.literal(component.exportKind === 'default' ? 'default' : component.name),
+							),
+						),
+						moduleOrigin,
+					),
+				);
 	// Profiling registrations intentionally run AFTER the HMR handoff block in
 	// the final output. On a hot update the local binding is reassigned
 	// to the previous canonical wrapper during that handoff; registering earlier
@@ -13272,6 +13838,45 @@ function compileInternal(
 			),
 		);
 	}
+	let hotSignalManifest;
+	const hotSignalNodes = [];
+	if (ctx.hotSignalModule !== undefined) {
+		const {
+			stampName,
+			stampHelper,
+			canonicalHelper,
+			registerHelper,
+			remountHelper,
+			moduleId,
+			generation,
+			declarations,
+		} = ctx.hotSignalModule;
+		hotSignalManifest = Object.freeze({
+			version: 1,
+			moduleId,
+			generation,
+			hookSlots: Object.freeze(ctx.hotSignalHookSlots),
+			declarations,
+		});
+		hotSignalNodes.push(
+			inheritOriginLoc(
+				b.imports(
+					[
+						['__hotSignalModule', stampHelper],
+						['__canonicalHotSignalComponent', canonicalHelper],
+						['__registerHotSignalComponent', registerHelper],
+						['__remountHotSignalComponent', remountHelper],
+					],
+					'octane/signals',
+				),
+				moduleOrigin,
+			),
+			inheritOriginLoc(
+				b.const(stampName, b.call(stampHelper, jsonValueToNode(hotSignalManifest))),
+				moduleOrigin,
+			),
+		);
+	}
 
 	// All remaining authored memo sites have now received their real hook slots.
 	// Lower callable helpers, returned-JSX functions, explicit-slot calls and
@@ -13281,6 +13886,7 @@ function compileInternal(
 	let moduleBody = [
 		...nativeReadActivationNodes(ctx, moduleOrigin),
 		...signalBindingNodes,
+		...hotSignalNodes,
 		...vtHintNodes,
 		...delegateNodes,
 		...styleNodes,
@@ -13289,6 +13895,7 @@ function compileInternal(
 		...bodyNodes,
 		...stampNodes,
 		...hmrNodes,
+		...hotSignalRegistrationNodes,
 		...profileNodes,
 	];
 	if (options?.__valdiAbiGuard !== undefined) {
@@ -13336,6 +13943,7 @@ function compileInternal(
 	/** @type {{ code: string, map: any, diagnostics: any, inspect?: any, streamedSignals?: true, __universalSourceMapComposed?: boolean }} */
 	const result = {
 		code: printed.code,
+		...(hotSignalManifest === undefined ? null : { hotSignalModule: hotSignalManifest }),
 		...(ast._octaneSignalDeclarations === true || ctx.nativeReads
 			? { streamedSignals: true }
 			: null),
@@ -17417,6 +18025,32 @@ function isCompilerMemoImport(ctx, name) {
 	);
 }
 
+function canonicalHotSignalComponent(ctx, bindingKey, wrapper, origin) {
+	if (ctx.hotSignalModule === undefined) return wrapper;
+	return inheritOriginLoc(
+		b.call(
+			ctx.hotSignalModule.canonicalHelper,
+			b.id(ctx.hotSignalModule.stampName),
+			b.literal(bindingKey),
+			wrapper,
+		),
+		origin,
+	);
+}
+
+// Only module-level authored component declarations pass through these emitters.
+// Their lexical names distinguish declarations without changing when an edit
+// moves a declaration or replaces its body. Stamp the raw implementation before
+// wrapping it so the runtime can match private descendants during HMR.
+function hotComponentIdentityInitializer(ctx, node, value) {
+	if (!ctx.hmr || !ctx.filename) return value;
+	const identity = JSON.stringify([ctx.filename.replace(/\\/g, '/'), 'component', node.id.name]);
+	return inheritOriginLoc(
+		b.call(requireRuntimeForContext(ctx, '__stampHmrComponent'), value, b.literal(identity)),
+		node,
+	);
+}
+
 function compileComponent(node, ctx, options) {
 	const name = node.id.name;
 	rejectAsyncOrGenerator(node, name);
@@ -17424,6 +18058,7 @@ function compileComponent(node, ctx, options) {
 	const isExported = !!(node.export || node.default);
 	const isDefault = !!node.default;
 	const hmrWrap = !!(options && options.hmrWrap);
+	const hmrWrapped = hmrWrap && (isExported || options?.hmrCaptured === true);
 	const returnedOutput = node.body?.type === 'JSXCodeBlock' && hasOwnValueReturn(node);
 	const owner =
 		ctx.componentEffectOwnership && isExported
@@ -17585,6 +18220,8 @@ function compileComponent(node, ctx, options) {
 					? inheritOriginLoc(b.export(fnNode), node)
 					: fnNode,
 		];
+		if (ctx.hmr && ctx.filename)
+			statements.push(guarded(hotComponentIdentityInitializer(ctx, node, b.id(name))));
 		if (pendingWarm) {
 			statements.push(
 				guarded(b.call(requireRuntimeForContext(ctx, 'markWarm'), b.id(name), pendingWarm)),
@@ -17604,17 +18241,30 @@ function compileComponent(node, ctx, options) {
 			// the WRAPPER too (hmr() does not forward $$singleRoot). The tail
 			// stamp is dev-only, and route code-splitting runs build-mode only,
 			// so the unguarded tail assignment never meets an extracted binding.
-			if (!(hmrWrap && isExported)) {
+			if (!hmrWrapped) {
 				componentInfo.singleRootInitialized = true;
 			}
 		}
 		if (memoCaptures) statements.push(guarded(memoInitializer(b.id(name))));
-		if (hmrWrap && isExported) {
+		if (hmrWrapped) {
 			// `_$hmr` returns a stable wrapper with a DIFFERENT identity; rebinding
 			// keeps later references hot-updatable while the pre-declaration capture
 			// deliberately holds the raw function (edits to such a component fall
 			// back to a full reload — the capture predates the wrapper).
-			statements.push(guarded(b.assignment('=', b.id(name), b.call('_$hmr', b.id(name)))));
+			statements.push(
+				guarded(
+					b.assignment(
+						'=',
+						b.id(name),
+						canonicalHotSignalComponent(
+							ctx,
+							isDefault ? 'default' : name,
+							b.call('_$hmr', b.id(name)),
+							node,
+						),
+					),
+				),
+			);
 		}
 		if (node._octaneBindingView) {
 			statements.push(
@@ -17652,10 +18302,19 @@ function compileComponent(node, ctx, options) {
 				)
 			: warmedFn;
 
+	const identifiedFn = hotComponentIdentityInitializer(ctx, node, abiFn);
+
 	// HMR exports use mutable, live bindings so a re-evaluated module can hand
 	// its fresh body to the previous canonical wrapper and re-export that same
 	// identity. Production components retain their tree-shakeable const binding.
-	let valueExpr = hmrWrap && isExported ? inheritOriginLoc(b.call('_$hmr', abiFn), node) : abiFn;
+	let valueExpr = hmrWrapped
+		? canonicalHotSignalComponent(
+				ctx,
+				isDefault ? 'default' : name,
+				inheritOriginLoc(b.call('_$hmr', identifiedFn), node),
+				node,
+			)
+		: identifiedFn;
 	if (node._octaneBindingView) {
 		valueExpr = markPure(
 			inheritOriginLoc(
@@ -22437,6 +23096,21 @@ function compileReturnJsxFunction(node, ctx, options) {
 	// export follow-up statements — compile() embeds them in the single module
 	// AST, whose one esrap print yields the whole module map (chained consumers
 	// like @octanejs/mdx's two-stage .mdx map read segments off that print).
+	const identityStamp =
+		ctx.hmr && ctx.filename
+			? [
+					inheritOriginLoc(
+						b.stmt(
+							b.logical(
+								'&&',
+								b.binary('===', b.unary('typeof', b.id(name)), b.literal('function')),
+								hotComponentIdentityInitializer(ctx, node, b.id(name)),
+							),
+						),
+						node,
+					),
+				]
+			: [];
 	const bindingStamp = node._octaneBindingView
 		? [
 				inheritOriginLoc(
@@ -22458,7 +23132,22 @@ function compileReturnJsxFunction(node, ctx, options) {
 	if (options && options.hmrWrap) {
 		const nodes = [
 			fn,
-			inheritOriginLoc(b.stmt(b.assignment('=', b.id(name), b.call('_$hmr', b.id(name)))), node),
+			...identityStamp,
+			inheritOriginLoc(
+				b.stmt(
+					b.assignment(
+						'=',
+						b.id(name),
+						canonicalHotSignalComponent(
+							ctx,
+							options.default ? 'default' : name,
+							b.call('_$hmr', b.id(name)),
+							node,
+						),
+					),
+				),
+				node,
+			),
 			...bindingStamp,
 		];
 		if (options.default) {
@@ -22479,6 +23168,7 @@ function compileReturnJsxFunction(node, ctx, options) {
 		return {
 			nodes: [
 				fn,
+				...identityStamp,
 				...bindingStamp,
 				inheritOriginLoc(
 					isReassignedComponentDeclaration(node, ctx)
@@ -22490,8 +23180,8 @@ function compileReturnJsxFunction(node, ctx, options) {
 		};
 	}
 	if (options && options.export)
-		return { nodes: [inheritOriginLoc(b.export(fn), node), ...bindingStamp] };
-	return { nodes: [fn, ...bindingStamp] };
+		return { nodes: [inheritOriginLoc(b.export(fn), node), ...identityStamp, ...bindingStamp] };
+	return { nodes: [fn, ...identityStamp, ...bindingStamp] };
 }
 
 function nativeReturnedJsxValue(
@@ -25691,6 +26381,7 @@ function allocHookSymbol(
 		// name + call-site index — stable provided the user doesn't reorder hooks
 		// between renders (which would violate React's rules anyway).
 		const stableKey = `octane:${ctx.filename || '<anon>'}:${debugName}`;
+		ctx.hotSignalHookSlots?.push(stableKey);
 		symbolExpr = b.call(
 			b.member(b.id('Symbol'), 'for'),
 			b.literal(stableKey, JSON.stringify(stableKey)),

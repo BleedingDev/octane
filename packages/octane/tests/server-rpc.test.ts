@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { __serverRpc } from 'octane';
+import { __serverRpc, __serverRpcStream } from 'octane';
 import * as devalue from 'devalue';
 import {
 	executeServerFunction,
@@ -172,7 +172,15 @@ describe('executeServerFunction', () => {
 	});
 });
 
-describe('streamed server-function results', () => {
+const streamedRpcTargets: [string, typeof __serverRpcStream][] = [
+	[
+		'generic target',
+		(hash, args, options, limits) => __serverRpc(hash, args, options, true, limits),
+	],
+	['contextual target', __serverRpcStream],
+];
+
+describe.each(streamedRpcTargets)('%s streamed results', (_name, streamRpc) => {
 	it.each([
 		['consumer', 'unread'],
 		['consumer', 'first pull'],
@@ -296,7 +304,7 @@ describe('streamed server-function results', () => {
 		const iterable = upstream.values();
 		const fetch = endpoint(() => iterable);
 		try {
-			const values = (await __serverRpc('deadbeef', [], {}, true)) as AsyncIterable<string>;
+			const values = (await streamRpc('deadbeef', [], {})) as AsyncIterable<string>;
 			const iterator = values[Symbol.asyncIterator]();
 			expect(produced).toEqual([]);
 			await expect(iterator.next()).resolves.toEqual({ value: 'first', done: false });
@@ -317,7 +325,7 @@ describe('streamed server-function results', () => {
 		base.href = 'https://external-base.test/';
 		document.head.prepend(base);
 		try {
-			await expect(__serverRpc('deadbeef', [], {}, true)).resolves.toEqual({
+			await expect(streamRpc('deadbeef', [], {})).resolves.toEqual({
 				missing: undefined,
 				value: -0,
 			});
@@ -338,7 +346,7 @@ describe('streamed server-function results', () => {
 			}
 		});
 		try {
-			const values = (await __serverRpc('deadbeef', [], {}, true)) as AsyncIterable<string>;
+			const values = (await streamRpc('deadbeef', [], {})) as AsyncIterable<string>;
 			const iterator = values[Symbol.asyncIterator]();
 			await expect(iterator.next()).resolves.toEqual({ value: 'first', done: false });
 			await iterator.return?.();
@@ -355,7 +363,7 @@ describe('streamed server-function results', () => {
 			yield value + '!';
 		});
 		try {
-			const values = (await __serverRpc('deadbeef', [], {}, true)) as AsyncIterable<string>;
+			const values = (await streamRpc('deadbeef', [], {})) as AsyncIterable<string>;
 			const iterator = values[Symbol.asyncIterator]();
 			await expect(
 				Promise.all([iterator.next(), iterator.next(), iterator.next()]),
@@ -375,7 +383,7 @@ describe('streamed server-function results', () => {
 			invoked = true;
 		});
 		try {
-			await expect(__serverRpc('deadbeef', [Promise.resolve(1)], {}, true)).rejects.toThrow();
+			await expect(streamRpc('deadbeef', [Promise.resolve(1)], {})).rejects.toThrow();
 			expect(invoked).toBe(false);
 		} finally {
 			fetch.mockRestore();
@@ -389,7 +397,7 @@ describe('streamed server-function results', () => {
 			}),
 		);
 		try {
-			await expect(__serverRpc('deadbeef', [], {}, true)).rejects.toThrow('terminal frame');
+			await expect(streamRpc('deadbeef', [], {})).rejects.toThrow('terminal frame');
 		} finally {
 			fetch.mockRestore();
 		}
@@ -402,7 +410,7 @@ describe('streamed server-function results', () => {
 			}),
 		);
 		try {
-			await expect(__serverRpc('deadbeef', [], {}, true)).rejects.toThrow('out-of-order');
+			await expect(streamRpc('deadbeef', [], {})).rejects.toThrow('out-of-order');
 		} finally {
 			fetch.mockRestore();
 		}
@@ -414,7 +422,7 @@ describe('streamed server-function results', () => {
 		cancellation.abort();
 		try {
 			await expect(
-				__serverRpc('deadbeef', [], { signal: cancellation.signal }, true),
+				streamRpc('deadbeef', [], { signal: cancellation.signal }),
 			).rejects.toMatchObject({ name: 'AbortError' });
 			expect(fetch).not.toHaveBeenCalled();
 			fetch.mockResolvedValueOnce(
@@ -423,9 +431,9 @@ describe('streamed server-function results', () => {
 					headers: { 'Octane-RPC-Outcome': 'rejected' },
 				}),
 			);
-			await expect(__serverRpc('deadbeef', [], {}, true)).rejects.toMatchObject({ status: 403 });
+			await expect(streamRpc('deadbeef', [], {})).rejects.toMatchObject({ status: 403 });
 			fetch.mockRejectedValueOnce(new TypeError('Connection lost after accepting the write'));
-			await expect(__serverRpc('deadbeef', [], {}, true)).rejects.toMatchObject({
+			await expect(streamRpc('deadbeef', [], {})).rejects.toMatchObject({
 				code: 'OCTANE_RPC_UNCERTAIN',
 			});
 		} finally {
@@ -450,7 +458,7 @@ describe('streamed server-function results', () => {
 						},
 			);
 			try {
-				let result = __serverRpc('deadbeef', [], {}, true);
+				let result = streamRpc('deadbeef', [], {});
 				if (phase === 'after a yielded value') {
 					const values = (await result) as AsyncIterable<string>;
 					const iterator = values[Symbol.asyncIterator]();
@@ -481,7 +489,7 @@ describe('streamed server-function results', () => {
 		);
 		let outcome: unknown;
 		try {
-			void __serverRpc('deadbeef', [], {}, true, { timeoutMs: 10 }).catch((error) => {
+			void streamRpc('deadbeef', [], {}, { timeoutMs: 10 }).catch((error) => {
 				outcome = error;
 			});
 			await vi.advanceTimersByTimeAsync(20);
@@ -502,7 +510,7 @@ describe('streamed server-function results', () => {
 		);
 		let outcome: unknown;
 		try {
-			void __serverRpc('deadbeef', [], {}, true, { timeoutMs: 10 }).catch((error) => {
+			void streamRpc('deadbeef', [], {}, { timeoutMs: 10 }).catch((error) => {
 				outcome = error;
 			});
 			await vi.advanceTimersByTimeAsync(20);
@@ -529,7 +537,7 @@ describe('streamed server-function results', () => {
 		);
 		let outcome: unknown;
 		try {
-			void __serverRpc('deadbeef', [], {}, true, { timeoutMs: 10 }).catch((error) => {
+			void streamRpc('deadbeef', [], {}, { timeoutMs: 10 }).catch((error) => {
 				outcome = error;
 			});
 			await vi.advanceTimersByTimeAsync(20);

@@ -57,6 +57,27 @@ describe('buildPackageCommonjs', () => {
 		);
 	});
 
+	test('loads deferred relative modules from the published CommonJS tree', async () => {
+		const packageDir = await fixture({
+			'package.json': JSON.stringify({ name: 'fixture', type: 'module' }),
+			'src/index.ts':
+				"export async function readAnswer() { const { answer } = await import('./nested/value.js'); return answer(); }",
+			'src/nested/value.ts':
+				"export async function answer() { const { value } = await import('../shared.js'); return value; }",
+			'src/shared.ts': 'export const value: number = 42;',
+		});
+
+		await buildPackageCommonjs({
+			packageDir,
+			entries: ['src/index.ts'],
+			outdir: 'dist/cjs',
+		});
+
+		const published = createRequire(import.meta.url)(join(packageDir, 'dist/cjs/index.cjs'));
+		assert.equal(await published.readAnswer(), 42);
+		assert.equal(await published.readAnswer(), 42);
+	});
+
 	test('supports multiple entries and emits a shared module once', async () => {
 		const packageDir = await fixture({
 			'package.json': JSON.stringify({ name: 'fixture', type: 'module' }),

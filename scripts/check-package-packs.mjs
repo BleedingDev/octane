@@ -1,6 +1,15 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { createOctaneSourcePlugin } from './packed-source-compiler.mjs';
+import {
+	selectPackedPackages,
+	parsePackagePackArguments,
+	readExternalPackageArchives,
+	applyExternalPackageArchives,
+	configuredPackageArchiveRequests,
+	readConfiguredPackageArchives,
+	verifyConfiguredPackageArchives,
+} from './package-pack-selection.mjs';
 import { checkPackedValdiContract } from './check-packed-valdi-contract.mjs';
 import {
 	cpSync,
@@ -46,9 +55,11 @@ import {
 	NATIVE_GRAPH_FORBIDDEN_MODULE,
 	PACKED_COMMONJS_CONSUMER_PACKAGES,
 	PACKED_JAVASCRIPT_CONSUMER_PACKAGES,
+	PACKED_RUNTIME_CONSUMER_PACKAGES,
 	PACKED_TSRX_CONSUMER_PROJECTS,
 	PACKED_TSRX_CONSUMER_ESRAP_VERSION,
 	PACKED_TSRX_BROWSER_AMBIENT_FILE,
+	PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS,
 	PACKED_TSRX_LANE_SENTINEL_FILE,
 	PACKED_TSRX_LANE_SENTINEL_PROJECT,
 	PACKED_TSRX_PROBE_PACKAGES,
@@ -159,10 +170,6 @@ const packedTsrxSourceExceptions = new Map([
 	[
 		'@octanejs/solana-kit',
 		'its TanStack Query peer declarations are not yet compatible with the installed strict consumer graph',
-	],
-	[
-		'@octanejs/tanstack-router',
-		'its browser source reads process.env.NODE_ENV and its upstream declarations import node:http2',
 	],
 	['@octanejs/tiptap', 'its browser source still reads process.env.NODE_ENV'],
 	[
@@ -323,6 +330,32 @@ function addCompilerPeer(manifest) {
 	manifest.devDependencies['@tsrx/oxc'] = tsrxOxcVersion;
 }
 
+function writePackedConsumerManifest(consumerDirectory, manifest, archiveSpecs) {
+	const prepared = applyExternalPackageArchives(
+		manifest,
+		archiveSpecs,
+		packedManifests,
+		externalArchives,
+	);
+	writeFileSync(
+		path.join(consumerDirectory, 'package.json'),
+		`${JSON.stringify(prepared.manifest, null, 2)}\n`,
+	);
+	writeFileSync(
+		path.join(consumerDirectory, 'pnpm-workspace.yaml'),
+		renderPackedExampleWorkspace(prepared.archiveSpecs),
+	);
+}
+
+function verifyPackedConsumerAuthorities(consumerDirectory) {
+	verifyConfiguredPackageArchives(
+		consumerDirectory,
+		JSON.parse(readFileSync(path.join(consumerDirectory, 'package.json'), 'utf8')),
+		packedManifests,
+		externalArchives,
+	);
+}
+
 function preparePackedExample(tempRoot, archives, canary) {
 	const sourceDirectory = path.join(REPO_ROOT, 'examples', canary.directory);
 	const consumerDirectory = path.join(tempRoot, `example-${canary.directory}`);
@@ -350,15 +383,12 @@ function preparePackedExample(tempRoot, archives, canary) {
 		canary.label,
 	);
 	addCompilerPeer(packedManifest);
-	writeFileSync(manifestPath, `${JSON.stringify(packedManifest, null, 2)}\n`);
-	writeFileSync(
-		path.join(consumerDirectory, 'pnpm-workspace.yaml'),
-		renderPackedExampleWorkspace(archiveSpecs),
-	);
+	writePackedConsumerManifest(consumerDirectory, packedManifest, archiveSpecs);
 	return consumerDirectory;
 }
 
 function assertPackedExampleInstall(consumerDirectory, canary) {
+	verifyPackedConsumerAuthorities(consumerDirectory);
 	const consumerRequire = createRequire(path.join(consumerDirectory, 'package.json'));
 	const directRuntime = realpathSync(consumerRequire.resolve('octane'));
 	const resolvedPackages = new Map();
@@ -496,6 +526,7 @@ assert.deepEqual(renderToString(() => 'runtime-only'), { html: 'runtime-only', c
 		],
 		{ cwd: consumerDirectory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
 	);
+	verifyPackedConsumerAuthorities(consumerDirectory);
 	const consumerRequire = createRequire(path.join(consumerDirectory, 'package.json'));
 	const octaneRequire = createRequire(realpathSync(consumerRequire.resolve('octane')));
 	let compilerPeerFound = true;
@@ -537,38 +568,31 @@ async function validatePackedConsumer(tempRoot, archives, packedManifests) {
 		),
 	);
 	mkdirSync(sourceDirectory, { recursive: true });
-	writeFileSync(
-		path.join(consumerDirectory, 'package.json'),
-		JSON.stringify(
-			{
-				name: 'octane-packed-consumer-smoke',
-				private: true,
-				type: 'module',
-				engines: { node: '>=22.22.2' },
-				dependencies: {
-					'@apollo/client': '4.2.6',
-					...archiveSpecs,
-					'@types/three': '0.172.0',
-					graphql: '^16.11.0',
-					rxjs: '^7.8.2',
-					three: '0.172.0',
-				},
-				devDependencies: {
-					'@tsrx/oxc': tsrxOxcVersion,
-					'@tsrx/typescript-plugin': tsrxTypeScriptPluginVersion,
-					'@types/node': nodeTypesVersion,
-					postcss: '^8.5.28',
-					typescript: typescriptVersion,
-					vite: viteVersion,
-				},
+	writePackedConsumerManifest(
+		consumerDirectory,
+		{
+			name: 'octane-packed-consumer-smoke',
+			private: true,
+			type: 'module',
+			engines: { node: '>=22.22.2' },
+			dependencies: {
+				'@apollo/client': '4.2.6',
+				...archiveSpecs,
+				'@types/three': '0.172.0',
+				graphql: '^16.11.0',
+				rxjs: '^7.8.2',
+				three: '0.172.0',
 			},
-			null,
-			2,
-		) + '\n',
-	);
-	writeFileSync(
-		path.join(consumerDirectory, 'pnpm-workspace.yaml'),
-		renderPackedExampleWorkspace(archiveSpecs),
+			devDependencies: {
+				'@tsrx/oxc': tsrxOxcVersion,
+				'@tsrx/typescript-plugin': tsrxTypeScriptPluginVersion,
+				'@types/node': nodeTypesVersion,
+				postcss: '^8.5.28',
+				typescript: typescriptVersion,
+				vite: viteVersion,
+			},
+		},
+		archiveSpecs,
 	);
 	writeFileSync(
 		path.join(sourceDirectory, 'App.tsrx'),
@@ -960,6 +984,7 @@ export function renderProbe() {
 		},
 	);
 
+	verifyPackedConsumerAuthorities(consumerDirectory);
 	const consumerRequire = createRequire(path.join(consumerDirectory, 'package.json'));
 	const installedPostcss = consumerRequire('postcss/package.json').version;
 	console.log(`packed consumer resolved postcss ${installedPostcss}`);
@@ -1321,14 +1346,7 @@ function validatePackedTsrxConsumer(tempRoot, archives, packedFiles, packedManif
 	);
 	addCompilerPeer(manifest);
 
-	writeFileSync(
-		path.join(consumerDirectory, 'package.json'),
-		`${JSON.stringify(manifest, null, 2)}\n`,
-	);
-	writeFileSync(
-		path.join(consumerDirectory, 'pnpm-workspace.yaml'),
-		renderPackedExampleWorkspace(archiveSpecs),
-	);
+	writePackedConsumerManifest(consumerDirectory, manifest, archiveSpecs);
 	writeFileSync(
 		path.join(sourceDirectory, 'PublishedSourceConsumer.tsrx'),
 		renderPackedTsrxConsumerSource(),
@@ -1379,6 +1397,7 @@ function validatePackedTsrxConsumer(tempRoot, archives, packedFiles, packedManif
 		},
 	);
 
+	verifyPackedConsumerAuthorities(consumerDirectory);
 	const consumerRequire = createRequire(path.join(consumerDirectory, 'package.json'));
 	const directRuntime = realpathSync(consumerRequire.resolve('octane'));
 	for (const packageName of validatedPackages) {
@@ -1447,9 +1466,12 @@ function validatePackedTsrxConsumer(tempRoot, archives, packedFiles, packedManif
 				// MDX's server provider belongs to the full Node lane above. Keep its
 				// client source checked here; an actual client import of server code
 				// still enters the TypeScript program despite this root exclusion.
-				sourceExcludeFiles: resolvePackedTsrxSourceDirectories(consumerDirectory, [
-					'@octanejs/mdx',
-				]).map((directory) => `${directory}/src/server.tsrx`),
+				sourceExcludeFiles: PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS.flatMap(
+					({ packageName, sourceFile }) =>
+						resolvePackedTsrxSourceDirectories(consumerDirectory, [packageName]).map(
+							(directory) => `${directory}/${sourceFile}`,
+						),
+				),
 			},
 			consumerTsrxFiles: [],
 			sourcePackages: [...browserSourceConsumerSpecifiers.keys()],
@@ -1587,14 +1609,7 @@ async function validatePackedJavascriptConsumer(tempRoot, archives) {
 	);
 	const manifest = createPackedJavascriptConsumerManifest(archiveSpecs);
 	addCompilerPeer(manifest);
-	writeFileSync(
-		path.join(consumerDirectory, 'package.json'),
-		`${JSON.stringify(manifest, null, 2)}\n`,
-	);
-	writeFileSync(
-		path.join(consumerDirectory, 'pnpm-workspace.yaml'),
-		renderPackedExampleWorkspace(archiveSpecs),
-	);
+	writePackedConsumerManifest(consumerDirectory, manifest, archiveSpecs);
 	writeFileSync(path.join(consumerDirectory, 'require.cjs'), renderPackedCommonjsConsumerSource());
 	writeFileSync(path.join(consumerDirectory, 'import.mjs'), renderPackedEsmConsumerSource());
 	cpSync(
@@ -1622,6 +1637,7 @@ async function validatePackedJavascriptConsumer(tempRoot, archives) {
 		},
 	);
 
+	verifyPackedConsumerAuthorities(consumerDirectory);
 	const consumerRequire = createRequire(path.join(consumerDirectory, 'package.json'));
 	const directRuntime = realpathSync(consumerRequire.resolve('octane'));
 	for (const packageName of PACKED_COMMONJS_CONSUMER_PACKAGES) {
@@ -1825,30 +1841,23 @@ function validatePackedLynxConsumer(tempRoot, archives) {
 			(packageName) => [packageName, fileArchiveSpec(archives, packageName)],
 		),
 	);
-	writeFileSync(
-		path.join(consumerDirectory, 'package.json'),
-		JSON.stringify(
-			{
-				name: 'octane-packed-lynx-consumer-smoke',
-				private: true,
-				type: 'module',
-				engines: { node: '>=22.22.2' },
-				dependencies: {
-					...LYNX_TOOLCHAIN_LANES.minimum.packages,
-					'@octanejs/lynx': archiveSpecs['@octanejs/lynx'],
-					'@octanejs/rspack-plugin': archiveSpecs['@octanejs/rspack-plugin'],
-					'@octanejs/rspeedy-plugin': archiveSpecs['@octanejs/rspeedy-plugin'],
-					octane: archiveSpecs.octane,
-				},
-				devDependencies: { '@tsrx/oxc': tsrxOxcVersion },
+	writePackedConsumerManifest(
+		consumerDirectory,
+		{
+			name: 'octane-packed-lynx-consumer-smoke',
+			private: true,
+			type: 'module',
+			engines: { node: '>=22.22.2' },
+			dependencies: {
+				...LYNX_TOOLCHAIN_LANES.minimum.packages,
+				'@octanejs/lynx': archiveSpecs['@octanejs/lynx'],
+				'@octanejs/rspack-plugin': archiveSpecs['@octanejs/rspack-plugin'],
+				'@octanejs/rspeedy-plugin': archiveSpecs['@octanejs/rspeedy-plugin'],
+				octane: archiveSpecs.octane,
 			},
-			null,
-			2,
-		) + '\n',
-	);
-	writeFileSync(
-		path.join(consumerDirectory, 'pnpm-workspace.yaml'),
-		renderPackedExampleWorkspace(archiveSpecs),
+			devDependencies: { '@tsrx/oxc': tsrxOxcVersion },
+		},
+		archiveSpecs,
 	);
 	writeFileSync(
 		path.join(sourceDirectory, 'App.tsrx'),
@@ -2102,6 +2111,23 @@ try {
 	);
 }
 
+// Focus the package inventory, retaining every existing consumer scenario and
+// its normal packed inputs rather than replacing acceptance with a smoke test.
+const packagesToPack = selectPackedPackages(process.argv.slice(2), packages, [
+	...PACKED_RUNTIME_CONSUMER_PACKAGES,
+	...PACKED_JAVASCRIPT_CONSUMER_PACKAGES,
+	...PACKED_TSRX_PROBE_PACKAGES,
+	...PACKED_STRICT_BROWSER_SOURCE_PACKAGES,
+	...packedExampleCanaries.flatMap((canary) => canary.packages),
+	'@octanejs/rspack-plugin',
+	'@octanejs/lynx',
+	'@octanejs/rspeedy-plugin',
+]);
+const packArguments = parsePackagePackArguments(process.argv.slice(2));
+let externalArchives;
+if (process.argv.length > 2 && process.env.OCTANE_PACK_ARTIFACT_DIR) {
+	throw new Error('release cohort artifact retention requires the full package inventory');
+}
 const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'octane-pack-check-'));
 const failures = [];
 const packedArchives = new Map();
@@ -2110,7 +2136,33 @@ const packedManifests = new Map();
 let rawTsrxFiles = 0;
 
 try {
-	for (const pkg of packages) {
+	const configuredAuthorities = configuredPackageArchiveRequests(
+		JSON.parse(
+			execFileSync('pnpm', ['config', 'get', 'catalogs', '--json'], {
+				cwd: REPO_ROOT,
+				encoding: 'utf8',
+			}),
+		),
+		readFileSync(path.join(REPO_ROOT, 'pnpm-lock.yaml'), 'utf8'),
+		new Map(packagesToPack.map((pkg) => [pkg.name, pkg.manifest])),
+	);
+	externalArchives = await readConfiguredPackageArchives(
+		configuredAuthorities,
+		new Map(packagesToPack.map((pkg) => [pkg.name, pkg.manifest])),
+		tempRoot,
+	);
+	const candidateArchives = readExternalPackageArchives(
+		packArguments.externalPackages,
+		new Map(packagesToPack.map((pkg) => [pkg.name, pkg.manifest])),
+		tempRoot,
+	);
+	for (const [name, archive] of candidateArchives) {
+		externalArchives.set(name, archive);
+		console.log(
+			`local external candidate ${name}@${archive.version}: ${archive.path} ${archive.integrity}; not publication evidence`,
+		);
+	}
+	for (const pkg of packagesToPack) {
 		const outputDirectory = path.join(tempRoot, pkg.dir);
 		mkdirSync(outputDirectory, { recursive: true });
 		try {
@@ -2219,5 +2271,5 @@ if (failures.length) {
 }
 
 console.log(
-	`validated ${packages.length} package tarball(s); preserved ${rawTsrxFiles} raw TSRX source file(s).`,
+	`validated ${packagesToPack.length} package tarball(s); preserved ${rawTsrxFiles} raw TSRX source file(s).${process.argv.length > 2 ? ` Focused package: ${packArguments.packageName}; source binding enrollment limited to the focused closure (${packedTsrxConsumerPlan.sourceConsumerSpecifiers.size} binding packages).` : ''}`,
 );

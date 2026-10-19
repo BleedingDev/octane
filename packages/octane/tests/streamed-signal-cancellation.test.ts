@@ -12,8 +12,8 @@ import {
 } from '../src/server/streamed-signals.js';
 import { bootstrapStreamedSignalResults } from '../src/hydration/streamed-signals.js';
 import { __queryAt, runWithSignalOwner } from '../src/signals/index.js';
+import { activateStreamedMarkup } from './_server-stream.js';
 import type {
-	StreamedRendererFrame,
 	StreamedSignalResultFrame,
 	StreamFrameIdentity,
 } from '../src/streamed-signals-protocol.js';
@@ -345,66 +345,111 @@ it('returns an idle automatic query upstream when the request aborts', async () 
 	expect(upstream.state.returned).toBe(1);
 });
 
-it('streams the automatic channels it can hold and leaves overflow attempts to the browser', async () => {
-	enableServerSignalBindings();
-	const pending: Array<() => void> = [];
-	const loads = Array.from({ length: 300 }, () => 0);
-	const queries = Array.from({ length: 300 }, (_, i) =>
-		__queryAt(
-			`g:channel-overflow-${i}`,
-			() => `k${i}`,
-			() => {
-				loads[i]!++;
-				return new Promise<string>((resolve) => pending.push(() => resolve(`v${i}`)));
-			},
-			{ key: `channel-overflow-${i}` },
-		),
-	);
-	const errors: unknown[] = [];
-	const stream = await renderToReadableStream(
-		() => queries.map((query) => `<p>${query.snapshot().status}</p>`).join(''),
-		undefined,
-		{
-			streamedSignals: { buildId: 'build', documentId: 'channel-overflow' },
-			onError: (error: unknown) => errors.push(error),
-		} as StreamOptions,
-	);
-	const html = text(stream);
-	await settle();
-	for (const resolve of pending) resolve();
-	const output = await html;
-	expect(errors).toEqual([]);
-	expect(pending).toHaveLength(300);
-	// Every live channel keeps its server work, and only those are announced.
-	expect(output.match(/"kind":"complete"/g)).toHaveLength(256);
-	expect(output.match(/v\.register\(/g)).toHaveLength(256);
-
-	// In the browser, announced channels adopt the server result; the overflow loads itself.
-	const frames = [
-		...output.matchAll(/__octaneStreamedRenderer\.receive\((\{.*?\})\);<\/script>/g),
-	].map((match) => JSON.parse(match[1]!) as StreamedRendererFrame);
-	const identities = [...output.matchAll(/v\.register\((\{.*?\})\);\}\)\(globalThis\);/g)].map(
-		(match) => JSON.parse(match[1]!),
-	);
-	const signalOwner = { scopeKey: 'octane:document' };
-	enableSignalBindings();
-	const results = bootstrapStreamedSignalResults({
-		buildId: 'build',
-		documentId: 'channel-overflow',
-		signalOwner,
-		target: {
-			__octaneStreamedSignalSelections: { version: 1, identities, register() {} },
-			__octaneStreamedRenderer: { version: 1, frames, receive() {} },
-		},
-	});
-	try {
-		const snapshot = (i: number) => runWithSignalOwner(signalOwner, () => queries[i]!.snapshot());
-		expect(snapshot(0)).toMatchObject({ status: 'ready', value: 'v0' });
-		expect(snapshot(255)).toMatchObject({ status: 'ready', value: 'v255' });
-		expect(loads[0]).toBe(1);
-		expect(snapshot(299).status).toBe('pending');
-		expect(loads[299]).toBe(2);
-	} finally {
-		results.dispose();
-	}
-});
+it.each(['shell', 'completed response'] as const)(
+	'streams bounded automatic channels when the browser joins the %s',
+	async (join) => {
+		enableServerSignalBindings();
+		const pending: Array<() => void> = [];
+		const loads = Array.from({ length: 300 }, () => 0);
+		const queries = Array.from({ length: 300 }, (_, i) =>
+			__queryAt(
+				`g:channel-overflow-${i}`,
+				() => `k${i}`,
+				() => {
+					loads[i]!++;
+					return new Promise<string>((resolve) => pending.push(() => resolve(`v${i}`)));
+				},
+				{ key: `channel-overflow-${i}` },
+			),
+		);
+		const errors: unknown[] = [];
+		const stream = await renderToReadableStream(
+			() => queries.map((query) => `<p>${query.snapshot().status}</p>`).join(''),
+			undefined,
+			{
+				streamedSignals: { buildId: 'build', documentId: 'channel-overflow' },
+				onError: (error: unknown) => errors.push(error),
+			} as StreamOptions,
+		);
+		const ownerDocument = document.implementation.createHTMLDocument('Channel overflow');
+		const target: Record<string, unknown> = {};
+		const container = ownerDocument.createElement('div');
+		const signalOwner = { scopeKey: 'octane:document' };
+		const bootstrap = () =>
+			bootstrapStreamedSignalResults({
+				buildId: 'build',
+				documentId: 'channel-overflow',
+				// Exercise the server's 256-channel admission bound rather than the client default of 64.
+				maxPendingFrames: 256,
+				document: ownerDocument,
+				signalOwner,
+				target,
+			});
+		const reader = stream.getReader();
+		const decoder = new TextDecoder();
+		const first = await reader.read();
+		expect(first.done).toBe(false);
+		const shell = decoder.decode(first.value, { stream: true });
+		const remainder = (async () => {
+			let output = '';
+			for (;;) {
+				const next = await reader.read();
+				if (next.done) return output + decoder.decode();
+				output += decoder.decode(next.value, { stream: true });
+			}
+		})();
+		// Bootstrap assertions can fail while the transport reader is still pending.
+		void remainder.catch(() => {});
+		let results: ReturnType<typeof bootstrapStreamedSignalResults> | undefined;
+		try {
+			if (join === 'shell') {
+				container.innerHTML = shell;
+				activateStreamedMarkup(container, { target });
+				enableSignalBindings();
+				results = bootstrap();
+			}
+			await settle();
+			expect(pending).toHaveLength(300);
+			for (const resolve of pending) resolve();
+			const tail = await remainder;
+			expect(errors).toEqual([]);
+			if (join === 'shell') container.insertAdjacentHTML('beforeend', tail);
+			else container.innerHTML = shell + tail;
+			if (join === 'shell') {
+				const scripts = ownerDocument.createElement('div');
+				for (const script of Array.from(container.querySelectorAll('script'))) {
+					scripts.append(script);
+					activateStreamedMarkup(scripts, { target });
+					// Let inline delivery advance between scripts instead of producing one synchronous burst.
+					await Promise.resolve();
+				}
+			} else activateStreamedMarkup(container, { target });
+			enableSignalBindings();
+			if (join === 'completed response') {
+				// Three frames per result exceed the pre-module mailbox's 512-frame bound.
+				expect(bootstrap).toThrow(/renderer mailbox overflowed|Minified Octane error #228/);
+			}
+			await settle();
+			const snapshot = (i: number) => runWithSignalOwner(signalOwner, () => queries[i]!.snapshot());
+			for (let i = 0; i < 256; i++) {
+				if (join === 'shell')
+					expect(snapshot(i)).toMatchObject({ status: 'ready', value: `v${i}` });
+				else {
+					// This is the failed join's current state, not a successful boundary fallback.
+					expect(snapshot(i).status).toBe('pending');
+				}
+				expect(loads[i]).toBe(1);
+			}
+			for (let i = 256; i < 300; i++) {
+				expect(snapshot(i).status).toBe('pending');
+				expect(loads[i]).toBe(2);
+			}
+		} finally {
+			results?.dispose();
+			for (const resolve of pending) resolve();
+			await reader.cancel().catch(() => {});
+			await remainder.catch(() => {});
+			reader.releaseLock();
+		}
+	},
+);

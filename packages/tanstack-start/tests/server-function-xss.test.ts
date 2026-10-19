@@ -1,51 +1,144 @@
+// @vitest-environment node
+
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { pathToFileURL } from 'node:url';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { evaluateCompiledFixtureCode } from '../../octane/tests/_server-fixture.js';
 
-// Regression guard for CVE-2026-102989 / GHSA-qx66-fv34-fjm8: a critical
-// unauthenticated reflected XSS in TanStack Start's server-function response
-// handling. `@octanejs/tanstack-start` does not fork that handler — it drives
-// requests through `@tanstack/start-server-core` — so the fix ships by depending
-// on `@tanstack/start-server-core >= 1.169.39`, the first release to carry the
-// upstream fix. (This replaced the earlier repo-only pnpm patch once the binding
-// adopted router-core 1.171.34.)
-//
-// `handleServerAction` is an internal module (not a public export) that resolves
-// server functions through a compiler-generated virtual module, so it cannot be
-// driven from a unit test. Instead this guards the security property on the
-// dependency the repository resolves: client input is restricted to the public
-// {data, context, method} fields, and a non-Response result is never returned as
-// the raw HTTP response on the non-server-function path. The guard passes on any
-// fixed upstream version and fails if a vulnerable version is ever reintroduced.
-
-const bindingPackageJson = join(process.cwd(), 'packages/tanstack-start/package.json');
-const requireFromBinding = createRequire(bindingPackageJson);
-const serverCorePackageJson = requireFromBinding.resolve(
-	'@tanstack/start-server-core/package.json',
+// Exercise the installed handler for CVE-2026-102989 / GHSA-qx66-fv34-fjm8.
+// Only the compiler-generated function resolver is supplied by the fixture;
+// payload decoding and response serialization use the installed dependencies.
+const requireFromBinding = createRequire(
+	join(process.cwd(), 'packages/tanstack-start/package.json'),
 );
-const handlerFile = join(dirname(serverCorePackageJson), 'dist/esm/server-functions-handler.js');
-const handlerSource = readFileSync(handlerFile, 'utf8');
+const serverCoreRoot = dirname(
+	requireFromBinding.resolve('@tanstack/start-server-core/package.json'),
+);
+const handlerFile = join(serverCoreRoot, 'dist/esm/server-functions-handler.js');
+const requireFromHandler = createRequire(handlerFile);
+const clientCoreRoot = dirname(
+	requireFromHandler.resolve('@tanstack/start-client-core/package.json'),
+);
+const storageRoot = dirname(
+	requireFromHandler.resolve('@tanstack/start-storage-context/package.json'),
+);
+const seroval = requireFromHandler('seroval');
+
+type ActionOptions = { data: unknown; context: unknown; method: string };
+type ActionResult = { result: unknown } | { error: unknown };
+const action = vi.fn<(options: ActionOptions) => Promise<ActionResult>>();
+interface HandlerModule extends Record<string, unknown> {
+	handleServerAction(input: {
+		request: Request;
+		serverFnId: string;
+	}): Promise<
+		Response | { createResponse(event: { request: Request; requestUrl: URL }): Response }
+	>;
+}
+let handler: HandlerModule;
+
+beforeAll(async () => {
+	const dependencies = {
+		'./internal-request-response.js': join(serverCoreRoot, 'dist/esm/internal-request-response.js'),
+		'./frame-protocol.js': join(serverCoreRoot, 'dist/esm/frame-protocol.js'),
+		'@tanstack/start-client-core': join(clientCoreRoot, 'dist/esm/index.js'),
+		'@tanstack/start-client-core/client-rpc': join(clientCoreRoot, 'dist/esm/client-rpc/index.js'),
+	};
+	const runtimeModules = Object.fromEntries(
+		await Promise.all(
+			Object.entries(dependencies).map(async ([request, file]) => [
+				request,
+				await import(/* @vite-ignore */ pathToFileURL(file).href),
+			]),
+		),
+	);
+	const installed = evaluateCompiledFixtureCode<HandlerModule>(
+		readFileSync(handlerFile, 'utf8'),
+		handlerFile,
+		'server',
+		{
+			...runtimeModules,
+			'./getServerFnById.js': { getServerFnById: () => action },
+			'@tanstack/router-core': requireFromHandler('@tanstack/router-core'),
+			'@tanstack/router-core/ssr/server': requireFromHandler('@tanstack/router-core/ssr/server'),
+			seroval,
+		},
+	);
+	const storage = await import(
+		/* @vite-ignore */ pathToFileURL(join(storageRoot, 'dist/esm/index.js')).href
+	);
+	handler = {
+		handleServerAction: (input) =>
+			storage.runWithStartContext(
+				{
+					request: input.request,
+					startOptions: {},
+					contextAfterGlobalMiddlewares: {},
+					handlerType: 'serverFn',
+					getRouter() {
+						throw new Error('The server-function fixture does not render a router');
+					},
+				},
+				() => installed.handleServerAction(input),
+			),
+	};
+});
+
+function requestFor(payload: unknown) {
+	return new Request('https://fixture.test/_server/security-test', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify(seroval.toJSON(payload)),
+	});
+}
 
 describe('TanStack Start server-function handler (CVE-2026-102989)', () => {
-	it('restricts client-supplied input to the public {data, context, method} fields', () => {
-		// The vulnerable handler spread the whole client payload into the server
-		// function, letting attacker-controlled fields reach internal middleware
-		// state. The fix constructs an explicit, restricted options object.
-		expect(handlerSource).not.toMatch(/payload\.method\s*=\s*methodUpper/);
-		expect(handlerSource).not.toMatch(/payload\.context\s*=\s*safeObjectMerge/);
-		expect(handlerSource).toMatch(/data:\s*payload\?\.data/);
-		expect(handlerSource).toMatch(/context:\s*safeObjectMerge\(payload\?\.context,\s*context\)/);
+	it('restricts client-supplied input to the public {data, context, method} fields', async () => {
+		const payload = {
+			data: { message: 'public data' },
+			context: { locale: 'en' },
+			method: 'DELETE',
+			result: { headers: { 'content-type': 'text/html' }, body: '<script>alert(1)</script>' },
+			error: { status: 200 },
+			middleware: ['attacker-controlled'],
+		};
+		action.mockResolvedValue({ result: new Response('ok') });
+		await handler.handleServerAction({ request: requestFor(payload), serverFnId: 'security-test' });
+
+		expect(action).toHaveBeenLastCalledWith({
+			data: payload.data,
+			context: payload.context,
+			method: 'POST',
+		});
 	});
 
-	it('does not return a non-Response result as the raw HTTP response on the non-server-function path', () => {
-		// The vulnerable handler returned `unwrapped` verbatim for any request
-		// without the x-tsr-serverFn header, so an attacker-controlled
-		// response-shaped object from the error path could be emitted as HTML
-		// from the app's own origin. The fix only returns it raw when it is a
-		// Response, null, or a primitive; objects fall through to safe
-		// serialization.
-		expect(handlerSource).not.toMatch(/if\s*\(\s*!isServerFn\s*\)\s*return unwrapped/);
-		expect(handlerSource).toMatch(/typeof unwrapped\s*!==\s*['"]object['"]/);
-	});
+	it.each(['result', 'error'])(
+		'serializes a response-shaped %s instead of returning it as raw HTML',
+		async (field) => {
+			const responseShaped = {
+				status: 200,
+				headers: { 'content-type': 'text/html' },
+				body: '<script>alert(1)</script>',
+			};
+			action.mockResolvedValue(
+				field === 'result' ? { result: responseShaped } : { error: responseShaped },
+			);
+			const request = requestFor({ data: 'untrusted' });
+			const result = await handler.handleServerAction({ request, serverFnId: 'security-test' });
+
+			expect(result).not.toEqual(responseShaped);
+			const response =
+				result instanceof Response
+					? result
+					: result.createResponse({ request, requestUrl: new URL(request.url) });
+			expect(response.headers.get('content-type')).toBe('application/json');
+			expect(response.headers.get('x-tss-serialized')).toBe('true');
+			const decoded = seroval.fromCrossJSON(JSON.parse(await response.text()), { refs: new Map() });
+			expect(decoded).toEqual(
+				field === 'result' ? { result: responseShaped } : { error: responseShaped },
+			);
+		},
+	);
 });

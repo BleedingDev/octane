@@ -9,6 +9,16 @@ import path from 'node:path';
 import { describe, test } from 'node:test';
 import { NATIVE_TSC } from './octane-tsc/native.mjs';
 import {
+	selectPackedPackages,
+	parsePackagePackArguments,
+	readExternalPackageArchives,
+	applyExternalPackageArchives,
+	configuredPackageArchiveRequests,
+	authenticateConfiguredPackageArchive,
+	verifyConfiguredPackageArchives,
+} from './package-pack-selection.mjs';
+import { getWorkspacePackages } from './workspace-packages.mjs';
+import {
 	createPackedJavascriptConsumerManifest,
 	createPackedRuntimeConsumerDependencies,
 	assertPackedTsrxConsumerSucceeded,
@@ -43,6 +53,7 @@ import {
 	splitPackedTsrxTypecheckOutput,
 	PACKED_TSRX_CONSUMER_PROJECTS,
 	PACKED_TSRX_BROWSER_AMBIENT_FILE,
+	PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS,
 	PACKED_TSRX_LANE_SENTINEL_FILE,
 	PACKED_TSRX_LANE_SENTINEL_PROJECT,
 	PACKED_TSRX_PROBE_PACKAGES,
@@ -50,7 +61,458 @@ import {
 	PACKED_STRICT_BROWSER_SOURCE_PACKAGES,
 } from './package-pack-canaries.mjs';
 
+import { verifyDist } from '../packages/octane/scripts/verify-dist.mjs';
+
+describe('packed package selection', () => {
+	const packages = [
+		{ name: 'octane', manifest: {} },
+		{ name: '@octanejs/compiler', manifest: {} },
+		{
+			name: '@octanejs/router',
+			manifest: {
+				peerDependencies: { octane: '*', '@octanejs/compiler': '*' },
+				dependencies: { '@octanejs/history': 'workspace:*', external: '1.0.0' },
+			},
+		},
+		{
+			name: '@octanejs/history',
+			manifest: { optionalDependencies: { '@octanejs/optional': 'workspace:*' } },
+		},
+		{ name: '@octanejs/optional', manifest: { dependencies: { '@octanejs/router': '*' } } },
+		{ name: '@octanejs/canonical-canary', manifest: { peerDependencies: { octane: '*' } } },
+		{ name: '@octanejs/unrelated', manifest: {} },
+	];
+
+	test('no arguments retain the complete canonical package inventory and order', () => {
+		assert.equal(selectPackedPackages([], packages, []), packages);
+	});
+
+	test('an exact package keeps consumer inputs and the complete workspace dependency closure', () => {
+		assert.deepEqual(
+			selectPackedPackages(['--package', '@octanejs/router'], packages, [
+				'@octanejs/canonical-canary',
+			]).map((pkg) => pkg.name),
+			packages.filter((pkg) => pkg.name !== '@octanejs/unrelated').map((pkg) => pkg.name),
+		);
+	});
+
+	for (const args of [
+		['--package'],
+		['--package', '--package'],
+		['--package', '@octanejs/router', '--package', '@octanejs/router'],
+		['--package', '@octanejs/router', '@octanejs/history'],
+		['--package=@octanejs/router'],
+		['--skip-consumers'],
+		['@octanejs/router'],
+	]) {
+		test(`rejects malformed or duplicate selection ${JSON.stringify(args)}`, () => {
+			assert.throws(() => selectPackedPackages(args, packages, []), /exactly one --package/);
+		});
+	}
+
+	test('rejects unknown, partial and wildcard package names', () => {
+		for (const name of ['@octanejs/missing', 'router', '@octanejs/*', '']) {
+			assert.throws(
+				() => selectPackedPackages(['--package', name], packages, []),
+				/unknown packable package/,
+			);
+		}
+	});
+
+	test('fails closed when a required canonical consumer input is unavailable', () => {
+		assert.throws(
+			() =>
+				selectPackedPackages(['--package', '@octanejs/router'], packages, [
+					'@octanejs/missing-canary',
+				]),
+			/unknown packable package: @octanejs\/missing-canary/,
+		);
+	});
+
+	test('the real focused router inventory resolves every canonical browser root exclusion', () => {
+		const workspacePackages = getWorkspacePackages();
+		const selected = selectPackedPackages(
+			['--package', '@octanejs/tanstack-router'],
+			workspacePackages,
+			[...PACKED_TSRX_PROBE_PACKAGES, ...PACKED_STRICT_BROWSER_SOURCE_PACKAGES],
+		);
+		const directory = mkdtempSync(path.join(tmpdir(), 'octane-focused-pack-roots-'));
+		try {
+			for (const pkg of selected) {
+				const link = path.join(directory, 'node_modules', pkg.name);
+				mkdirSync(path.dirname(link), { recursive: true });
+				symlinkSync(pkg.directory, link);
+			}
+			for (const { packageName, sourceFile } of PACKED_TSRX_BROWSER_ROOT_EXCLUSIONS) {
+				const [relativeDirectory] = resolvePackedTsrxSourceDirectories(directory, [packageName]);
+				assert.ok(fs.statSync(path.resolve(directory, relativeDirectory, sourceFile)).isFile());
+				// Removing this input reproduces the canonical resolver's pre-check failure.
+				rmSync(path.join(directory, 'node_modules', packageName));
+				assert.throws(() => resolvePackedTsrxSourceDirectories(directory, [packageName]), {
+					code: 'ENOENT',
+				});
+			}
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+});
+
 const repositoryRequire = createRequire(import.meta.url);
+
+describe('external package archives', () => {
+	const core = '@tanstack/router-core';
+	const manifests = new Map([
+		['octane', {}],
+		['@octanejs/tanstack-router', { peerDependencies: { octane: '*', [core]: '1.171.38' } }],
+		['@octanejs/tanstack-start', { dependencies: { '@octanejs/tanstack-router': '0.2.10' } }],
+	]);
+	const args = [
+		'--external-package',
+		`${core}=/absolute/core.tgz`,
+		'--package',
+		'@octanejs/tanstack-router',
+	];
+	const request =
+		'https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0123456789ab/tanstack-router-core-1.171.38.tgz';
+	const bytes = Buffer.from('accepted package archive');
+	const integrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
+	const lockfile = `packages:\n  '${core}@${request}':\n    resolution: {integrity: ${integrity}, tarball: ${request}}\n\nsnapshots:\n  '${core}@${request}': {}`;
+
+	test('uses the configured released authority directly without changing packed peers or overriding transitive requests', () => {
+		const authorities = configuredPackageArchiveRequests(
+			{ default: { [core]: request } },
+			lockfile,
+			manifests,
+		);
+		assert.deepEqual(authorities.get(core), { request, version: '1.171.38', integrity });
+		assert.deepEqual(
+			configuredPackageArchiveRequests(
+				{ default: { [core]: request } },
+				`---\npackages:\n  pnpm@12.9.1: {}\n\nsnapshots:\n  pnpm@12.9.1: {}\n---\n${lockfile}`,
+				manifests,
+			),
+			authorities,
+		);
+		authenticateConfiguredPackageArchive(authorities.get(core), bytes);
+		const manifest = {
+			dependencies: { '@octanejs/tanstack-router': 'file:/router.tgz', [core]: '1.171.38' },
+		};
+		const prepared = applyExternalPackageArchives(manifest, {}, manifests, authorities);
+		assert.equal(prepared.manifest.dependencies[core], request);
+		assert.equal(prepared.archiveSpecs[core], undefined);
+		assert.equal(manifests.get('@octanejs/tanstack-router').peerDependencies[core], '1.171.38');
+		assert.equal(manifest.dependencies[core], '1.171.38');
+	});
+
+	test('permits only an exact numeric catalog as a registry host', () => {
+		assert.deepEqual(
+			configuredPackageArchiveRequests({ default: { [core]: '1.171.38' } }, '', manifests),
+			new Map(),
+		);
+		for (const spec of [
+			'file:/core.tgz',
+			'link:../core',
+			'github:BleedingDev/router',
+			'http://example.test/core.tgz',
+			'^1.171.38',
+			'latest',
+			'',
+			undefined,
+		]) {
+			assert.throws(
+				() => configuredPackageArchiveRequests({ default: { [core]: spec } }, lockfile, manifests),
+				/unsupported/,
+			);
+		}
+	});
+
+	test('rejects missing lock authority, redirected requests and changed archive bytes', () => {
+		assert.throws(
+			() => configuredPackageArchiveRequests({ default: { [core]: request } }, '', manifests),
+			/locked/,
+		);
+		assert.throws(
+			() =>
+				configuredPackageArchiveRequests(
+					{ default: { [core]: request } },
+					lockfile.replace(`tarball: ${request}`, 'tarball: https://example.test/core.tgz'),
+					manifests,
+				),
+			/integrity/,
+		);
+		assert.throws(
+			() =>
+				configuredPackageArchiveRequests(
+					{ default: { [core]: 'https://example.test/core.tgz' } },
+					lockfile,
+					manifests,
+				),
+			/unsupported/,
+		);
+		assert.throws(
+			() =>
+				configuredPackageArchiveRequests(
+					{ default: { [core]: request } },
+					`${lockfile}\n---\n${lockfile}`,
+					manifests,
+				),
+			/one locked/,
+		);
+		assert.throws(
+			() => authenticateConfiguredPackageArchive({ integrity }, Buffer.from('different bytes')),
+			/integrity mismatch/,
+		);
+	});
+
+	test('installed host rejects registry fallback, changed files and a second peer authority', () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'octane-configured-core-'));
+		try {
+			const expected = path.join(directory, 'accepted');
+			mkdirSync(expected);
+			writeFileSync(
+				path.join(expected, 'package.json'),
+				JSON.stringify({ name: core, version: '1.171.38' }),
+			);
+			writeFileSync(path.join(expected, 'index.js'), 'export const accepted = true;');
+			const consumer = path.join(directory, 'consumer');
+			const installed = path.join(consumer, 'node_modules', core);
+			mkdirSync(path.dirname(installed), { recursive: true });
+			fs.cpSync(expected, installed, { recursive: true });
+			const router = path.join(consumer, 'node_modules/@octanejs/tanstack-router');
+			mkdirSync(router, { recursive: true });
+			writeFileSync(
+				path.join(router, 'package.json'),
+				JSON.stringify({
+					name: '@octanejs/tanstack-router',
+					exports: { '.': './index.js' },
+					peerDependencies: { [core]: '1.171.38' },
+				}),
+			);
+			writeFileSync(path.join(consumer, 'package.json'), '{}');
+			const manifest = {
+				dependencies: { '@octanejs/tanstack-router': 'file:/router.tgz', [core]: request },
+			};
+			const archives = new Map([[core, { request, expected }]]);
+			assert.throws(
+				() =>
+					createRequire(path.join(consumer, 'package.json')).resolve(
+						'@octanejs/tanstack-router/package.json',
+					),
+				{ code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' },
+			);
+			verifyConfiguredPackageArchives(consumer, manifest, manifests, archives);
+			assert.throws(
+				() =>
+					verifyConfiguredPackageArchives(
+						consumer,
+						{ dependencies: { ...manifest.dependencies, [core]: '1.171.38' } },
+						manifests,
+						archives,
+					),
+				/declare.*directly/,
+			);
+			writeFileSync(path.join(installed, 'index.js'), 'export const accepted = false;');
+			assert.throws(
+				() => verifyConfiguredPackageArchives(consumer, manifest, manifests, archives),
+				/bytes differ/,
+			);
+			fs.cpSync(expected, installed, { recursive: true });
+			const duplicateConsumer = path.join(directory, 'duplicate-consumer');
+			fs.cpSync(consumer, duplicateConsumer, { recursive: true });
+			const duplicate = path.join(
+				duplicateConsumer,
+				'node_modules/@octanejs/tanstack-router/node_modules',
+				core,
+			);
+			mkdirSync(path.dirname(duplicate), { recursive: true });
+			fs.cpSync(expected, duplicate, { recursive: true });
+			assert.throws(
+				() => verifyConfiguredPackageArchives(duplicateConsumer, manifest, manifests, archives),
+				/second.*authority/,
+			);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	test('accepts explicit archives with selection in either argument order', () => {
+		for (const input of [args, [...args.slice(2), ...args.slice(0, 2)]]) {
+			assert.deepEqual(parsePackagePackArguments(input), {
+				packageName: '@octanejs/tanstack-router',
+				externalPackages: new Map([[core, '/absolute/core.tgz']]),
+			});
+			assert.equal(
+				selectPackedPackages(input, getWorkspacePackages(), []).some(
+					(pkg) => pkg.name === '@octanejs/tanstack-router',
+				),
+				true,
+			);
+		}
+	});
+
+	test('rejects missing, duplicate, unfocused, non-local and unknown archive options', () => {
+		for (const input of [
+			['--package', '@octanejs/tanstack-router', '--external-package'],
+			[...args, ...args.slice(0, 2)],
+			args.slice(0, 2),
+			['--package', '@octanejs/tanstack-router', '--external-package', `${core}=relative.tgz`],
+			[
+				'--package',
+				'@octanejs/tanstack-router',
+				'--external-package',
+				`${core}=https://example.test/core.tgz`,
+			],
+			['--package', '@octanejs/tanstack-router', '--external-package', 'other=/absolute/core.tgz'],
+		])
+			assert.throws(() => parsePackagePackArguments(input));
+	});
+
+	function withArchive(manifest, run) {
+		const directory = mkdtempSync(path.join(tmpdir(), 'octane-external-archive-'));
+		try {
+			mkdirSync(path.join(directory, 'package'));
+			writeFileSync(path.join(directory, 'package/package.json'), JSON.stringify(manifest));
+			const archive = path.join(directory, 'core.tgz');
+			const result = spawnSync('tar', ['-czf', archive, '-C', directory, 'package'], {
+				encoding: 'utf8',
+			});
+			assert.equal(result.status, 0, result.stderr);
+			run(archive);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	}
+
+	test('reads the actual tar manifest and records the exact local archive bytes', () => {
+		withArchive({ name: core, version: '1.171.38' }, (archive) => {
+			const validated = readExternalPackageArchives(new Map([[core, archive]]), manifests).get(
+				core,
+			);
+			assert.equal(validated.path, realpathSync(archive));
+			assert.equal(validated.version, '1.171.38');
+			assert.equal(
+				validated.integrity,
+				`sha512-${createHash('sha512').update(fs.readFileSync(archive)).digest('base64')}`,
+			);
+		});
+	});
+
+	test('requests explicit gzip decompression when reading a tar manifest from stdin', () => {
+		withArchive({ name: core, version: '1.171.38' }, (archive) => {
+			const directory = path.join(path.dirname(archive), 'bin');
+			mkdirSync(directory);
+			const realTar = spawnSync('which', ['tar'], { encoding: 'utf8' });
+			assert.equal(realTar.status, 0, realTar.stderr);
+			const wrapper = path.join(directory, 'tar');
+			writeFileSync(
+				wrapper,
+				`#!/bin/sh\ncase "$1" in *z*) ;; *) echo 'stdin gzip requires explicit z' >&2; exit 64 ;; esac\nexec '${realTar.stdout.trim().replaceAll("'", "'\\''")}' "$@"\n`,
+			);
+			fs.chmodSync(wrapper, 0o755);
+			const originalPath = process.env.PATH;
+			try {
+				process.env.PATH = `${directory}${path.delimiter}${originalPath}`;
+				const candidate = readExternalPackageArchives(new Map([[core, archive]]), manifests).get(
+					core,
+				);
+				assert.equal(candidate.version, '1.171.38');
+			} finally {
+				process.env.PATH = originalPath;
+			}
+		});
+	});
+
+	test('consumer archive copies retain the verified bytes when the input is replaced', () => {
+		withArchive({ name: core, version: '1.171.38' }, (archive) => {
+			const directory = path.join(path.dirname(archive), 'accepted');
+			mkdirSync(directory);
+			const bytes = fs.readFileSync(archive);
+			const candidate = readExternalPackageArchives(
+				new Map([[core, archive]]),
+				manifests,
+				directory,
+			).get(core);
+			writeFileSync(archive, 'replaced');
+			assert.notEqual(candidate.path, archive);
+			assert.deepEqual(fs.readFileSync(candidate.path), bytes);
+			assert.equal(
+				candidate.integrity,
+				`sha512-${createHash('sha512').update(bytes).digest('base64')}`,
+			);
+		});
+	});
+
+	for (const manifest of [
+		{ name: 'other', version: '1.171.38' },
+		{ name: core, version: '1.171.37' },
+		{ name: core, version: '1.171.39' },
+		{ name: core, version: '^1.171.38' },
+	])
+		test(`rejects mismatched archive identity ${JSON.stringify(manifest)}`, () => {
+			withArchive(manifest, (archive) =>
+				assert.throws(() => readExternalPackageArchives(new Map([[core, archive]]), manifests)),
+			);
+		});
+
+	test('rejects nonexistent and unused archive inputs', () => {
+		assert.throws(() =>
+			readExternalPackageArchives(new Map([[core, '/missing/core.tgz']]), manifests),
+		);
+		withArchive({ name: core, version: '1.171.38' }, (archive) => {
+			assert.throws(
+				() => readExternalPackageArchives(new Map([[core, archive]]), new Map([['octane', {}]])),
+				/unused/,
+			);
+			assert.throws(
+				() =>
+					readExternalPackageArchives(
+						new Map([[core, archive]]),
+						new Map([['router', { peerDependencies: { [core]: '^1.171.38' } }]]),
+					),
+				/exact/,
+			);
+		});
+	});
+
+	test('injects the same direct request and override only into consumers with the actual native peer closure', () => {
+		const external = new Map([[core, { path: '/absolute/core.tgz', version: '1.171.38' }]]);
+		for (const root of ['@octanejs/tanstack-router', '@octanejs/tanstack-start']) {
+			const manifest = { dependencies: { [root]: 'file:/native.tgz', [core]: '1.171.38' } };
+			const archives = { [root]: 'file:/native.tgz' };
+			const prepared = applyExternalPackageArchives(manifest, archives, manifests, external);
+			assert.equal(prepared.manifest.dependencies[core], 'file:/absolute/core.tgz');
+			assert.equal(prepared.archiveSpecs[core], prepared.manifest.dependencies[core]);
+			assert.match(
+				renderPackedExampleWorkspace(prepared.archiveSpecs),
+				/"@tanstack\/router-core": "file:\/absolute\/core.tgz"/,
+			);
+			assert.equal(manifest.dependencies[core], '1.171.38');
+			assert.equal(archives[core], undefined);
+		}
+		const unrelated = { dependencies: { octane: 'file:/octane.tgz' } };
+		assert.equal(
+			applyExternalPackageArchives(unrelated, {}, manifests, external).manifest,
+			unrelated,
+		);
+		assert.equal(
+			applyExternalPackageArchives(unrelated, {}, manifests, new Map()).manifest,
+			unrelated,
+		);
+		const incompatible = new Map(manifests);
+		incompatible.set('@octanejs/tanstack-router', { peerDependencies: { [core]: '1.171.39' } });
+		assert.throws(
+			() =>
+				applyExternalPackageArchives(
+					{ dependencies: { '@octanejs/tanstack-router': 'file:/native.tgz' } },
+					{},
+					incompatible,
+					external,
+				),
+			/exact/,
+		);
+	});
+});
 
 describe('packed runtime consumer dependencies', () => {
 	const manifests = new Map([
@@ -150,6 +612,32 @@ describe('packed JavaScript consumers', () => {
 		assert.match(source, /from '@octanejs\/radix'/);
 		assert.match(source, /renderToString/);
 	});
+
+	for (const [format, render] of [
+		['CommonJS', renderPackedCommonjsConsumerSource],
+		['ESM', renderPackedEsmConsumerSource],
+	]) {
+		test(`${format} executes the packed snapshot lifecycle rather than only listing exports`, () => {
+			const source = render();
+			for (const operation of [
+				'server.externalSnapshotBoundary(',
+				'server.registerExternalSnapshotContext(',
+				'octane.serializeExternalSnapshotRequest(request)',
+				'server.decodeExternalSnapshotRequest(wire, authority)',
+				'server.prepareExternalSnapshotRequest(wire, { authority, signal })',
+				'server.renderExternalSnapshot(Remote, prepared)',
+				'octane.decodeExternalSnapshot(server.serializeExternalSnapshot(snapshot))',
+				'server.releasePreparedExternalSnapshotRequest(prepared)',
+			]) {
+				assert.ok(source.includes(operation), `${format} must exercise ${operation}`);
+			}
+			assert.match(source, /assert\.match\(html, \/host context:packed publisher\/\)/);
+			assert.match(source, /assert\.deepEqual\(disposed, decoded\)/);
+			assert.match(source, /lease\.signal\.aborted, true/);
+			assert.match(source, /publisherBuildId: 'foreign-publisher'/);
+			assert.match(source, /error => error === reason/);
+		});
+	}
 
 	test('compiles the TSRX draggable ESM entry through the Octane toolchain', () => {
 		const source = renderPackedDraggableEsmConsumerSource();
@@ -444,6 +932,119 @@ declare namespace NodeJS { interface Process { env: { NODE_ENV?: string } } }
 		assert.match(source, /invalidFormRef/);
 		assert.match(source, /invalidNavLinkRef/);
 		assert.match(source, /Parameters<typeof Bar<Datum, number>>/);
+	});
+
+	for (const [lane, render] of [
+		['source', renderPackedTsrxConsumerTypeProbe],
+		['strict browser', renderPackedStrictBrowserConsumerTypeProbe],
+	]) {
+		test(`${lane} checks snapshot ownership and native router declarations from public packages`, () => {
+			const source = render();
+			assert.match(source, /from 'octane\/server'/);
+			assert.match(source, /from '@octanejs\/tanstack-router'/);
+			assert.match(source, /SnapshotAssertNotAny<ExternalSnapshotRequest>/);
+			assert.match(source, /RootOptions\['externalSnapshots'\]/);
+			assert.match(source, /invalidSnapshotRootOptions: RootOptions/);
+			assert.match(source, /invalidRouterPublicContext: RouterRenderJsonRecord/);
+			assert.match(source, /invalidHtml: number = decodeExternalSnapshot\(wire\)\.html/);
+			assert.match(
+				source,
+				/prepared: PreparedExternalSnapshotRequest = await prepareExternalSnapshotRequest/,
+			);
+			assert.match(source, /await releasePreparedExternalSnapshotRequest\(prepared\)/);
+			for (const name of [
+				'assertDefaultRouterRenderHost',
+				'associateRouterRenderProfile',
+				'captureRouterRenderSnapshot',
+				'createRouterRenderRouteTree',
+				'disposeRouterRenderSnapshot',
+				'getRouterRenderProfile',
+				'registerRouterRenderProfile',
+				'restoreRouterRenderSnapshot',
+			]) {
+				assert.ok(source.includes(name), `${lane} must check ${name}`);
+			}
+		});
+	}
+
+	test('generated router profiles satisfy required native search codecs under strict TypeScript', async () => {
+		const ts = (await import('typescript')).default;
+		const routerDirectory = path.resolve(import.meta.dirname, '../packages/tanstack-router');
+		const contractFile = path.join(routerDirectory, 'src/ssr/routerRenderSnapshot.ts');
+		const contract = ts.createSourceFile(
+			contractFile,
+			fs.readFileSync(contractFile, 'utf8'),
+			ts.ScriptTarget.Latest,
+			true,
+		);
+		const routingType = contract.statements.find(
+			(node) => ts.isTypeAliasDeclaration(node) && node.name.text === 'RouterRenderRoutingOptions',
+		);
+		assert.ok(routingType, 'the probe must use the real public routing contract');
+		const filename = path.join(routerDirectory, 'packed-routing-contract.ts');
+		const options = {
+			strict: true,
+			noEmit: true,
+			skipLibCheck: false,
+			types: [],
+			target: ts.ScriptTarget.ESNext,
+			module: ts.ModuleKind.ESNext,
+			moduleResolution: ts.ModuleResolutionKind.Bundler,
+		};
+		const diagnose = (source) => {
+			const host = ts.createCompilerHost(options);
+			const getSourceFile = host.getSourceFile.bind(host);
+			host.getSourceFile = (file, languageVersion, ...rest) =>
+				file === filename
+					? ts.createSourceFile(file, source, languageVersion, true)
+					: getSourceFile(file, languageVersion, ...rest);
+			return ts.getPreEmitDiagnostics(ts.createProgram([filename], options, host));
+		};
+		for (const render of [
+			renderPackedTsrxConsumerTypeProbe,
+			renderPackedStrictBrowserConsumerTypeProbe,
+		]) {
+			const probe = ts.createSourceFile('probe.ts', render(), ts.ScriptTarget.Latest, true);
+			const profile = probe.statements
+				.filter(ts.isVariableStatement)
+				.flatMap((node) => node.declarationList.declarations)
+				.find((node) => node.name.getText(probe) === 'packedRouterProfile');
+			const routingOptions = profile.initializer.properties.find(
+				(node) => node.name?.getText(probe) === 'routingOptions',
+			).initializer;
+			const nativeImport = probe.statements.find(
+				(node) =>
+					ts.isImportDeclaration(node) && node.moduleSpecifier.text === '@octanejs/tanstack-router',
+			);
+			const codecs = nativeImport.importClause.namedBindings.elements
+				.filter((node) => ['defaultParseSearch', 'defaultStringifySearch'].includes(node.name.text))
+				.map((node) => node.getText(probe));
+			// Isolate the generated expression and the actual public alias so this
+			// focused control need not compile the unrelated published TSRX inventory.
+			const source = `import { type AnyRouter, ${codecs.join(', ')} } from '@tanstack/router-core';
+${routingType.getText(contract)}
+const routingOptions: () => RouterRenderRoutingOptions = ${routingOptions.getText(probe)};
+const accepted = routingOptions();
+`;
+			assert.deepEqual(
+				diagnose(source).map((diagnostic) =>
+					ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'),
+				),
+				[],
+			);
+			for (const codec of ['parseSearch', 'stringifySearch']) {
+				const diagnostics = diagnose(`${source}
+const { ${codec}: omitted, ...incomplete } = accepted;
+const rejected: RouterRenderRoutingOptions = incomplete;
+`);
+				assert.equal(diagnostics.length, 1);
+				assert.equal(diagnostics[0].code, 2741);
+				assert.match(
+					ts.flattenDiagnosticMessageText(diagnostics[0].messageText, '\n'),
+					new RegExp(codec),
+				);
+			}
+		}
 	});
 
 	test('rejects TSRX parser diagnostics even when the checker exits successfully', () => {
@@ -1119,5 +1720,76 @@ describe('retainPackedCompilerCohort', () => {
 			context.mock.restoreAll();
 			syncBuiltinESMExports();
 		}
+	});
+});
+
+test('packed declaration probes retain publisher identity and hot manifest admission contracts', () => {
+	for (const source of [
+		renderPackedTsrxConsumerTypeProbe(),
+		renderPackedStrictBrowserConsumerTypeProbe(),
+	]) {
+		assert.match(source, /publisherBoundary as serverPublisherBoundary/);
+		assert.match(source, /SnapshotAssertNotAny<ReturnType<typeof publisherBoundary>>/);
+		assert.match(source, /SnapshotAssertNotAny<HotSignalModuleStamp>/);
+		assert.match(source, /factory: '__signalAt'/);
+		assert.match(source, /@ts-expect-error Publisher identity must remain a string/);
+		assert.match(source, /@ts-expect-error A module generation must remain a string/);
+		assert.match(source, /__registerHotSignalComponent, __remountHotSignalComponent/);
+	}
+});
+
+async function withPublishedDistFixture(run) {
+	const directory = mkdtempSync(path.join(tmpdir(), 'octane-dist-contract-'));
+	try {
+		mkdirSync(path.join(directory, 'dist/cjs'), { recursive: true });
+		writeFileSync(
+			path.join(directory, 'package.json'),
+			JSON.stringify({ type: 'module', exports: {}, publishConfig: { exports: {} } }),
+		);
+		await run(directory);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+}
+
+test('rejects an unresolved deferred import in a published CommonJS module', async () => {
+	await withPublishedDistFixture(async (directory) => {
+		writeFileSync(
+			path.join(directory, 'dist/cjs/index.cjs'),
+			"exports.read = () => import('./lazy.js');\n",
+		);
+		writeFileSync(path.join(directory, 'dist/cjs/lazy.cjs'), 'module.exports = 42;\n');
+		await assert.rejects(verifyDist(directory), /unresolvable imports in dist:[\s\S]*lazy\.js/);
+	});
+});
+
+test('checks relative require targets in published CommonJS modules', async () => {
+	await withPublishedDistFixture(async (directory) => {
+		writeFileSync(
+			path.join(directory, 'dist/cjs/index.cjs'),
+			"module.exports = require('./missing.cjs');\n",
+		);
+		await assert.rejects(verifyDist(directory), /unresolvable imports in dist:[\s\S]*missing\.cjs/);
+	});
+});
+
+test('accepts a published deferred CommonJS target that a consumer can execute', async () => {
+	await withPublishedDistFixture(async (directory) => {
+		writeFileSync(
+			path.join(directory, 'dist/cjs/index.cjs'),
+			"exports.read = () => import('./lazy.cjs').then(value => value.default);\n",
+		);
+		writeFileSync(path.join(directory, 'dist/cjs/lazy.cjs'), 'module.exports = 42;\n');
+		await verifyDist(directory);
+		const execution = spawnSync(
+			process.execPath,
+			[
+				'-e',
+				"require('./dist/cjs/index.cjs').read().then(value => process.stdout.write(String(value)))",
+			],
+			{ cwd: directory, encoding: 'utf8' },
+		);
+		assert.equal(execution.status, 0, execution.stderr);
+		assert.equal(execution.stdout, '42');
 	});
 });

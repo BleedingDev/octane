@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 import { act, hydrateRoot } from '../../src/index.js';
 import { prerender } from '../../src/runtime.server.js';
 import { bootstrapStreamedSignalHydration } from '../../src/hydration/streamed-signals.js';
@@ -35,7 +35,6 @@ export function App(props) @{
 
 afterEach(() => {
 	resetStreamRuntimeGlobals();
-	delete (globalThis as any).__octaneStreamedSignalSelections;
 });
 
 describe.each(modes)('redeclared local query selectors after hydration (%j)', (mode) => {
@@ -49,6 +48,11 @@ describe.each(modes)('redeclared local query selectors after hydration (%j)', (m
 	const client = loadCompiledFixtureSource<any>(source, { ...options, mode: 'client' });
 
 	it('adopts the server selection, then reselects changed props', async () => {
+		// Compile modes model independent responses, not renewed authority in one Document.
+		const frame = document.createElement('iframe');
+		document.body.append(frame);
+		onTestFinished(() => frame.remove());
+		const ownerDocument = frame.contentDocument!;
 		const streamedSignals = {
 			buildId: 'local-selector-build',
 			documentId: `local-selector-${mode.dev}-${mode.strong}`,
@@ -58,9 +62,9 @@ describe.each(modes)('redeclared local query selectors after hydration (%j)', (m
 			{ sel: 'a', load: async (selection: string) => `server ${selection}` },
 			{ streamedSignals },
 		);
-		const container = document.createElement('div');
+		const container = ownerDocument.createElement('div');
 		container.innerHTML = html;
-		document.body.append(container);
+		ownerDocument.body.append(container);
 		activateStreamedMarkup(container);
 		const text = () => container.querySelector('main p, main i')?.textContent;
 		expect(text()).toBe('server a');
@@ -70,7 +74,10 @@ describe.each(modes)('redeclared local query selectors after hydration (%j)', (m
 			return `browser ${selection}`;
 		};
 		const errors: unknown[] = [];
-		const hydration = bootstrapStreamedSignalHydration(streamedSignals);
+		const hydration = bootstrapStreamedSignalHydration({
+			...streamedSignals,
+			document: ownerDocument,
+		});
 		const root = hydrateRoot(
 			container,
 			client.App,

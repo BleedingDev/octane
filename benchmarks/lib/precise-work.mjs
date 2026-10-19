@@ -18,6 +18,28 @@ export async function invokeHook(page, hook) {
 	}, call);
 }
 
+// Keep function identities from the same production-only coverage window as
+// the aggregate gate. Offsets distinguish anonymous and repeated function names.
+export function productionFunctionCalls(coverage) {
+	const calls = [];
+	for (const script of coverage.result) {
+		if (!script.url.includes('/assets/')) continue;
+		for (const fn of script.functions) {
+			const range = fn.ranges[0];
+			if (!range || range.count === 0) continue;
+			calls.push({
+				script: script.url,
+				scriptId: script.scriptId,
+				name: fn.functionName,
+				startOffset: range.startOffset,
+				endOffset: range.endOffset,
+				count: range.count,
+			});
+		}
+	}
+	return calls;
+}
+
 function countNamedFunctions(coverage, metrics) {
 	const counts = Object.fromEntries(metrics.map((name) => [name, 0]));
 	let productionCalls = 0;

@@ -3,9 +3,10 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { build } from 'esbuild';
+import { Window } from 'happy-dom';
 import { JSDOM } from 'jsdom';
 import ts from 'typescript';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { compile } from '../src/compiler/compile.js';
 
 const OCTANE_SOURCE = resolve(import.meta.dirname, '../src');
@@ -99,6 +100,41 @@ async function bundleFormatter(
 	)) as { messages: readonly string[] };
 
 	return { code, messages: module.messages };
+}
+
+async function bundleRpcClient(mode: 'development' | 'production', instance = '') {
+	const result = await build({
+		stdin: {
+			contents: "export { __serverRpc, __serverRpcStream } from './server-rpc-client.ts';",
+			loader: 'js',
+			resolveDir: OCTANE_SOURCE,
+			sourcefile: `${mode}-rpc-errors.js`,
+		},
+		bundle: true,
+		define: { 'process.env.NODE_ENV': JSON.stringify(mode) },
+		format: 'esm',
+		logLevel: 'silent',
+		minify: true,
+		platform: 'browser',
+		target: 'esnext',
+		treeShaking: true,
+		write: false,
+	});
+	const code = result.outputFiles[0].text;
+	const client = (await import(
+		`data:text/javascript;base64,${Buffer.from(code).toString('base64')}#${instance}`
+	)) as typeof import('../src/server-rpc-client.js');
+	return { code, client };
+}
+
+async function rejectedError(call: () => Promise<unknown>): Promise<Error> {
+	try {
+		await call();
+	} catch (error) {
+		if (error instanceof Error) return error;
+		throw error;
+	}
+	throw new Error('Expected the server call to reject');
 }
 
 async function bundleCompleteRuntime(surface: 'client' | 'server'): Promise<string> {
@@ -297,6 +333,145 @@ function decodedErrorUrl(message: string): URL {
 }
 
 describe('production error bundles', () => {
+	it.each(['development', 'production'] as const)(
+		'allows calls without cancellation when AbortSignal is unavailable or polyfilled in %s bundles',
+		async (mode) => {
+			const window = new Window();
+			const abortSignal = Object.getOwnPropertyDescriptor(globalThis, 'AbortSignal')!;
+			const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
+			const fetch = vi.spyOn(globalThis, 'fetch');
+			Object.defineProperty(globalThis, 'location', {
+				configurable: true,
+				value: { href: 'https://octane.test/' },
+			});
+			try {
+				for (const implementation of [undefined, window.AbortSignal]) {
+					Object.defineProperty(globalThis, 'AbortSignal', {
+						configurable: true,
+						value: implementation,
+					});
+					const { client } = await bundleRpcClient(
+						mode,
+						implementation === undefined ? 'missing-signal' : 'polyfilled-signal',
+					);
+					fetch.mockResolvedValueOnce(new Response('[{"value":1},"ready"]'));
+					await expect(client.__serverRpc('read', [])).resolves.toBe('ready');
+					fetch.mockClear();
+					for (const signal of [{ aborted: false }, new window.AbortController().signal]) {
+						await expect(
+							Reflect.apply(client.__serverRpc, undefined, ['read', [], { signal }]),
+						).rejects.toBeInstanceOf(TypeError);
+					}
+					expect(fetch).not.toHaveBeenCalled();
+				}
+			} finally {
+				fetch.mockRestore();
+				Object.defineProperty(globalThis, 'AbortSignal', abortSignal);
+				if (location === undefined) Reflect.deleteProperty(globalThis, 'location');
+				else Object.defineProperty(globalThis, 'location', location);
+				await window.happyDOM.close();
+			}
+		},
+	);
+
+	it.each(['development', 'production'] as const)(
+		'preserves RPC error classes, HTTP outcomes and foreign messages in %s bundles',
+		async (mode) => {
+			const { code, client } = await bundleRpcClient(mode);
+			const fetch = vi.spyOn(globalThis, 'fetch');
+			const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
+			Object.defineProperty(globalThis, 'location', {
+				configurable: true,
+				value: { href: 'https://octane.test/' },
+			});
+			const expectDiagnostic = (error: Error, code: number, args: readonly string[] = []) => {
+				if (mode === 'development') {
+					let index = 0;
+					expect(error.message).toBe(
+						ERROR_CATALOG.codes[String(code)].message.replace(/%s/g, () => args[index++]),
+					);
+				} else {
+					const url = decodedErrorUrl(error.message);
+					expect(url.pathname).toBe(`/errors/${code}`);
+					expect(url.searchParams.getAll('args[]')).toEqual(args);
+				}
+			};
+			try {
+				const optionsError = await rejectedError(() =>
+					Reflect.apply(client.__serverRpc, undefined, ['read', [], null]),
+				);
+				expect(optionsError).toBeInstanceOf(TypeError);
+				expectDiagnostic(optionsError, 364);
+				expect(fetch).not.toHaveBeenCalled();
+
+				const limitsError = await rejectedError(() =>
+					client.__serverRpcStream('read', [], {}, { maxFrameBytes: 0 }),
+				);
+				expect(limitsError).toBeInstanceOf(RangeError);
+				expectDiagnostic(limitsError, 380);
+				const budgetError = await rejectedError(() =>
+					client.__serverRpcStream('read', [], {}, { maxFrameBytes: 2, maxTotalBytes: 1 }),
+				);
+				expect(budgetError).toBeInstanceOf(RangeError);
+				expectDiagnostic(budgetError, 381);
+				expect(fetch).not.toHaveBeenCalled();
+
+				const networkError = new Error('transport offline');
+				fetch.mockRejectedValueOnce(networkError);
+				const uncertain = await rejectedError(() => client.__serverRpc('read', []));
+				expect(uncertain).toMatchObject({
+					name: 'ServerCallUncertainError',
+					code: 'OCTANE_RPC_UNCERTAIN',
+					cause: { name: 'Error', cause: networkError },
+				});
+				expectDiagnostic(uncertain, 366);
+
+				fetch.mockResolvedValueOnce(
+					new Response(null, { status: 403, headers: { 'Octane-RPC-Outcome': 'rejected' } }),
+				);
+				const rejected = await rejectedError(() => client.__serverRpcStream('read', []));
+				expect(rejected).toMatchObject({ name: 'Error', status: 403 });
+				expect(rejected).not.toHaveProperty('code');
+				expectDiagnostic(rejected, 367, ['403']);
+
+				fetch.mockResolvedValueOnce(
+					new Response(JSON.stringify({ error: 'authored server detail' }), {
+						status: 400,
+						headers: { 'Octane-RPC-Outcome': 'rejected' },
+					}),
+				);
+				expect(await rejectedError(() => client.__serverRpc('read', []))).toMatchObject({
+					name: 'Error',
+					status: 400,
+					message: 'authored server detail',
+				});
+
+				fetch.mockResolvedValueOnce(
+					new Response('[1,0,"error","authored frame detail"]\n', {
+						headers: { 'content-type': 'application/x-octane-rpc+ndjson' },
+					}),
+				);
+				expect(await rejectedError(() => client.__serverRpcStream('read', []))).toMatchObject({
+					name: 'ServerCallUncertainError',
+					message: 'authored frame detail',
+					cause: { name: 'Error', message: 'authored frame detail' },
+				});
+				if (mode === 'production') {
+					const literals = decodedStringLiterals(code);
+					for (let errorCode = 364; errorCode < 386; errorCode++) {
+						expect(
+							containsDecodedLiteral(literals, ERROR_CATALOG.codes[String(errorCode)].message),
+						).toBe(false);
+					}
+				}
+			} finally {
+				fetch.mockRestore();
+				if (location === undefined) Reflect.deleteProperty(globalThis, 'location');
+				else Object.defineProperty(globalThis, 'location', location);
+			}
+		},
+	);
+
 	it.each(['client', 'server'] as const)(
 		'preserves native compiler and hook diagnostics in %s development and production bundles',
 		async (surface) => {

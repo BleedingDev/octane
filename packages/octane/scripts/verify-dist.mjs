@@ -34,6 +34,7 @@ export const REQUIRED_PUBLIC_VALUE_EXPORTS = {
 		'__createVoidRoot',
 		'__s',
 		'__serverRpc',
+		'__serverRpcStream',
 		'__useReducerWithGetter',
 		'__useStateWithGetter',
 		'__vtSeen',
@@ -214,6 +215,10 @@ export const REQUIRED_PUBLIC_VALUE_EXPORTS = {
 		'bootstrapStreamedSignalHydration',
 		'bootstrapStreamedSignalResults',
 		'installSignalDocumentLifecycle',
+	],
+	'./hydration/document-lifecycle': [
+		'installSignalDocumentLifecycle',
+		'joinSignalDocumentLifecycle',
 	],
 	'./hydration/independent-strategies': ['independentHydrationStrategies'],
 	'./behavior': ['adoptBindings', 'mountBindings', 'attachBehaviorRoot', 'unbound'],
@@ -400,7 +405,7 @@ export const REQUIRED_PUBLIC_VALUE_EXPORTS = {
 		'nativeCreateScopedValue',
 		'nativeCreateScopedElement',
 	],
-	'./static': ['prerender'],
+	'./static': ['prerender', 'prerenderToNodeStream'],
 	'./testing': ['clampJsdomScrollTop'],
 	'./constants': [
 		'ATTRIBUTE_ALIASES',
@@ -802,14 +807,14 @@ export async function verifyDist(pkgDir) {
 		);
 	}
 
-	// Every relative import in every emitted .js module must resolve to a file.
+	// Every relative import in every emitted JavaScript module must resolve to a file.
 	// esbuild in bundle mode is the resolver (a real parser, not a regex, and it
 	// follows dynamic import() literals too): each dist module is its own entry,
 	// bare specifiers stay external (they are declared dependencies, present at
 	// install time), and JSON modules remain external so any future package
 	// metadata imports retain their import-attribute semantics.
 	const jsFiles = readdirSync(dist, { recursive: true })
-		.filter((f) => f.endsWith('.js'))
+		.filter((f) => /\.[cm]?js$/.test(f))
 		.map((f) => join(dist, f));
 	try {
 		await build({

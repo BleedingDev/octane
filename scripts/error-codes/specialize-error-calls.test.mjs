@@ -128,3 +128,17 @@ export function fail() { throw new TypeError(formatClientError(313)); }`;
 	result.process.env.NODE_ENV = 'production';
 	assert.throws(result.exports.fail, { message: formatProdErrorMessage(313, []) });
 });
+
+test('classifies a static Node adapter path for server error specialization', async () => {
+	const source = `import { formatServerError } from '../error-codes.server.generated.js';
+export function fail() { throw new Error(formatServerError(57)); }`;
+	const specialized = specializeErrorCalls(source, 'static/node.ts', catalog);
+	assert.notEqual(specialized, source);
+	const result = await execute(specialized, '../error-message-no-arguments.js');
+	for (const mode of ['development', 'production']) {
+		result.process.env.NODE_ENV = mode;
+		assert.throws(result.exports.fail, {
+			message: mode === 'production' ? formatProdErrorMessage(57, []) : catalog.codes['57'].message,
+		});
+	}
+});

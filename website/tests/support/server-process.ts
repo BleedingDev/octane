@@ -9,6 +9,12 @@ import { createServer, type AddressInfo, type Server } from 'node:net';
 import { readFile, rename, writeFile } from 'node:fs/promises';
 
 const PROCESS_OUTPUT_LIMIT = 64 * 1024;
+const serverOutput = new WeakMap<ChildProcess, string>();
+
+/** A bounded tail remains available when a ready server fails a later request. */
+export function getServerOutput(child: ChildProcess | undefined): string {
+	return child === undefined ? '' : (serverOutput.get(child) ?? '');
+}
 
 function appendProcessOutput(current: string, chunk: unknown): string {
 	const next = current + String(chunk);
@@ -247,8 +253,12 @@ export function spawnServer(
 export function waitForServer(child: ChildProcess, url: string, timeoutMs: number): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	let output = '';
-	child.stdout?.on('data', (chunk) => (output = appendProcessOutput(output, chunk)));
-	child.stderr?.on('data', (chunk) => (output = appendProcessOutput(output, chunk)));
+	const capture = (chunk: unknown) => {
+		output = appendProcessOutput(output, chunk);
+		serverOutput.set(child, output);
+	};
+	child.stdout?.on('data', capture);
+	child.stderr?.on('data', capture);
 
 	return new Promise((resolve, reject) => {
 		let settled = false;

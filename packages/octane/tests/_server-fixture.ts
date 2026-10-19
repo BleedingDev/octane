@@ -7,6 +7,8 @@
  * and the one unavoidable `new Function` boundary.
  */
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import ts from 'typescript';
 import { compile } from 'octane/compiler';
@@ -37,6 +39,10 @@ export interface CompiledFixtureSourceOptions {
 	compileOptions?: Record<string, unknown>;
 	/** Self-contained external modules used by custom-renderer fixtures. */
 	runtimeModules?: Readonly<Record<string, CompiledFixtureModule>>;
+	/** Optional host toolchain target for syntax such as standard decorators. */
+	target?: string;
+	/** Host-provided import.meta fields, including the real bundler HMR callbacks. */
+	importMeta?: Readonly<Record<string, unknown>>;
 }
 
 export interface PlainHookFixtureSourceOptions {
@@ -50,14 +56,51 @@ export interface PlainHookFixtureSourceOptions {
 
 export function loadCompiledFixtureSource<T extends CompiledFixtureModule = CompiledFixtureModule>(
 	source: string,
+	options: CompiledFixtureSourceOptions & { async: true },
+): Promise<T>;
+export function loadCompiledFixtureSource<T extends CompiledFixtureModule = CompiledFixtureModule>(
+	source: string,
 	options: CompiledFixtureSourceOptions,
-): T {
+): T;
+export function loadCompiledFixtureSource<T extends CompiledFixtureModule = CompiledFixtureModule>(
+	source: string,
+	options: CompiledFixtureSourceOptions & { async?: boolean },
+): T | Promise<T> {
 	const { id, mode } = options;
 	const { code } = compile(source, id, {
 		...options.compileOptions,
 		mode,
 	});
-	return evaluateCompiledFixtureCode<T>(code, id, mode, options.runtimeModules);
+	// Run host syntax lowering outside the DOM realm: esbuild expects Node's
+	// TextEncoder and Uint8Array to share a realm. The default loader is unchanged.
+	const executable =
+		options.target === undefined
+			? code
+			: execFileSync(
+					process.execPath,
+					[
+						'--input-type=commonjs',
+						'--eval',
+						`const { transformSync } = require(process.argv[1]);
+const { readFileSync } = require('node:fs');
+process.stdout.write(transformSync(readFileSync(0, 'utf8'), {
+	loader: 'ts', target: process.argv[2], format: 'esm', sourcefile: process.argv[3],
+}).code);`,
+						createRequire(import.meta.url).resolve('esbuild'),
+						options.target,
+						id,
+					],
+					{ input: code, encoding: 'utf8' },
+				);
+
+	return evaluateCompiledFixtureCode<T>(
+		executable,
+		id,
+		mode,
+		options.runtimeModules,
+		options.importMeta,
+		options.async,
+	);
 }
 
 /** Execute the public plain-module transform through the shared module loader. */
@@ -72,7 +115,7 @@ export function loadPlainHookFixtureSource<T extends CompiledFixtureModule = Com
 		dev: options.hmr ?? false,
 		profile: false,
 		inlineHookMemo: options.inlineHookMemo,
-		manualSlots: options.manualSlots,
+		...(options.manualSlots === undefined ? {} : { manualSlots: options.manualSlots }),
 	});
 	// The plain path deliberately leaves TypeScript to its host toolchain.
 	// Strip it here exactly once, then use the same evaluation boundary as the
@@ -93,7 +136,25 @@ export function evaluateCompiledFixtureCode<T extends CompiledFixtureModule>(
 	id: string,
 	mode: 'client' | 'server',
 	runtimeModules: Readonly<Record<string, CompiledFixtureModule>> | undefined,
-): T {
+	importMeta?: Readonly<Record<string, unknown>>,
+	async?: false,
+): T;
+export function evaluateCompiledFixtureCode<T extends CompiledFixtureModule>(
+	code: string,
+	id: string,
+	mode: 'client' | 'server',
+	runtimeModules: Readonly<Record<string, CompiledFixtureModule>> | undefined,
+	importMeta: Readonly<Record<string, unknown>> | undefined,
+	async: boolean | undefined,
+): T | Promise<T>;
+export function evaluateCompiledFixtureCode<T extends CompiledFixtureModule>(
+	code: string,
+	id: string,
+	mode: 'client' | 'server',
+	runtimeModules: Readonly<Record<string, CompiledFixtureModule>> | undefined,
+	importMeta?: Readonly<Record<string, unknown>>,
+	async = false,
+): T | Promise<T> {
 	const runtime = mode === 'server' ? ServerRuntime : ClientRuntime;
 	const internalRuntime = mode === 'server' ? InternalServerRuntime : InternalClientRuntime;
 	// ESM imports initialize before module statements even when emitted at the
@@ -149,6 +210,7 @@ export function evaluateCompiledFixtureCode<T extends CompiledFixtureModule>(
 	// hoist, so end-of-module registration is safe and also observes any later
 	// reassignment of the binding.
 	const functionExports: string[] = [];
+	const variableExports: string[] = [];
 	code = code.replace(
 		/export\s+(async\s+)?function\s+([\w$]+)/g,
 		(_match: string, asyncKeyword: string | undefined, name: string) => {
@@ -158,7 +220,10 @@ export function evaluateCompiledFixtureCode<T extends CompiledFixtureModule>(
 	);
 	code = code.replace(
 		/export\s+(const|let|var)\s+([\w$]+)\s*=/g,
-		(_match: string, kind: string, name: string) => `${kind} ${name} = __exports.${name} =`,
+		(_match: string, kind: string, name: string) => {
+			variableExports.push(name);
+			return `${kind} ${name} =`;
+		},
 	);
 	code = code.replace(/export\s+default\s+/g, '__exports.default = ');
 	// A compiler-selected module may forward its default export to another query.
@@ -197,20 +262,27 @@ export function evaluateCompiledFixtureCode<T extends CompiledFixtureModule>(
 		);
 	}
 
-	for (const name of functionExports) {
+	for (const name of [...functionExports, ...variableExports]) {
 		code += `\n__exports.${name} = ${name};`;
 	}
 	for (const registration of listedExports) code += `\n${registration}`;
 
-	const evaluate = new Function(
+	if (importMeta !== undefined) code = code.replace(/\bimport\.meta\b/g, '__importMeta');
+
+	const FixtureFunction = async
+		? Object.getPrototypeOf(async function () {}).constructor
+		: Function;
+	const evaluate = new FixtureFunction(
 		'__runtime',
 		'__internalRuntime',
 		'__hydrationRuntime',
 		'__runtimeModules',
 		'__exports',
+		'__importMeta',
 		`'use strict';\n${imports.join('\n')}\n${code}\n//# sourceURL=${id}?${mode}-fixture\nreturn __exports;`,
 	);
-	return evaluate(runtime, internalRuntime, HydrationRuntime, runtimeModules, {}) as T;
+	return evaluate(runtime, internalRuntime, HydrationRuntime, runtimeModules, {}, importMeta) as
+		T | Promise<T>;
 }
 
 export function loadServerFixture<T extends CompiledFixtureModule = CompiledFixtureModule>(
@@ -222,7 +294,7 @@ export function loadServerFixture<T extends CompiledFixtureModule = CompiledFixt
 	return loadCompiledFixtureSource<T>(readFileSync(absolute, 'utf8'), {
 		id: options.id ?? defaultId,
 		mode: 'server',
-		compileOptions: options.compileOptions,
-		runtimeModules: options.runtimeModules,
+		...(options.compileOptions === undefined ? {} : { compileOptions: options.compileOptions }),
+		...(options.runtimeModules === undefined ? {} : { runtimeModules: options.runtimeModules }),
 	});
 }

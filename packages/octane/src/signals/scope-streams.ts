@@ -24,6 +24,13 @@ import {
  * channel after the owner is marked retired.
  */
 export class ScopeStreams {
+	/** A replaced declaration releases only its previous receiver channel. */
+	retireSelection(nodeKey: string): void {
+		this.selections.delete(nodeKey);
+		this.results.delete(nodeKey);
+		this.failures.delete(nodeKey);
+		this.waiting.delete(nodeKey);
+	}
 	readonly selections = new Map<string, StreamFrameIdentity>();
 	readonly results = new Map<string, StreamedSignalResultFrame[]>();
 	private readonly failures = new Map<string, { identity: StreamFrameIdentity; error: Error }>();

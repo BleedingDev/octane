@@ -39,6 +39,64 @@ async function configuredOctane(
 }
 
 describe('production client assets', () => {
+	it.each([undefined, '/src/user-entry.js', '\0user-entry', '\0rolldown/user.js'])(
+		'keeps unrelated modules out of hydration chunks (%s)',
+		async (unrelated) => {
+			const root = await mkdtemp(join(tmpdir(), 'octane-vite-hydration-chunks-'));
+			try {
+				await writeFile(join(root, 'index.html'), '<div id="root"></div>');
+				await writeFile(
+					join(root, 'octane.config.ts'),
+					`import { RenderRoute } from ${JSON.stringify(join(PKG_ROOT, 'src/index.js'))};
+export default { router: { routes: [new RenderRoute({ path: '/', entry: '/Page.tsrx' })] } };`,
+				);
+				const [, meta] = await configuredOctane({ hmr: false }, root, 'build');
+				const entry = '\0virtual:octane-hydrate';
+				const dependency = '/src/hydration-runtime.js';
+				const bundle = {
+					'hydrate.js': {
+						type: 'chunk',
+						fileName: 'hydrate.js',
+						facadeModuleId: entry,
+						moduleIds: [entry],
+						modules: { [entry]: { renderedLength: 10 } },
+						imports: ['shared.js'],
+					},
+					'shared.js': {
+						type: 'chunk',
+						fileName: 'shared.js',
+						moduleIds: [dependency, '\0rolldown/runtime.js', ...(unrelated ? [unrelated] : [])],
+						modules: {
+							[dependency]: { renderedLength: 10 },
+							'\0rolldown/runtime.js': { renderedLength: 10 },
+							...(unrelated ? { [unrelated]: { renderedLength: 10 } } : {}),
+						},
+						imports: [],
+					},
+				};
+				const generate = meta.generateBundle as (
+					this: unknown,
+					options: unknown,
+					bundle: unknown,
+				) => Promise<void>;
+				const result = generate.call(
+					{
+						getModuleInfo: (id: string) => ({ importedIds: id === entry ? [dependency] : [] }),
+						error: (message: string) => {
+							throw new Error(message);
+						},
+					},
+					{},
+					bundle,
+				);
+				if (unrelated) await expect(result).rejects.toThrow(`unrelated module early: ${unrelated}`);
+				else await expect(result).resolves.toBeUndefined();
+			} finally {
+				await rm(root, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it('links CSS from deferred hydration branches without promoting their JavaScript', () => {
 		const assets = createClientAssetMap(
 			{

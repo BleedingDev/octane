@@ -3540,6 +3540,201 @@
       "message": "CompiledOutlet requires a compiled component function with no returned renderable.",
       "runtime": ["client", "server"],
       "status": "active"
+    },
+    "347": {
+      "message": "Invalid native external snapshot payload or runtime ABI.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "348": {
+      "message": "External snapshot contexts require unique registered codecs and every required ancestor provider.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "349": {
+      "message": "External snapshot authority does not match its publisher, document, boundary, or request.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "350": {
+      "message": "External snapshot rendering requires a genuine, open request prepared for one render.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "351": {
+      "message": "External snapshot context cleanup exceeded its deadline.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "352": {
+      "message": "External snapshot load exceeded its boundary deadline.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "353": {
+      "message": "External snapshot request or cleanup produced multiple failures.",
+      "runtime": ["server"],
+      "status": "active"
+    },
+    "354": {
+      "message": "External snapshots require a trusted document ID configured on the host renderer.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "355": {
+      "message": "An external snapshot boundary cannot change publisher authority during its mounted lifetime.",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "356": {
+      "message": "External snapshot boundary options must specify a native component, a snapshot transport, a finite positive timeout, and unique valid context keys.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "357": {
+      "message": "External snapshot and streamed signal document identities must match.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "358": {
+      "message": "External snapshot timeout must be finite and between 0 and 2147483647 milliseconds. Boundary timeouts must be greater than 0.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "359": {
+      "message": "A historical signal owner cannot change its module generation.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "360": {
+      "message": "The hot declaration no longer belongs to its native owner.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "361": {
+      "message": "The signal module generation is stale or already being installed.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "362": {
+      "message": "The hot declaration changed its native cell identity.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "363": {
+      "message": "The hot signal generation has no current native publisher admission.",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "364": {
+      "message": "Server function options accept only a genuine AbortSignal",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "365": {
+      "message": "Server function timed out",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "366": {
+      "message": "An error occurred while trying to call the Octane server function.",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "367": {
+      "message": "Server function call failed with status %s",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "368": {
+      "message": "The server does not support the requested result protocol",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "369": {
+      "message": "The server function endpoint returned an empty response. Is the Octane server running?",
+      "runtime": ["client"],
+      "status": "active"
+    },
+    "370": {
+      "message": "Server function returned an empty response",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "371": {
+      "message": "Server function canceled",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "372": {
+      "message": "Invalid one-shot server result",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "373": {
+      "message": "Invalid server result opening frame",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "374": {
+      "message": "A server result stream supports one consumer",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "375": {
+      "message": "Invalid server result continuation",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "376": {
+      "message": "Invalid server argument protocol",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "377": {
+      "message": "Invalid server arguments",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "378": {
+      "message": "Server function outcome is uncertain",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "379": {
+      "message": "A server-call batch requires independent reads and authority/document keys",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "380": {
+      "message": "Server result limits must be positive safe integers",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "381": {
+      "message": "A server result frame cannot exceed the total response budget",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "382": {
+      "message": "Invalid or out-of-order server result frame",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "383": {
+      "message": "Invalid server result frame",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "384": {
+      "message": "Server result ended without a terminal frame",
+      "runtime": ["client", "server"],
+      "status": "active"
+    },
+    "385": {
+      "message": "Server result exceeded its response budget",
+      "runtime": ["client", "server"],
+      "status": "active"
     }
   },
   "strongDiagnostics": {

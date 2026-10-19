@@ -225,9 +225,13 @@ export default function octaneLoader(source, inputSourceMap) {
 					resourceQuery: id.slice(cleanModuleId(id).length),
 					transformKind: result.kind,
 					...(result.streamedSignals === true ? { streamedSignals: true } : null),
+					...(result.hotSignalModule === undefined
+						? null
+						: { hotSignalModule: result.hotSignalModule }),
 					serverRpc:
 						result.kind === 'compile' &&
 						(result.code.includes('_$__serverRpc(') ||
+							result.code.includes('_$__serverRpcStream(') ||
 							result.code.includes('export const _$_server_$_')),
 					...(Array.isArray(result.independentWidgets) && result.independentWidgets.length > 0
 						? { independentWidgets: result.independentWidgets }

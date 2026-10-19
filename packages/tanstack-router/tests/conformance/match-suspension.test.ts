@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { mount, nextPaint } from '../_helpers';
+import { installServerHydration } from '../_server-hydration';
 import { RouterProvider } from '@octanejs/tanstack-router';
 import { RouterClient } from '@octanejs/tanstack-router/ssr/client';
 import type { AnyRouter } from '@tanstack/router-core';
@@ -44,24 +45,11 @@ afterEach(() => {
 describe('@octanejs/tanstack-router — match suspension across match states', () => {
 	it('keeps a hydrated ssr:false match pending until its client loader resolves', async () => {
 		const client = createDeferred<string>();
+		await installServerHydration(makeMatchSuspensionRouter('/client'));
 		const router = makeMatchSuspensionRouter('/client', { client });
 		failOnRenderLoop(router);
 
-		// The dehydrated payload router-core's hydrate() reads: the root rendered
-		// on the server and the ssr:false child is still pending. hydrate() force-
-		// pends the child for pendingMinMs, then runs its loader on the client.
-		const [rootMatch, clientMatch] = router.matchRoutes(router.stores.location.get());
-		(window as any).$_TSR = {
-			router: {
-				manifest: undefined,
-				lastMatchId: clientMatch.id,
-				matches: [
-					{ i: rootMatch.id, u: Date.now(), s: 'success', ssr: true },
-					{ i: clientMatch.id, u: Date.now(), s: 'pending', ssr: false },
-				],
-			},
-			buffer: [],
-		};
+		const [, clientMatch] = router.matchRoutes(router.stores.location.get());
 
 		const r = mount(RouterClient as any, { router });
 		await flush();
@@ -90,21 +78,9 @@ describe('@octanejs/tanstack-router — match suspension across match states', (
 	// re-load, so the acknowledgement is settled from the hydration layout effect.
 	// Per react-router's Transitioner hydration branch.
 	it('emits onRendered after hydrating an already-resolved SSR location', async () => {
+		await installServerHydration(makeMatchSuspensionRouter('/'));
 		const router = makeMatchSuspensionRouter('/');
 		failOnRenderLoop(router);
-
-		const [rootMatch, homeMatch] = router.matchRoutes(router.stores.location.get());
-		(window as any).$_TSR = {
-			router: {
-				manifest: undefined,
-				lastMatchId: homeMatch.id,
-				matches: [
-					{ i: rootMatch.id, u: Date.now(), s: 'success', ssr: true },
-					{ i: homeMatch.id, u: Date.now(), s: 'success', ssr: true },
-				],
-			},
-			buffer: [],
-		};
 
 		const rendered: Array<unknown> = [];
 		const unsub = router.subscribe('onRendered', (event: unknown) => rendered.push(event));

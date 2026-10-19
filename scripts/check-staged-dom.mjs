@@ -40,7 +40,16 @@ const NATIVE_OPERATIONS = new Map(
 		getNextSibling: ['read:nextSibling'],
 		// Route preparation first. The committed read goes through the prototype
 		// because a form's named control can shadow its getAttribute method.
-		'HydrationCapability.allowAttribute': ['read:getAttribute'],
+		'HydrationCapability.allowAttribute': ['read:getAttribute', 'read:getAttributeNS'],
+		// Rollback records use the same staged receiver when present. Only the
+		// committed branch borrows prototype methods to avoid named form controls.
+		'HydrationCapability.saveAttribute': [
+			'read:getAttribute',
+			'read:removeAttributeNS',
+			'read:removeAttribute',
+			'read:setAttributeNS',
+			'read:setAttribute',
+		],
 		'HydrationCapability.settleValues': ['read:getAttribute'],
 		// Transition handles inspect the current animation tree and committed resources.
 		vtScopeName: ['read:style', 'read:activeViewTransition'],
@@ -68,6 +77,9 @@ const NATIVE_OPERATIONS = new Map(
 		// container ownership before hydration, match the existing SSR marker, and
 		// retire detached anchors only after a root replacement has been accepted.
 		hydrateRootWithOutputHandler: ['call:contains'],
+		// An admitted incompatible publisher retires its committed body before
+		// rebuilding its native activation anchors; this is HMR publication work.
+		remountPublisherHydration: ['call:createComment', 'call:append'],
 		beginPresentationHydration: ['read:nextSibling'],
 		// A moved host's lease compares the hydration cursor's native parent
 		// against the server site it recorded before any preparation.

@@ -4,7 +4,7 @@
 // that instead of lowering to TDZ `const` bindings.
 export const Registry = { component: Card, fallback: Empty };
 
-function Card(props) @{
+function Card(props: { title: string }) @{
 	<section class="card">
 		<h2>{props.title}</h2>
 		<Empty />

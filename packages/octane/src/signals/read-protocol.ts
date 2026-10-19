@@ -218,7 +218,18 @@ let nativeAdoptionResolver: NativeAdoptionResolver | null = null;
 // here: the signal engine must not make renderer seed decoding reachable.
 export let nativeSignalHydration = false;
 let signalDeclarationsEnabled = false;
-let earlySignalHydrationStarter: (() => void) | null = null;
+/** The hydration bridge needs only its host window; shared signals also run without DOM types. */
+export interface EarlySignalHydrationDocument {
+	readonly defaultView: object | null;
+}
+
+let earlySignalHydrationStarter: ((ownerDocument: EarlySignalHydrationDocument) => void) | null =
+	null;
+let earlySignalHydrationDocuments: Set<WeakRef<EarlySignalHydrationDocument>> | null = null;
+let earlySignalHydrationSeen: WeakSet<EarlySignalHydrationDocument> | null = null;
+let earlySignalHydrationFinalizer: FinalizationRegistry<
+	WeakRef<EarlySignalHydrationDocument>
+> | null = null;
 
 export function registerNativeSignalHydration(): void {
 	nativeSignalHydration = true;
@@ -227,14 +238,60 @@ export function registerNativeSignalHydration(): void {
 /** Only declarations can consume pre-module edits when their cells are created. */
 export function registerEarlySignalHydration(): void {
 	signalDeclarationsEnabled = true;
-	// A subsequently loaded declaration module claims already queued native edits.
-	if (earlySignalHydrationStarter) earlySignalHydrationStarter();
+	const documents = earlySignalHydrationDocuments;
+	const start = earlySignalHydrationStarter;
+	// Clear before callbacks: declaration activation can reenter this bridge.
+	earlySignalHydrationDocuments = null;
+	earlySignalHydrationSeen = null;
+	earlySignalHydrationStarter = null;
+	if (documents === null) return;
+	let failed = false;
+	let firstFailure: unknown;
+	for (const reference of documents) {
+		earlySignalHydrationFinalizer?.unregister(reference);
+		const ownerDocument = reference.deref();
+		if (ownerDocument === undefined) continue;
+		try {
+			start!(ownerDocument);
+		} catch (error) {
+			if (!failed) {
+				failed = true;
+				firstFailure = error;
+			}
+		}
+	}
+	if (failed) throw firstFailure;
 }
 
-/** Only a hydration entry can supply the control-capture bridge. */
-export function startEarlySignalHydration(start: () => void): void {
+/** Only a hydration entry supplies the shared, capture-free control bridge. */
+export function startEarlySignalHydration(
+	ownerDocument: EarlySignalHydrationDocument,
+	start: (ownerDocument: EarlySignalHydrationDocument) => void,
+): void {
+	if (signalDeclarationsEnabled) {
+		start(ownerDocument);
+		return;
+	}
+	const view = ownerDocument.defaultView;
+	const mailbox =
+		view !== null && '__octaneEarlySignalControls' in view
+			? view.__octaneEarlySignalControls
+			: undefined;
+	if (
+		mailbox === null ||
+		typeof mailbox !== 'object' ||
+		!('q' in mailbox) ||
+		!Array.isArray(mailbox.q) ||
+		earlySignalHydrationSeen?.has(ownerDocument)
+	)
+		return;
+	(earlySignalHydrationSeen ??= new WeakSet()).add(ownerDocument);
 	earlySignalHydrationStarter = start;
-	if (signalDeclarationsEnabled) start();
+	const reference = new WeakRef(ownerDocument);
+	(earlySignalHydrationDocuments ??= new Set()).add(reference);
+	(earlySignalHydrationFinalizer ??= new FinalizationRegistry((expired) => {
+		earlySignalHydrationDocuments?.delete(expired);
+	})).register(ownerDocument, reference, reference);
 }
 
 /**

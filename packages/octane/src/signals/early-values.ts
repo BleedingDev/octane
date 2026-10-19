@@ -1,4 +1,5 @@
 import { SIGNAL_CONTROL_ATTR } from '../hydration-markers.js';
+import type { EarlySignalHydrationDocument } from './read-protocol.js';
 import type { SignalBindingIdentity, SignalOwner, SignalRendererOwnerIdentity } from './types.js';
 
 type ControlChannel = 'value' | 'checked';
@@ -48,9 +49,13 @@ export function associateSignalOwnerDocument(owner: SignalOwner, ownerDocument: 
  * @internal An engine-free owner joins its streamed document: associate it and
  * claim the edits the inline writer queued, before any of its cells exists.
  */
-export function registerSignalOwnerDocument(owner: SignalOwner, ownerDocument: Document): void {
+export function registerSignalOwnerDocument(
+	owner: SignalOwner,
+	ownerDocument: Document,
+	target?: Record<string, unknown>,
+): void {
 	associateSignalOwnerDocument(owner, ownerDocument);
-	installEarlyControlBridge();
+	installEarlyControlBridge(ownerDocument, target);
 }
 
 function documentForOwner(owner: SignalOwner): Document | undefined {
@@ -164,7 +169,7 @@ export function hasHydrationControlSignalWriter(
 
 /** @internal Carry edit authority across module handoff, even after editing back to SSR. */
 export function readEarlyHydrationControlRevision(control: Element): number {
-	installEarlyControlBridge();
+	installEarlyControlBridge(control.ownerDocument);
 	return EARLY_CONTROL_REVISIONS.get(control) ?? 0;
 }
 
@@ -176,7 +181,7 @@ export function clearEarlyHydrationControlRevision(control: Element): void {
 /** @internal Module capture replaces the inline writer for this document. */
 export function claimEarlyHydrationControlCapture(ownerDocument: Document): void {
 	// Publish what the inline writer queued before the module capture takes over.
-	installEarlyControlBridge();
+	installEarlyControlBridge(ownerDocument);
 	CLAIMED_CONTROL_DOCUMENTS.add(ownerDocument);
 }
 
@@ -199,9 +204,15 @@ function publishEarlyHydrationControlSignalValues(control: Element, revision: nu
  * none of this bridge, even when it declares signals.
  * Idempotent: a repeat installs the same writer and finds the queue empty.
  */
-export function installEarlyControlBridge(): void {
-	if (typeof globalThis === 'undefined') return;
-	const host = globalThis as typeof globalThis & {
+export function installEarlyControlBridge(
+	ownerDocument: EarlySignalHydrationDocument,
+	target: Record<string, unknown> | null = ownerDocument.defaultView as unknown as Record<
+		string,
+		unknown
+	> | null,
+): void {
+	if (target === null) return;
+	const host = target as {
 		__octaneEarlySignalControls?: EarlyControlMailbox;
 		__octanePublishSignalControl?: (control: Element, revision: number) => void;
 	};

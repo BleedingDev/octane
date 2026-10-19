@@ -8,6 +8,10 @@ in a `QueryClientProvider`. Delegates to the framework-agnostic
 ## Installation
 
 ```sh
-npm install @octanejs/tanstack-router-ssr-query @octanejs/tanstack-query @octanejs/tanstack-router
-pnpm add @octanejs/tanstack-router-ssr-query @octanejs/tanstack-query @octanejs/tanstack-router
+npm install @octanejs/tanstack-router-ssr-query @octanejs/tanstack-query @octanejs/tanstack-router @tanstack/router-core@1.171.38
+pnpm add @octanejs/tanstack-router-ssr-query @octanejs/tanstack-query @octanejs/tanstack-router @tanstack/router-core@1.171.38
 ```
+
+The application owns the shared `@tanstack/router-core` dependency at version
+`1.171.38`. When using a verified core archive, select it for that application
+dependency so the router bindings and Start resolve the same core instance.

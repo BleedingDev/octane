@@ -1,3 +1,12 @@
+export {
+	registerExternalSnapshotContext,
+	decodeExternalSnapshot,
+	serializeExternalSnapshotRequest,
+	type ExternalSnapshotContextCodec,
+	type ExternalSnapshotRequest,
+	type ExternalSnapshot,
+	type ExternalSnapshotBoundaryOptions,
+} from './external-snapshot-protocol.js';
 export { trustHTML, type TrustedHTML } from './trusted-html.js';
 export { createResizeObserver } from './resize-observer.js';
 // Keep package metadata behind an isolated re-export: applications that do not
@@ -36,6 +45,10 @@ export {
 //  3. TEST-ONLY — used by this repo's test infrastructure. Not API at all.
 export {
 	// ── 1. Public API (React parity) ──────────────────────────────────────────
+	externalSnapshotBoundary,
+	publisherBoundary,
+	preparePublisherBoundaryReplacement,
+	type PublisherBoundaryReplacement,
 	createRoot,
 	hydrateRoot,
 	flushSync,
@@ -327,7 +340,7 @@ export type {
 } from './hydration/types.js';
 
 // Semi-public compiler target for `module server` browser stubs.
-export { __serverRpc } from './server-rpc-client.js';
+export { __serverRpc, __serverRpcStream } from './server-rpc-client.js';
 export { ServerCallUncertainError } from './server-rpc-protocol.js';
 export { batchServerCalls, type ServerCallBatchOptions } from './server-rpc-batch-client.js';
 

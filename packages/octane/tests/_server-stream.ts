@@ -17,6 +17,24 @@ export interface Deferred<T> {
 	reject(reason?: unknown): void;
 }
 
+/** Separate responses need separate document authority, including their early mailboxes. */
+export function createStreamedDocument(): {
+	container: HTMLDivElement;
+	document: Document;
+	dispose(): void;
+} {
+	const iframe = document.createElement('iframe');
+	document.body.append(iframe);
+	const ownerDocument = iframe.contentDocument;
+	if (ownerDocument === null) {
+		iframe.remove();
+		throw new Error('Streamed response fixture requires an iframe document');
+	}
+	const container = ownerDocument.createElement('div');
+	ownerDocument.body.append(container);
+	return { container, document: ownerDocument, dispose: () => iframe.remove() };
+}
+
 export function deferred<T>(): Deferred<T> {
 	let resolve!: (value: T | PromiseLike<T>) => void;
 	let reject!: (reason?: unknown) => void;
@@ -144,6 +162,8 @@ export async function collectReadableStream(
 export interface ActivateStreamedMarkupOptions {
 	/** Remove executed inline scripts, matching the established hydration fixtures. */
 	removeScripts?: boolean;
+	/** Explicit transport global for a viewless document's emitted bootstrap. */
+	target?: Record<string, unknown>;
 }
 
 /**
@@ -152,18 +172,39 @@ export interface ActivateStreamedMarkupOptions {
  * `innerHTML` in jsdom are inert, so streaming-to-hydration tests opt in here.
  */
 export function activateStreamedMarkup(
-	container: ParentNode,
+	container: ParentNode & Node,
 	options: ActivateStreamedMarkupOptions = {},
 ): void {
+	const ownerDocument =
+		container.nodeType === 9 ? (container as Document) : container.ownerDocument!;
+	const target = options.target ?? ownerDocument.defaultView;
 	const removeScripts = options.removeScripts ?? true;
 	for (const script of Array.from(container.querySelectorAll('script'))) {
 		const type = script.getAttribute('type');
 		if (type === 'application/json' || script.hasAttribute('src')) continue;
 		const code = script.textContent ?? '';
 		if (code !== '') {
-			// Indirect eval runs in the jsdom window global, like an inline script.
-			// eslint-disable-next-line no-eval
-			(0, eval)(code);
+			if (ownerDocument === document && options.target === undefined) {
+				// Preserve the ambient jsdom execution path used by existing hydration cases.
+				// eslint-disable-next-line no-eval
+				(0, eval)(code);
+			} else {
+				if (target === null) throw new TypeError('Streamed markup requires its document global');
+				// jsdom iframe eval otherwise resolves document against the ambient test realm.
+				// Reveal instructions use bare global calls. Bind those callbacks to the
+				// owning window as well as the explicit bootstrap/mailbox globals.
+				const reveals = ['$OCTRC', '$OCTRX', '$OCTRH'] as const;
+				new Function('globalThis', 'window', 'document', ...reveals, code).call(
+					target,
+					target,
+					target,
+					ownerDocument,
+					...reveals.map((name) => {
+						const callback: unknown = Reflect.get(target, name);
+						return typeof callback === 'function' ? callback.bind(target) : callback;
+					}),
+				);
+			}
 		}
 		if (removeScripts) script.remove();
 	}

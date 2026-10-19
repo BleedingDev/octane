@@ -7,6 +7,46 @@ let defaultOwner: (() => SignalOwner | null) | undefined;
 let retireOwner: ((owner: SignalOwner) => void) | undefined;
 let supersedeOwner: ((owner: SignalOwner) => boolean) | undefined;
 
+/** @internal Shared with the optional facade so cold retirement stays permanent. */
+export const retiredSignalOwnerIdentities = /* @__PURE__ */ new WeakSet<object>();
+
+/** @internal A document lifetime cannot own a single renderer instance. */
+export function assertSignalDocumentOwner(owner: SignalOwner): void {
+	if (
+		'documentOwner' in owner &&
+		'instanceOwner' in owner &&
+		typeof owner.instanceKey === 'string'
+	) {
+		throw new TypeError(formatClientError(157));
+	}
+}
+
+/** @internal Optional engine lifetime, installed only when signals first load. */
+export interface SignalOwnerLifecycle {
+	readonly retired: boolean;
+	freeze(): void;
+	resume(): void;
+	retire(): void;
+}
+type SignalOwnerLifecycleFactory = (owner: SignalOwner) => SignalOwnerLifecycle;
+let lifecycleFactory: SignalOwnerLifecycleFactory | undefined;
+let lifecycleSubscribers: Set<(factory: SignalOwnerLifecycleFactory) => void> | undefined;
+
+/** @internal Keep identity-only document lifetimes independent of the engine. */
+export function observeSignalOwnerLifecycle(
+	ready: (factory: SignalOwnerLifecycleFactory) => void,
+): () => void {
+	if (lifecycleFactory !== undefined) {
+		ready(lifecycleFactory);
+		return () => {};
+	}
+	const subscribers = (lifecycleSubscribers ??= new Set());
+	subscribers.add(ready);
+	return () => {
+		subscribers.delete(ready);
+	};
+}
+
 /** @internal Live capability guards; reading them never installs a default owner. */
 export {
 	installedEnvironment as activeSignalOwnerEnvironment,
@@ -102,14 +142,37 @@ export { supersedeOwner as supersedeSignalOwner };
 export function installSignalOwnerRetirement(
 	retire: (owner: SignalOwner) => void,
 	supersede?: (owner: SignalOwner) => boolean,
+	createLifecycle?: SignalOwnerLifecycleFactory,
 ): () => void {
 	const previous = retireOwner;
 	const previousSupersede = supersedeOwner;
+	const previousLifecycleFactory = lifecycleFactory;
 	retireOwner = retire;
 	supersedeOwner = supersede;
+	if (createLifecycle !== undefined) {
+		lifecycleFactory = createLifecycle;
+		const subscribers = lifecycleSubscribers;
+		lifecycleSubscribers = undefined;
+		let failure: { error: unknown } | undefined;
+		for (const ready of subscribers ?? []) {
+			try {
+				ready(createLifecycle);
+			} catch (error) {
+				failure ??= { error };
+			}
+		}
+		if (failure !== undefined) {
+			const error = failure.error;
+			// A document callback must not poison the shared signal module import.
+			queueMicrotask(() => {
+				throw error;
+			});
+		}
+	}
 	return () => {
 		if (retireOwner !== retire) return;
 		retireOwner = previous;
 		supersedeOwner = previousSupersede;
+		lifecycleFactory = previousLifecycleFactory;
 	};
 }

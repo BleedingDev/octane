@@ -274,6 +274,7 @@ describe('@octanejs/rspeedy-plugin', () => {
 			modifyBundlerChain() {},
 		} as never);
 		const userConfig = {
+			source: { include: ['/vendor/runtime'] },
 			output: { distPath: { root: 'dist/native' }, injectStyles: true },
 			splitChunks: { chunks: 'all', minSize: 4096 },
 			tools: {
@@ -290,6 +291,7 @@ describe('@octanejs/rspeedy-plugin', () => {
 		);
 
 		expect(config).toMatchObject({
+			source: { include: ['/vendor/runtime', expect.any(RegExp)] },
 			output: { distPath: { root: 'dist/native' }, injectStyles: false },
 			splitChunks: { chunks: 'all', minSize: 4096 },
 			tools: {
@@ -299,6 +301,12 @@ describe('@octanejs/rspeedy-plugin', () => {
 				},
 			},
 		});
+		const runtimeInclude = (config.source as { include: RegExp[] }).include[1];
+		expect(runtimeInclude.test('/consumer/node_modules/octane/dist/signals/store.js')).toBe(true);
+		expect(runtimeInclude.test('C:\\consumer\\node_modules\\octane\\dist\\signals\\store.js')).toBe(
+			true,
+		);
+		expect(runtimeInclude.test('/consumer/node_modules/unrelated/dist/index.js')).toBe(false);
 	});
 
 	it('installs one background compiler graph and preserves entry metadata', () => {

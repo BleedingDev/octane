@@ -19,6 +19,35 @@
 // a browser app that has no `@types/node`.
 declare const process: { env: { NODE_ENV?: string } };
 
+import {
+	EXTERNAL_SNAPSHOT_ATTR,
+	EXTERNAL_SNAPSHOT_MAX_TIMEOUT_MS,
+	decodeExternalSnapshotRequest,
+	externalSnapshotOwnerKey,
+	validateExternalSnapshotAuthority,
+	type ExternalSnapshotBoundaryOptions,
+	type ExternalSnapshotAuthority,
+} from './external-snapshot-protocol.js';
+import type { bootstrapStreamedSignalHydration } from './hydration/streamed-signals.js';
+import { getNativeHotOwnerDriver } from './native-hot-owner.js';
+import type { HotSignalOwnerProof } from './signals/hot-declarations.js';
+import {
+	getNativeStreamedAuthority,
+	nativeStreamedSignalBootstrap,
+	type NativeStreamedAuthority,
+} from './hydration/native-streamed-authority.js';
+import {
+	PUBLISHER_BOUNDARY_ATTR,
+	createPublisherBoundaryDescriptor,
+	decodePublisherBoundaryDescriptor,
+	type PublisherBoundaryDescriptor,
+} from './publisher-boundary-protocol.js';
+
+import {
+	joinSignalDocumentLifecycle,
+	type SignalDocumentLifecycleParticipant,
+} from './signals/document-owner.js';
+
 import { hydrating, hydrationStarted, setHydrating, startHydration } from './hydration-flag.js';
 import { resolveHookPath } from './hook-slot-cache.js';
 import type {
@@ -250,7 +279,11 @@ import {
 	isRendererStreamToken,
 	rendererRangeClose,
 } from './stream-protocol.js';
-import { isRendererContext, registerClientRendererBridge } from './renderer-bridge.js';
+import {
+	hasRendererContexts,
+	isRendererContext,
+	registerClientRendererBridge,
+} from './renderer-bridge.js';
 import { defineRemovedContextMembers, registerContext } from './context-identity.js';
 import {
 	createNativeReadDriver,
@@ -341,6 +374,7 @@ import {
 	SIGNAL_HANDLE,
 	type SignalHandle,
 	type SignalOwner,
+	type SignalOwnerIdentity,
 	type ScopeSeed,
 	type SignalRendererOwnerIdentity,
 	type WritableSignal,
@@ -674,7 +708,9 @@ function registerHookCleanup(scope: Scope, cleanup: Cleanup): void {
 	if (process.env.NODE_ENV !== 'production') {
 		// A lightweight child uses a host proxy without a component body. Its
 		// cleanup belongs to that child; refreshing the parent disposes it.
-		if ((scope.block.body as any)?.[HMR] !== undefined) {
+		let body = scope.block.body;
+		while (body && (body as any)[MEMO_OWNER] === body) body = (body as any).type;
+		if ((body as any)?.[HMR] !== undefined) {
 			(cleanup as Cleanup & { [HMR]?: true })[HMR] = true;
 		}
 	}
@@ -961,20 +997,74 @@ function retainSignalRetryScope(
 		for (const child of scope.children) retainSignalRetryScope(child.scope, root, holder);
 }
 
+// A restart may still lose to a later root sibling. Its old owners remain
+// restorable until that root accepts the replacement attempt.
+function canRestoreRestartedSignalScope(scope: Scope | null): boolean {
+	const transaction = ROOT_RENDER_TRANSACTION;
+	return (
+		scope !== null &&
+		transaction !== null &&
+		!transaction.aborted &&
+		isRecordingTransitionJournal() &&
+		scope.block.idState.renderOwner === transaction.owner &&
+		!isCreatedInRootRender(transaction, scope.block)
+	);
+}
+
+function retireRestartedSignalOwner(owner: SignalRendererOwnerIdentity, reversible: boolean): void {
+	if (reversible) {
+		let cancelled = false;
+		journalUndo(() => {
+			cancelled = true;
+		});
+		const retire = () => {
+			if (cancelled) return;
+			cancelled = true;
+			retireRendererSignalOwner(owner);
+		};
+		const transaction = ROOT_RENDER_TRANSACTION!;
+		(transaction.commit ??= []).push(retire);
+		// An earlier deletion may synchronously replace or unmount this root.
+		// Its capture still ends even when that stops the remaining commits.
+		(transaction.capture.renderCleanups ??= []).push(retire);
+	} else retireRendererSignalOwner(owner);
+}
+
+// A restored live scope reclaims this identity from the discarded root attempt.
+// Drop both indexes: leaving a path behind could let a later retry steal it.
+function forgetSignalRetryOwner(node: SignalRetryNode, owner: SignalRendererOwnerIdentity): void {
+	if (node.owner === owner) node.owner = undefined;
+	if (node.children !== undefined)
+		for (const child of node.children.values()) forgetSignalRetryOwner(child, owner);
+}
+
 // Move a restarted primary's owners to its boundary's retry cache, where the
 // replacement claims them by path. A root render defers this tree's teardown to
 // its commit, after that claim, so leave each scope ownerless; it still records
 // retirement when deleted. A nested boundary's primary claims only from its own
 // cache, so its owners stay with it and retire with this tree.
 function handOverSignalRetryScope(scope: Scope, root: Scope, state: TrySlot): void {
+	// An HMR retry carries the original component lifetime into the replacement
+	// primary. Its signal owner must not enter the fresh-attempt retry cache.
+	if (process.env.NODE_ENV !== 'production' && HMR_RETAINED_BLOCKS?.has(scope.block)) return;
 	const owner = scope.signalOwner;
 	const path = owner ? signalRetryPath(scope, root) : null;
 	if (path !== null) {
 		const cache = (state.retrySignalOwners ??= { paths: {}, owners: new Set() });
 		const node = signalRetryNode(cache, path, true)!;
-		if (node.owner !== undefined && node.owner !== owner) {
-			cache.owners.delete(node.owner);
-			retireRendererSignalOwner(node.owner);
+		const previous = node.owner;
+		const previouslyCached = cache.owners.has(owner as SignalRendererOwnerIdentity);
+		const reversible = canRestoreRestartedSignalScope(root);
+		if (reversible)
+			journalUndo(() => {
+				scope.signalOwner = owner;
+				node.owner = previous;
+				if (!previouslyCached) cache.owners.delete(owner as SignalRendererOwnerIdentity);
+				if (previous !== undefined) cache.owners.add(previous);
+			});
+		if (previous !== undefined && previous !== owner) {
+			cache.owners.delete(previous);
+			retireRestartedSignalOwner(previous, reversible);
 		}
 		node.owner = owner as SignalRendererOwnerIdentity;
 		cache.owners.add(node.owner);
@@ -1001,12 +1091,13 @@ function clearSignalRetryOwners(holder: {
 // a redeclared query re-selects from the new inputs and shares the in-flight
 // request when its selection is unchanged. Retire only owners whose cells
 // cannot follow those inputs.
-function supersedeSignalRetryOwners(holder: { retrySignalOwners?: SignalRetryOwners }): void {
+function supersedeSignalRetryOwners(holder: TrySlot, primary = holder.tryBlock): void {
 	const cache = holder.retrySignalOwners;
 	if (cache === undefined) return;
+	const reversible = canRestoreRestartedSignalScope(primary);
 	const retired: SignalRendererOwnerIdentity[] = [];
-	collectRetiredSignalRetryOwners(cache.paths, cache, retired, supersedeSignalOwner);
-	for (const owner of retired) retireRendererSignalOwner(owner);
+	collectRetiredSignalRetryOwners(cache.paths, cache, retired, supersedeSignalOwner, reversible);
+	for (const owner of retired) retireRestartedSignalOwner(owner, reversible);
 }
 
 function discardSignalRetryItem(block: Block, error: unknown): void {
@@ -1058,15 +1149,22 @@ function collectRetiredSignalRetryOwners(
 	cache: SignalRetryOwners,
 	retired: SignalRendererOwnerIdentity[],
 	keep?: (owner: SignalRendererOwnerIdentity) => boolean,
+	reversible = false,
 ): void {
-	if (node.owner !== undefined && !keep?.(node.owner)) {
-		cache.owners.delete(node.owner);
-		retired.push(node.owner);
+	const owner = node.owner;
+	if (owner !== undefined && !keep?.(owner)) {
+		if (reversible)
+			journalUndo(() => {
+				node.owner = owner;
+				cache.owners.add(owner);
+			});
+		cache.owners.delete(owner);
+		retired.push(owner);
 		node.owner = undefined;
 	}
 	if (node.children !== undefined)
 		for (const child of node.children.values())
-			collectRetiredSignalRetryOwners(child, cache, retired, keep);
+			collectRetiredSignalRetryOwners(child, cache, retired, keep, reversible);
 }
 
 // Component, child and branch slots hold one occupant at a time, so a newer
@@ -1384,8 +1482,9 @@ function stampSignalInstance(
 
 function scopeSignalOwner(scope: Scope | null): SignalOwner | undefined {
 	if (scope === null) return;
-	const root = scope.block.idState.renderOwner;
-	let documentOwner = root?.signalOwner;
+	const ids = scope.block.idState;
+	const root = ids.renderOwner;
+	let documentOwner = ids.dataOwner ?? root?.signalOwner;
 	if (documentOwner === undefined && signalDocumentEnabled) {
 		documentOwner = documentSignalOwner(scope.block.parentNode);
 		if (root !== undefined) root.signalOwner = documentOwner;
@@ -1404,6 +1503,7 @@ function scopeSignalOwner(scope: Scope | null): SignalOwner | undefined {
 		let parent = scope.parent ?? scope.block.parentBlock;
 		while (parent !== null) {
 			if (parent instanceof LiteBlockImpl) break;
+			if (ids.dataOwner !== undefined && parent.block.idState.dataOwner !== ids.dataOwner) break;
 			if (parent.signalInstanceParent !== null || parent.signalInstanceResolved !== undefined)
 				break;
 			if (parent.block.forSlot?.signalSite !== undefined) {
@@ -1426,6 +1526,37 @@ function scopeSignalOwner(scope: Scope | null): SignalOwner | undefined {
 			const node = path === null ? undefined : signalRetryNode(cache, path, false);
 			if (node?.owner !== undefined) {
 				owner = node.owner;
+				const claimed = owner;
+				const previous = scope.signalOwner;
+				let restoresPrimary = false;
+				if (
+					boundary !== undefined &&
+					boundary.retrySignalOwners === cache &&
+					isRecordingTransitionJournal() &&
+					ROOT_RENDER_TRANSACTION?.retired != null
+				) {
+					// Only an actual deferred old primary can reclaim this identity.
+					// Root caches are cleared before rollback replays this journal.
+					for (const primary of ROOT_RENDER_TRANSACTION.retired) {
+						if (primary.rare?.trySlot === boundary && canRestoreRestartedSignalScope(primary)) {
+							restoresPrimary = true;
+							break;
+						}
+					}
+				}
+				if (restoresPrimary)
+					journalUndo(() => {
+						// Run before created-scope teardown: that scope borrowed this
+						// identity, while the restored primary resumes owning it.
+						scope.signalOwner = previous;
+						node.owner = claimed;
+						cache.owners.add(claimed);
+						const discarded = root?.retrySignalOwners;
+						if (discarded !== undefined && discarded !== cache) {
+							forgetSignalRetryOwner(discarded.paths, claimed);
+							discarded.owners.delete(claimed);
+						}
+					});
 				node.owner = undefined;
 				cache.owners.delete(owner);
 			}
@@ -2176,6 +2307,8 @@ function takeNativeFreshArm(
 		prefix: ids.prefix + 'n' + (nextClientRootId++).toString(36) + '-',
 		next: 0,
 		renderOwner: ids.renderOwner,
+		dataOwner: ids.dataOwner,
+		externalNamespace: ids.externalNamespace,
 	};
 }
 
@@ -2536,6 +2669,9 @@ const RENDER_RETRYING = 2;
 type OutputHandler = (block: Block, value: unknown, reset?: true) => void;
 
 interface RootIdState {
+	/** Private data authority of a parent-owned external boundary. */
+	dataOwner?: SignalOwner | undefined;
+	externalNamespace?: string | undefined;
 	prefix: string;
 	next: number;
 	/** Shared deterministic namespace for lazily used module-signal instances. */
@@ -4368,6 +4504,7 @@ let TRANSITION_JOURNAL_DEPTH = 0;
 let TRANSITION_JOURNAL_REPLAYING = false;
 
 interface RootRenderOwner {
+	externalSnapshotDocumentId: string | undefined;
 	current: Block | null;
 	/** Shared document/account data owner; distinct from this root's presentation owner. */
 	signalOwner?: SignalOwner | undefined;
@@ -4858,8 +4995,9 @@ function deferRootTeardown(
 		}
 	});
 	const suppressedRefs = REF_DETACH_SUPPRESSION;
-	(transaction.commit ??= []).push(() => {
+	const teardown = () => {
 		if (cancelled || block.disposed) return;
+		cancelled = true;
 		// Deletion cleanups retain their connected-DOM observation. The old
 		// range is reconnected only for teardown, before incoming refs/effects.
 		if (parent !== null) {
@@ -4880,7 +5018,11 @@ function deferRootTeardown(
 			for (const node of nodes)
 				if ((STAGED_DOM ? STAGED_DOM.view(node) : node).parentNode === parent)
 					(STAGED_DOM ? STAGED_DOM.view(parent) : parent).removeChild(node);
-	});
+	};
+	(transaction.commit ??= []).push(teardown);
+	// Reentrant deletion cleanup can stop later commits. End this outgoing
+	// lifetime when its capture ends, unless rollback restored its ownership.
+	(transaction.capture.renderCleanups ??= []).push(teardown);
 	if (detachDom && parent !== null)
 		for (const node of nodes) (STAGED_DOM ? STAGED_DOM.view(parent) : parent).removeChild(node);
 }
@@ -5155,6 +5297,14 @@ function commitRootRenders(): void {
 			// Outgoing cleanup may have removed the state origin of a held root
 			// transition. Inspect its lifetime after those deletions have completed.
 			if (owner.transition !== undefined) TRANSITION_ROOT_DRIVER!.commitRoot(owner, transaction);
+			if (
+				process.env.NODE_ENV !== 'production' &&
+				HMR_ACTIVE_RETENTIONS !== 0 &&
+				!owner.disposed &&
+				owner.wakeable === null &&
+				owner.current !== null
+			)
+				settleHmrRetentionsAfterRootCommit(owner.current);
 		} finally {
 			if (typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' && __OCTANE_PROFILE_ENABLED__)
 				__profileRootExit();
@@ -12634,6 +12784,9 @@ function captureRenderPhaseUpdate(cell: RenderPhaseCell, key: RenderPhaseSnapsho
 }
 
 export function renderBlock(block: Block): void {
+	// A parked HMR lifetime has no live output range until its owner claims it.
+	// Keep queued hook updates for that render instead of touching removed DOM.
+	if (process.env.NODE_ENV !== 'production' && HMR_RETAINED_BLOCKS?.has(block)) return;
 	const hydration = hydrating ? activeHydration() : null;
 	// A replacement dynamic range owns client DOM even while its parent adopts
 	// server siblings. Fresh control-flow markers can instead be replay scaffolding
@@ -12693,6 +12846,8 @@ export function renderBlock(block: Block): void {
 			if (++retries > RENDER_PHASE_UPDATE_LIMIT) throw new Error(formatClientError(9));
 		}
 		if (hydration !== null) hydration.settleUnclaimed(block);
+		if (process.env.NODE_ENV !== 'production' && HMR_RETENTION_ROOTS)
+			settleHmrRetentionAfterRender(block);
 		if (retryVisit !== null) pruneSignalRetryVisit(retryVisit, false);
 		if (
 			signalDocumentEnabled &&
@@ -13953,6 +14108,7 @@ function dispatchTeardownErrors(): void {
 
 function unmountBlock(block: Block, detachDom: boolean = true): void {
 	if (block.disposed) return;
+	if (process.env.NODE_ENV !== 'production' && HMR_RETAINED_BLOCKS?.has(block)) return;
 	if (
 		ROOT_RENDER_ROLLBACK &&
 		ROOT_RENDER_TRANSACTION !== null &&
@@ -13961,6 +14117,10 @@ function unmountBlock(block: Block, detachDom: boolean = true): void {
 	)
 		detachDom = false;
 	if (deferRootUnmount(block, detachDom)) return;
+	if (process.env.NODE_ENV !== 'production' && HMR_RETENTION_ROOTS) {
+		const retention = HMR_RETENTION_ROOTS.get(block);
+		if (retention !== undefined) releaseHmrRetention(retention);
+	}
 	if (TEARDOWN_DEPTH === 0) {
 		TEARDOWN_HANDLER = findTryHandler(block.parentBlock) ?? rendererRegionTryHandler(block);
 		TEARDOWN_BLOCK = block;
@@ -14016,7 +14176,20 @@ function unmountBlockInner(block: Block, detachDom: boolean): void {
 				block.endMarker !== null &&
 				domNode(block.startMarker).parentNode !== null));
 	// Depth-first cleanup of all scopes reachable from this block.
-	unmountScope(block, detachDom && !removesOwnDom);
+	try {
+		unmountScope(block, detachDom && !removesOwnDom);
+	} finally {
+		const dataOwner = block.idState.dataOwner;
+		if (dataOwner !== undefined && dataOwner !== block.parentBlock?.idState.dataOwner) {
+			// An isolated publisher owns its document data across the whole subtree.
+			// Descendant cleanups must still be able to read that data before retirement.
+			if (
+				!DEFERRED_LAYOUT_DRIVER ||
+				!DEFERRED_LAYOUT_DRIVER.stageAction(() => retireRendererSignalOwner(dataOwner), true)
+			)
+				retireRendererSignalOwner(dataOwner);
+		}
+	}
 	if (NATIVE_READ_DRIVER && owner?.current === block) NATIVE_READ_DRIVER.clearDeferredRefs(owner);
 	if (!detachDom) return;
 	// Remove DOM range.
@@ -16965,7 +17138,7 @@ function promoteHmrBlockRange(block: Block): void {
  * closures publish on the refresh even when their authored dependency arrays
  * are unchanged. This is called only from HMR.update(), never a normal render.
  */
-function resetHmrBlock(block: Block): void {
+function resetHmrBlock(block: Block, detachDom = true): void {
 	if (TEARDOWN_DEPTH === 0) {
 		TEARDOWN_HANDLER = findTryHandler(block.parentBlock) ?? rendererRegionTryHandler(block);
 		TEARDOWN_BLOCK = block;
@@ -16997,13 +17170,14 @@ function resetHmrBlock(block: Block): void {
 				}
 			}
 
-			unmountScopeChildrenAndSlotsOnly(block, true);
-			removeRange(
-				block.startMarker !== null
-					? getNextSibling(block.startMarker)
-					: getFirstChild(block.parentNode),
-				block.endMarker,
-			);
+			unmountScopeChildrenAndSlotsOnly(block, detachDom);
+			if (detachDom)
+				removeRange(
+					block.startMarker !== null
+						? getNextSibling(block.startMarker)
+						: getFirstChild(block.parentNode),
+					block.endMarker,
+				);
 
 			block.children = null;
 			block.cleanups = preserved;
@@ -17111,7 +17285,250 @@ const HYDRATE_STREAM_SCAN_MASK = 1 /* SHOW_ELEMENT */ | 128; /* SHOW_COMMENT */
 
 type HydrateLoadResult = ComponentBody | { default: ComponentBody };
 
+interface ExternalHydrateDescriptor {
+	readonly authority: ExternalSnapshotAuthority;
+	readonly initialize: (
+		wrapper: HTMLElement,
+		boundaryId: string,
+		documentId: string,
+		serverPreserved: boolean,
+	) => { owner: SignalOwner; identifierPrefix: string };
+}
+
+const externalHydrateDescriptors = /* @__PURE__ */ new WeakSet<ExternalHydrateDescriptor>();
+
+interface PublisherHydrateDescriptor {
+	readonly publisherKey: string;
+	readonly component: ComponentBody;
+	readonly leases: Set<NativePublisherHydration>;
+}
+const publisherHydrateDescriptors = /* @__PURE__ */ new WeakSet<PublisherHydrateDescriptor>();
+const publisherReplacementBoundaries = /* @__PURE__ */ new WeakMap<
+	ComponentBody,
+	PublisherHydrateDescriptor
+>();
+const publisherSlotDescriptors = /* @__PURE__ */ new WeakMap<
+	HydrateSlot,
+	PublisherBoundaryDescriptor
+>();
+
+interface NativePublisherHydration {
+	readonly state: HydrateSlot;
+	readonly publisherKey: string;
+	readonly documentId: string;
+	readonly streamAuthority: NativeStreamedAuthority;
+	readonly documentAuthority: NativeStreamedAuthority;
+	readonly documentOwner: SignalOwnerIdentity;
+	readonly expectedCompilerBuild: string | undefined;
+	readonly releases: Map<
+		object,
+		{
+			readonly release: () => void;
+			readonly proof: HotSignalOwnerProof;
+			readonly blocks: Set<Block>;
+			buildId: string;
+		}
+	>;
+	readonly admittedBuilds: Set<string>;
+	owner: SignalOwnerIdentity;
+	ingress: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
+	closed: boolean;
+	remounting: boolean;
+	leaveLifecycle: (() => void) | undefined;
+}
+let nativePublisherHydrations: WeakMap<SignalOwnerIdentity, NativePublisherHydration> | undefined;
+
+function parentStreamedAuthority(
+	block: Block,
+	document: Document,
+): NativeStreamedAuthority | undefined {
+	const owner = block.idState.dataOwner ?? block.idState.renderOwner?.signalOwner;
+	if (owner === undefined) return undefined;
+	const authority =
+		getNativeStreamedAuthority(owner, document) ??
+		nativePublisherHydrations?.get(owner)?.streamAuthority;
+	return authority?.document === document ? authority : undefined;
+}
+
+function publisherContainsComponent(lease: NativePublisherHydration, component: object): boolean {
+	if (
+		lease.closed ||
+		lease.state.block.disposed ||
+		getNativeStreamedAuthority(lease.documentOwner, lease.state.wrapper.ownerDocument) !==
+			lease.documentAuthority
+	)
+		return false;
+	const meta = (component as HmrWrapper)[HMR];
+	if (meta === undefined) return false;
+	for (const block of meta.liveBlocks) {
+		if (
+			!block.disposed &&
+			block.idState.dataOwner === lease.owner &&
+			blockIsAncestor(lease.state.block, block)
+		)
+			return true;
+	}
+	return false;
+}
+
+function remountPublisherHydration(lease: NativePublisherHydration): void {
+	if (lease.closed) return;
+	const state = lease.state;
+	invalidateHydrateActivation(state);
+	const preserved = preservedHydrateActivations?.get(state);
+	if (preserved !== undefined) {
+		releasePreservedHydrateActivation(state);
+		discardOffscreenCapture(preserved.capture);
+	}
+	const remounting = lease.remounting;
+	lease.remounting = true;
+	try {
+		unmountBlock(state.block);
+	} finally {
+		lease.remounting = remounting;
+	}
+	const oldOwner = lease.owner;
+	retireRendererSignalOwner(oldOwner);
+	nativePublisherHydrations?.delete(oldOwner);
+	if (
+		lease.closed ||
+		state.parentBlock.disposed ||
+		getNativeStreamedAuthority(lease.documentOwner, state.wrapper.ownerDocument) !==
+			lease.documentAuthority
+	)
+		return;
+	lease.owner = Object.freeze({ scopeKey: oldOwner.scopeKey });
+	nativePublisherHydrations!.set(lease.owner, lease);
+	const start = state.wrapper.ownerDocument.createComment('hydrate');
+	const end = state.wrapper.ownerDocument.createComment('/hydrate');
+	state.wrapper.append(start, end);
+	state.start = start;
+	state.end = end;
+	state.idState = {
+		prefix: state.idState.prefix,
+		next: 0,
+		signalState: { prefix: state.idState.prefix, next: 0 },
+		renderOwner: state.parentBlock.idState.renderOwner,
+		dataOwner: lease.owner,
+		externalNamespace: state.idState.prefix,
+	};
+	state.block = createBlock(
+		'control-flow',
+		state.parentBlock,
+		state.wrapper,
+		start,
+		end,
+		() => undefined,
+		undefined,
+	);
+	state.block.idState = state.idState;
+	stampSignalInstanceKey(state.block, rootSignalInstanceKey(state.idState));
+	state.block.body = hydrateBoundaryBody(state);
+	state.serverPreserved = false;
+	state.seedRaw = null;
+	state.nativeSeedRaw = undefined;
+	state.initialCaptures = null;
+	state.serverActivationStarted = false;
+	state.hydrated = false;
+	state.activationRequested = true;
+	state.activationReady = true;
+	state.hasError = false;
+	state.error = undefined;
+	lease.leaveLifecycle?.();
+	lease.leaveLifecycle = joinPublisherLifecycle(state, lease.owner, lease.documentId, undefined);
+	// The validated factory handoff must finish before any replacement body runs.
+	scheduleRender(state.parentBlock);
+}
+
+function reconcilePublisherMemberships(lease: NativePublisherHydration): void {
+	if (lease.closed) return;
+	// The native transaction has finished using its captured proofs. Release
+	// removed blocks now, including trees whose layout effects are disconnected.
+	// A surviving component admits its committed generation when it mounts again.
+	for (const [component, membership] of lease.releases) {
+		if (membership.blocks.size !== 0) continue;
+		membership.release();
+		lease.releases.delete(component);
+	}
+}
+
+function admitNativePublisherComponent(component: HmrWrapper, scope: Scope): void {
+	const owner = scope.block.idState.dataOwner;
+	if (owner === undefined || nativePublisherHydrations === undefined) return;
+	const lease = nativePublisherHydrations.get(owner);
+	const driver = getNativeHotOwnerDriver();
+	if (lease === undefined || driver === undefined || !publisherContainsComponent(lease, component))
+		return;
+	const buildId = driver.getComponentBuild(component);
+	if (buildId === undefined) return;
+	let membership = lease.releases.get(component);
+	if (membership !== undefined && membership.buildId !== buildId)
+		throw new TypeError(formatClientError(349));
+	if (membership === undefined) {
+		const signalBuildId = driver.getComponentBuild(component, true);
+		if (
+			signalBuildId !== undefined &&
+			lease.expectedCompilerBuild !== undefined &&
+			!lease.admittedBuilds.has(signalBuildId)
+		)
+			throw new TypeError(formatClientError(349));
+		const proof = driver.createProof({
+			publisherKey: lease.publisherKey,
+			documentId: lease.documentId,
+			ownerKey: lease.owner.scopeKey,
+			buildId,
+			currentOwner: () =>
+				lease.closed ||
+				getNativeStreamedAuthority(lease.documentOwner, lease.state.wrapper.ownerDocument) !==
+					lease.documentAuthority
+					? undefined
+					: lease.owner,
+			acceptsComponent: (candidate) =>
+				candidate === component && publisherContainsComponent(lease, candidate),
+			suspendIngress: () => lease.ingress?.suspend(),
+			// A compiler generation cannot authorize a new SSR document stream.
+			rotateIngress: (build) => {
+				const admitted = lease.releases.get(component);
+				if (admitted !== undefined) admitted.buildId = build;
+				if (driver.getComponentBuild(component, true) !== undefined)
+					lease.admittedBuilds.add(build);
+				lease.ingress?.suspend();
+				lease.ingress = undefined;
+			},
+			remount: () => remountPublisherHydration(lease),
+			holdUpdate: () => {
+				const remounting = lease.remounting;
+				lease.remounting = true;
+				return () => {
+					lease.remounting = remounting;
+					if (!remounting) reconcilePublisherMemberships(lease);
+				};
+			},
+		});
+		membership = { release: driver.admit(component, proof), proof, blocks: new Set(), buildId };
+		if (signalBuildId !== undefined) lease.admittedBuilds.add(signalBuildId);
+		lease.releases.set(component, membership);
+	}
+	if (membership.blocks.has(scope.block)) return;
+	const current = membership;
+	const block = scope.block;
+	current.blocks.add(block);
+	const cleanup: Cleanup & { [HMR]?: true } = () => {
+		current.blocks.delete(block);
+		if (current.blocks.size === 0 && !lease.remounting) {
+			current.release();
+			if (lease.releases.get(component) === current) lease.releases.delete(component);
+		}
+	};
+	// This exact block was registered by the actual canonical HMR wrapper above.
+	// Its ownership membership follows hooks across compatible template resets.
+	cleanup[HMR] = true;
+	(scope.cleanups ??= []).push(cleanup);
+}
+
 type InternalHydrateProps = HydrateProps & {
+	readonly __external?: ExternalHydrateDescriptor;
+	readonly __publisher?: PublisherHydrateDescriptor;
 	/** Compiler-injected split-child loader. */
 	__load?: () => Promise<HydrateLoadResult>;
 	/** Latest lexical values consumed by the compiler-generated split child. */
@@ -18036,6 +18453,13 @@ function beginHydrateStreamWait(state: HydrateSlot): Promise<void> | null {
 }
 
 function requestHydrateBoundary(state: HydrateSlot): void {
+	// Native publishers must install ingress and join the committed document before
+	// queued interaction can activate their first child read.
+	if (
+		(state.props.__external !== undefined || state.props.__publisher !== undefined) &&
+		!preparedNativePublisherHydrations?.has(state)
+	)
+		return;
 	if (state.hydrated || state.activationRequested || state.block.disposed) return;
 	// A direct strategy prop can become never() after an earlier installer was
 	// registered. Its cleanup should cancel normal callbacks, but guard here too:
@@ -18142,12 +18566,23 @@ function findHydrateSeedSidecar(
 	return null;
 }
 
+function removeHydrateSeedSidecar(wrapper: HTMLElement, sidecar: HTMLScriptElement): void {
+	const next = domNode(sidecar).nextSibling;
+	if (TRANSITION_JOURNAL !== null) journalUndo(() => domNode(wrapper).insertBefore(sidecar, next));
+	domNode(sidecar).remove();
+}
+
 function createHydrateSlot(
 	props: InternalHydrateProps,
 	scope: Scope,
 	boundaryId: string,
 	boundaryBody: typeof hydrateBoundaryBody,
 ): HydrateSlot {
+	if (
+		(props.__external !== undefined && !externalHydrateDescriptors.has(props.__external)) ||
+		(props.__publisher !== undefined && !publisherHydrateDescriptors.has(props.__publisher))
+	)
+		throw new TypeError(formatClientError(349));
 	const parentBlock = scope.block;
 	const parentNode = parentBlock.parentNode;
 	const hydration = activeHydration();
@@ -18185,7 +18620,7 @@ function createHydrateSlot(
 	let seedRaw: string | null = null;
 	let nativeSeedRaw: string | null = null;
 	let idState = parentBlock.idState;
-	if (serverPreserved) {
+	if (serverPreserved && props.__external === undefined && props.__publisher === undefined) {
 		const rawCount = (STAGED_DOM ? STAGED_DOM.view(wrapper) : wrapper).getAttribute(
 			HYDRATE_ID_COUNT_ATTR,
 		);
@@ -18201,12 +18636,94 @@ function createHydrateSlot(
 			limit: childStart + idCount,
 			overflow: rootIds,
 			renderOwner: rootIds.renderOwner,
+			dataOwner: rootIds.dataOwner,
+			externalNamespace: rootIds.externalNamespace,
 		};
 		(STAGED_DOM ? STAGED_DOM.view(wrapper) : wrapper).removeAttribute(HYDRATE_ID_COUNT_ATTR);
 		// A rolled-back attempt restores the count, so the attempt that replaces
 		// it, a retry or the fallback's client render adopting an independent
 		// wrapper, reserves the same IDs.
 		TRANSITION_JOURNAL?.push(JOURNAL_ATTR, wrapper, HYDRATE_ID_COUNT_ATTR, rawCount);
+	}
+	let externalOwner: SignalOwner | undefined;
+	let publisherDescriptor: PublisherBoundaryDescriptor | undefined;
+	const parentAuthority =
+		props.__publisher === undefined && props.__external === undefined
+			? undefined
+			: parentStreamedAuthority(parentBlock, wrapper.ownerDocument);
+	if (props.__publisher !== undefined) {
+		try {
+			const authority = parentAuthority;
+			let descriptor = createPublisherBoundaryDescriptor(
+				props.__publisher.publisherKey,
+				authority?.documentId ?? null,
+				boundaryId,
+				authority?.buildId ?? null,
+			);
+			if (serverPreserved) {
+				const sidecar = findHydrateSeedSidecar(wrapper, PUBLISHER_BOUNDARY_ATTR);
+				if (sidecar === null) throw new TypeError(formatClientError(349));
+				const admitted = decodePublisherBoundaryDescriptor(domNode(sidecar).textContent ?? '');
+				// A nonstream server boundary can render and hydrate, but its sidecar does
+				// not grant document or hot-publisher authority.
+				if (admitted.documentId === null && admitted.streamBuildId === null)
+					descriptor = createPublisherBoundaryDescriptor(
+						props.__publisher.publisherKey,
+						null,
+						boundaryId,
+						null,
+					);
+				if (
+					JSON.stringify(admitted) !== JSON.stringify(descriptor) ||
+					domNode(wrapper).getAttribute(HYDRATE_ID_ATTR) !== boundaryId ||
+					domNode(wrapper).getAttribute(HYDRATE_ID_COUNT_ATTR) !== '0'
+				)
+					throw new TypeError(formatClientError(349));
+				removeHydrateSeedSidecar(wrapper, sidecar);
+				if (TRANSITION_JOURNAL !== null)
+					TRANSITION_JOURNAL.push(JOURNAL_ATTR, wrapper, HYDRATE_ID_COUNT_ATTR, '0');
+				domNode(wrapper).removeAttribute(HYDRATE_ID_COUNT_ATTR);
+			}
+			externalOwner = Object.freeze({ scopeKey: descriptor.ownerKey });
+			publisherDescriptor = descriptor;
+			idState = {
+				prefix: descriptor.identifierPrefix,
+				next: 0,
+				signalState: { prefix: descriptor.identifierPrefix, next: 0 },
+				renderOwner: parentBlock.idState.renderOwner,
+				dataOwner: externalOwner,
+				externalNamespace: descriptor.identifierPrefix,
+			};
+		} catch (error) {
+			const refusal = new PresentationAdoptionMiss(undefined, false);
+			refusal.failure = error;
+			throw refusal;
+		}
+	}
+
+	if (props.__external !== undefined) {
+		const documentId = parentBlock.idState.renderOwner?.externalSnapshotDocumentId;
+		if (typeof documentId !== 'string' || documentId.length === 0)
+			throw new TypeError(formatClientError(354));
+		let identity: ReturnType<ExternalHydrateDescriptor['initialize']>;
+		try {
+			identity = props.__external.initialize(wrapper, boundaryId, documentId, serverPreserved);
+		} catch (error) {
+			// A rejected remote authority cannot become valid by remounting its component.
+			// Use the existing refused-takeover control so hydration never retries it as CSR.
+			const refusal = new PresentationAdoptionMiss(undefined, false);
+			refusal.failure = error;
+			throw refusal;
+		}
+		externalOwner = identity.owner;
+		idState = {
+			prefix: identity.identifierPrefix,
+			next: 0,
+			signalState: { prefix: identity.identifierPrefix, next: 0 },
+			renderOwner: parentBlock.idState.renderOwner,
+			dataOwner: externalOwner,
+			externalNamespace: identity.identifierPrefix,
+		};
 	}
 	// An independent root may already have compacted its server ranges. The
 	// parent reserves its IDs but owns only the wrapper, never its child list or
@@ -18219,12 +18736,12 @@ function createHydrateSlot(
 		const seed = findHydrateSeedSidecar(wrapper);
 		if (seed !== null) {
 			seedRaw = (STAGED_DOM ? STAGED_DOM.view(seed) : seed).textContent || '[]';
-			(STAGED_DOM ? STAGED_DOM.view(seed) : seed).remove();
+			removeHydrateSeedSidecar(wrapper, seed);
 		}
 		const nativeSeed = findHydrateSeedSidecar(wrapper, NATIVE_SIGNAL_SEED_ATTR);
 		if (nativeSeed !== null) {
 			nativeSeedRaw = (STAGED_DOM ? STAGED_DOM.view(nativeSeed) : nativeSeed).textContent || '';
-			(STAGED_DOM ? STAGED_DOM.view(nativeSeed) : nativeSeed).remove();
+			removeHydrateSeedSidecar(wrapper, nativeSeed);
 		}
 	} else {
 		// The server opens every ordinary wrapper with the boundary's own range. An
@@ -18259,6 +18776,9 @@ function createHydrateSlot(
 		undefined,
 	);
 	block.idState = idState;
+	if (externalOwner !== undefined) {
+		stampSignalInstanceKey(block, rootSignalInstanceKey(idState));
+	}
 	let state!: HydrateSlot;
 	const intentBoundary: HydrationIntentBoundary = (eventType, intent) =>
 		handleRegisteredHydrationIntent(state, eventType, intent);
@@ -18292,8 +18812,10 @@ function createHydrateSlot(
 		loadedBody: null,
 		hydrationWaiters: null,
 		activationGeneration: 0,
-		activationRequested: !serverPreserved,
-		activationReady: !serverPreserved,
+		activationRequested:
+			!serverPreserved && props.__external === undefined && props.__publisher === undefined,
+		activationReady:
+			!serverPreserved && props.__external === undefined && props.__publisher === undefined,
 		serverActivationStarted: false,
 		hydrated: false,
 		didNotify: false,
@@ -18303,6 +18825,7 @@ function createHydrateSlot(
 		independent: props.__independent !== undefined,
 		initialCaptures: null,
 	};
+	if (publisherDescriptor !== undefined) publisherSlotDescriptors.set(state, publisherDescriptor);
 	if (nativeSeedRaw !== null) state.nativeSeedRaw = nativeSeedRaw;
 	if (serverPreserved && !state.independent) {
 		state.initialCaptures = {
@@ -18323,8 +18846,9 @@ function createHydrateSlot(
 		// listener. The parent root retains only the wrapper's outer lifetime.
 	} else if (serverPreserved && pendingIntents !== undefined && initialStrategy._t !== 'never') {
 		state.replays.push(...pendingIntents.filter((intent) => !intent.earlyBinding));
-		requestHydrateBoundary(state);
-	} else if (serverPreserved) {
+		if (props.__external === undefined && props.__publisher === undefined)
+			requestHydrateBoundary(state);
+	} else if (serverPreserved && props.__external === undefined && props.__publisher === undefined) {
 		const shouldDefer = initialStrategy._d ? initialStrategy._d() : initialStrategy._t !== 'load';
 		if (!shouldDefer && initialStrategy._t !== 'never') requestHydrateBoundary(state);
 	}
@@ -18430,6 +18954,10 @@ function activateHydrateBoundary(state: HydrateSlot): void {
 	}
 	const hydration =
 		preserved?.hydration ?? new HydrationCapability(block, getNextSibling(state.start), null);
+	// Native publishers and external snapshots keep ancestor context live; only
+	// native signal reads have server history. Reconcile values within the same shape.
+	hydration.reconcileValues =
+		state.props.__publisher !== undefined || state.props.__external !== undefined;
 	// A suspended first attempt keeps its capability, so re-check each attempt.
 	if (!hydration.staleServerValues && hydrateServerValuesStale(state))
 		hydration.staleServerValues = true;
@@ -18565,6 +19093,8 @@ function activateHydrateBoundary(state: HydrateSlot): void {
 			prefix: state.idState.prefix + 'n' + (nextClientRootId++).toString(36) + '-',
 			next: 0,
 			renderOwner: state.idState.renderOwner,
+			dataOwner: state.idState.dataOwner,
+			externalNamespace: state.idState.externalNamespace,
 		};
 		const recoveryCapture = createOffscreenCapture();
 		const recoveryHydration = currentHydration;
@@ -18762,6 +19292,19 @@ function initializeHydrateComponent(
 			if (state === undefined) {
 				state = createHydrateSlot(props, scope, boundaryId, boundaryBody);
 			} else {
+				if (
+					(props.__external !== undefined && !externalHydrateDescriptors.has(props.__external)) ||
+					(props.__publisher !== undefined && !publisherHydrateDescriptors.has(props.__publisher))
+				)
+					throw new TypeError(formatClientError(349));
+				if (
+					state.props.__external?.authority.publisherBuildId !==
+						props.__external?.authority.publisherBuildId ||
+					state.props.__external?.authority.runtimeABI !== props.__external?.authority.runtimeABI
+				)
+					throw new TypeError(formatClientError(355));
+				if (state.props.__publisher !== props.__publisher)
+					throw new TypeError(formatClientError(355));
 				if (state.independent !== (props.__independent !== undefined)) {
 					throw new Error(formatClientError(66));
 				}
@@ -18780,7 +19323,11 @@ function initializeHydrateComponent(
 						// though the still-mounted boundary had unmounted.
 						cleanupHydrateStrategy(state);
 						invalidateHydrateActivation(state);
-					} else if (!state.activationRequested) {
+					} else if (
+						!state.activationRequested &&
+						props.__external === undefined &&
+						props.__publisher === undefined
+					) {
 						const shouldDefer = surroundingUpdate
 							? false
 							: strategy._d
@@ -18834,6 +19381,419 @@ export const Hydrate: ComponentBody<HydrateProps> =
 /** Compiler-owned template children with no authored fallback; never a descriptor entry point. */
 export const __HydrateCompiled: ComponentBody<HydrateProps> =
 	/* @__PURE__ */ initializeHydrateComponent(compiledHydrateBoundaryBody);
+
+// Allocate native preparation state only for an actual committed publisher.
+let preparedNativePublisherHydrations: WeakSet<HydrateSlot> | undefined;
+function prepareNativePublisherHydration(
+	state: HydrateSlot,
+	scope: Scope,
+	documentId: string | undefined,
+	streamed: boolean,
+	initialize: () => () => void,
+): void {
+	let disposed = false;
+	let release: (() => void) | undefined;
+	let cancelWait: (() => void) | undefined;
+	// Join before loading so retirement/freeze cannot race a delayed engine import.
+	const participant =
+		documentId === undefined
+			? undefined
+			: joinPublisherLifecycle(state, state.idState.dataOwner!, documentId, undefined);
+	registerHookCleanup(scope, () => {
+		disposed = true;
+		cancelWait?.();
+		participant?.();
+		release?.();
+	});
+	const activate = (): void => {
+		if (disposed || state.block.disposed || state.parentBlock.disposed) return;
+		release = initialize();
+		participant?.();
+		(preparedNativePublisherHydrations ??= new WeakSet()).add(state);
+		requestHydrateBoundary(state);
+	};
+	// An already bootstrapped native document preserves synchronous activation.
+	if ((!streamed || nativeStreamedSignalBootstrap !== undefined) && participant?.active !== false) {
+		activate();
+		return;
+	}
+	const ready =
+		streamed && nativeStreamedSignalBootstrap === undefined
+			? import('./hydration/streamed-signals.js')
+			: Promise.resolve();
+	void ready
+		.then(async () => {
+			if (disposed) return;
+			while (participant !== undefined && !participant.active) {
+				if (disposed) return;
+				const active = await new Promise<boolean>((resolve) => {
+					cancelWait = () => resolve(false);
+					void participant.whenActive().then(resolve);
+				});
+				cancelWait = undefined;
+				if (!active || disposed) return;
+			}
+			activate();
+		})
+		.catch((error) => {
+			participant?.();
+			if (!disposed && !state.block.disposed) failHydrateBoundary(state, error);
+		});
+}
+
+function joinPublisherLifecycle(
+	state: HydrateSlot,
+	signalOwner: SignalOwner,
+	documentId: string,
+	streamedHydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined,
+): SignalDocumentLifecycleParticipant | undefined {
+	return joinSignalDocumentLifecycle({
+		document: state.wrapper.ownerDocument,
+		documentId,
+		signalOwner,
+		streamedHydration,
+		onRetire() {
+			teardownHydrateBoundary(state);
+			unmountBlock(state.block, false);
+		},
+	});
+}
+
+function joinNativePublisher(
+	state: HydrateSlot,
+	publisherKey: string,
+	documentId: string | undefined,
+	bridge: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined,
+	expectedCompilerBuild?: string,
+	publisher?: PublisherHydrateDescriptor,
+): (() => void) | undefined {
+	const document = state.wrapper.ownerDocument;
+	const parentAuthority = parentStreamedAuthority(state.parentBlock, document);
+	const parentOwner =
+		state.parentBlock.idState.dataOwner ?? state.parentBlock.idState.renderOwner?.signalOwner;
+	const parentLease =
+		parentOwner === undefined ? undefined : nativePublisherHydrations?.get(parentOwner);
+	const documentOwner = parentLease?.documentOwner ?? parentOwner;
+	const documentAuthority = parentLease?.documentAuthority ?? parentAuthority;
+	let lease: NativePublisherHydration | undefined;
+	const owner = state.idState.dataOwner!;
+	if (
+		parentAuthority !== undefined &&
+		documentId !== undefined &&
+		documentOwner !== undefined &&
+		documentAuthority !== undefined &&
+		publisherSlotDescriptors.get(state)?.documentId !== null
+	) {
+		lease = {
+			state,
+			publisherKey,
+			documentId,
+			streamAuthority:
+				bridge === undefined ? parentAuthority : getNativeStreamedAuthority(owner, document)!,
+			documentAuthority,
+			documentOwner,
+			expectedCompilerBuild,
+			releases: new Map(),
+			admittedBuilds: new Set(expectedCompilerBuild === undefined ? [] : [expectedCompilerBuild]),
+			owner,
+			ingress: bridge,
+			closed: false,
+			remounting: false,
+			leaveLifecycle: undefined,
+		};
+		(nativePublisherHydrations ??= new WeakMap()).set(owner, lease);
+		publisher?.leases.add(lease);
+	}
+	let leave: (() => void) | undefined;
+	try {
+		if (documentId !== undefined) leave = joinPublisherLifecycle(state, owner, documentId, bridge);
+		if (lease !== undefined) lease.leaveLifecycle = leave;
+	} catch (error) {
+		nativePublisherHydrations?.delete(owner);
+		if (lease !== undefined) publisher?.leases.delete(lease);
+		throw error;
+	}
+
+	return () => {
+		if (lease !== undefined) {
+			publisher?.leases.delete(lease);
+			lease.leaveLifecycle?.();
+			lease.closed = true;
+			for (const membership of lease.releases.values()) membership.release();
+			lease.releases.clear();
+			nativePublisherHydrations?.delete(lease.owner);
+			lease.ingress?.dispose();
+		} else leave?.();
+	};
+}
+
+/** Render a local native publisher under private data/ID ownership and live parent contexts. */
+export function publisherBoundary<P>(
+	component: ComponentBody<P>,
+	options: { readonly publisherKey: string },
+): ComponentBody<P> {
+	const publisherKey = options.publisherKey;
+	createPublisherBoundaryDescriptor(publisherKey, null, 'validate', null);
+	if (typeof component !== 'function') throw new TypeError(formatClientError(356));
+	const streamSlot = Symbol('octane.publisher.stream');
+	const joinedSlot = Symbol('octane.publisher.joined');
+	const descriptor: PublisherHydrateDescriptor = Object.freeze({
+		publisherKey,
+		component,
+		leases: new Set<NativePublisherHydration>(),
+	});
+	publisherHydrateDescriptors.add(descriptor);
+	const boundary = markComponentFlags<ComponentBody<P>>(
+		function PublisherBoundary(props, scope, extra) {
+			Hydrate(
+				{
+					when: { _t: 'load' },
+					children: createElement(component, props),
+					__publisher: descriptor,
+				} as InternalHydrateProps,
+				scope,
+				extra,
+			);
+			const state = scope.slots[0] as HydrateSlot;
+			const joined = useRef(false, joinedSlot);
+			useLayoutEffect(
+				() => {
+					if (joined.current) return;
+					joined.current = true;
+					const authority = parentStreamedAuthority(state.parentBlock, state.wrapper.ownerDocument);
+					prepareNativePublisherHydration(
+						state,
+						scope,
+						authority?.documentId,
+						state.serverPreserved && authority !== undefined,
+						() => {
+							const bootstrapStreamedSignalHydration = nativeStreamedSignalBootstrap!;
+							const parentAuthority = parentStreamedAuthority(
+								state.parentBlock,
+								state.wrapper.ownerDocument,
+							);
+							const bridge =
+								state.serverPreserved && parentAuthority !== undefined
+									? bootstrapStreamedSignalHydration({
+											buildId: parentAuthority.buildId,
+											documentId: parentAuthority.documentId,
+											document: state.wrapper.ownerDocument,
+											signalOwner: state.idState.dataOwner!,
+											target: parentAuthority.target,
+										})
+									: undefined;
+							let release: (() => void) | undefined;
+							try {
+								release = joinNativePublisher(
+									state,
+									publisherKey,
+									parentAuthority?.documentId,
+									bridge,
+									undefined,
+									descriptor,
+								);
+							} catch (error) {
+								bridge?.dispose();
+								throw error;
+							}
+							return () => {
+								release?.();
+								bridge?.dispose();
+							};
+						},
+					);
+				},
+				[state],
+				streamSlot,
+			);
+		},
+		COMPONENT_FLAG_BOUNDARY,
+		'PublisherBoundary',
+	);
+	publisherReplacementBoundaries.set(boundary, descriptor);
+	return boundary;
+}
+
+/** One synchronous, native-authorized replacement of an exposed publisher graph. */
+export interface PublisherBoundaryReplacement {
+	/** If execute throws after this becomes true, retain its runtime for native recovery. */
+	readonly commitStarted: boolean;
+	execute<T>(factory: () => T): T;
+}
+
+/** Prepare before fetching the new graph; recheck its native owners at execution. */
+export function preparePublisherBoundaryReplacement(
+	boundary: ComponentBody,
+): PublisherBoundaryReplacement {
+	const descriptor = publisherReplacementBoundaries.get(boundary);
+	const driver = getNativeHotOwnerDriver();
+	if (CURRENT_SCOPE !== null || descriptor === undefined || driver === undefined)
+		throw new TypeError(formatClientError(363));
+	let component = descriptor.component;
+	while ((component as any)[MEMO_OWNER] === component) component = (component as any).type;
+	for (const lease of descriptor.leases) {
+		const membership = lease.releases.get(component);
+		if (membership === undefined || !publisherContainsComponent(lease, component)) continue;
+		return driver.prepareReplacement(
+			component,
+			membership.proof,
+			(candidate, body) => {
+				const meta = (candidate as HmrWrapper)[HMR];
+				if (meta === undefined) return false;
+				const previousABI = (meta.fn as any).__octaneReturnedOutput;
+				const nextABI = (body as any).__octaneReturnedOutput;
+				let compatible =
+					(previousABI === undefined || previousABI === true) &&
+					(nextABI === undefined || nextABI === true) &&
+					(previousABI === nextABI || meta.liveBlocks.size === 0);
+				for (const block of meta.liveBlocks)
+					if (!block.disposed && !hasResettableHmrRange(block)) compatible = false;
+				if (!compatible)
+					for (const block of meta.liveBlocks) {
+						if (block.disposed) continue;
+						const owner = block.idState.dataOwner;
+						const ownerLease =
+							owner === undefined ? undefined : nativePublisherHydrations?.get(owner);
+						// Only this publisher's captured owners may be remounted. A
+						// shared wrapper must not retire them before an outside owner
+						// makes the incompatible body update impossible.
+						if (
+							ownerLease === undefined ||
+							ownerLease.publisherKey !== lease.publisherKey ||
+							ownerLease.documentId !== lease.documentId ||
+							!blockIsAncestor(ownerLease.state.block, block)
+						)
+							throw new TypeError(formatClientError(363));
+					}
+				return compatible;
+			},
+			() => {
+				if (CURRENT_SCOPE !== null) throw new TypeError(formatClientError(363));
+			},
+		);
+	}
+	throw new TypeError(formatClientError(363));
+}
+
+/** Adopt external native output inside the existing parent scope and render owner. */
+export function externalSnapshotBoundary<P>(
+	options: ExternalSnapshotBoundaryOptions<ComponentBody<P>>,
+): ComponentBody<P> {
+	const timeoutMs = options.timeoutMs;
+	if (
+		timeoutMs !== undefined &&
+		(!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > EXTERNAL_SNAPSHOT_MAX_TIMEOUT_MS)
+	)
+		throw new TypeError(formatClientError(358));
+	const component = options.component;
+	if (
+		typeof component !== 'function' ||
+		typeof options.snapshot !== 'function' ||
+		(options.contextKeys !== undefined &&
+			(!Array.isArray(options.contextKeys) ||
+				options.contextKeys.some(
+					(key) => typeof key !== 'string' || key.length === 0 || key.length > 1024,
+				) ||
+				new Set(options.contextKeys).size !== options.contextKeys.length))
+	)
+		throw new TypeError(formatClientError(356));
+	validateExternalSnapshotAuthority(options.authority);
+	const authority = Object.freeze({ ...options.authority });
+	const streamSlot = Symbol('octane.external.stream');
+	const streamOwnerSlot = Symbol('octane.external.stream-owner');
+	// Only this opt-in factory reaches the streamed transport implementation.
+	const descriptor: ExternalHydrateDescriptor = {
+		authority,
+		initialize: (wrapper, boundaryId, documentId, serverPreserved) => {
+			if (serverPreserved) {
+				const sidecar = findHydrateSeedSidecar(wrapper, EXTERNAL_SNAPSHOT_ATTR);
+				if (sidecar === null) throw new TypeError(formatClientError(349));
+				const request = decodeExternalSnapshotRequest(domNode(sidecar).textContent ?? '');
+				if (
+					request.authority.publisherBuildId !== authority.publisherBuildId ||
+					request.authority.runtimeABI !== authority.runtimeABI ||
+					request.documentId !== documentId ||
+					request.boundaryId !== boundaryId ||
+					domNode(wrapper).getAttribute(HYDRATE_ID_ATTR) !== boundaryId ||
+					domNode(wrapper).getAttribute(HYDRATE_ID_COUNT_ATTR) !== '0'
+				)
+					throw new TypeError(formatClientError(349));
+				if (TRANSITION_JOURNAL !== null)
+					TRANSITION_JOURNAL.push(JOURNAL_ATTR, wrapper, HYDRATE_ID_COUNT_ATTR, '0');
+				removeHydrateSeedSidecar(wrapper, sidecar);
+				domNode(wrapper).removeAttribute(HYDRATE_ID_COUNT_ATTR);
+			}
+			return {
+				owner: Object.freeze({ scopeKey: externalSnapshotOwnerKey(documentId, boundaryId) }),
+				identifierPrefix: boundaryId + '-external-',
+			};
+		},
+	};
+	externalHydrateDescriptors.add(descriptor);
+	return markComponentFlags(
+		function ExternalSnapshotBoundary(props, scope, extra) {
+			Hydrate(
+				{
+					when: { _t: 'load' },
+					children: createElement(component, props),
+					__external: descriptor,
+				} as InternalHydrateProps,
+				scope,
+				extra,
+			);
+			const state = scope.slots[0] as HydrateSlot;
+			const streamJoined = useRef(false, streamOwnerSlot);
+			useLayoutEffect(
+				() => {
+					if (streamJoined.current) return;
+					streamJoined.current = true;
+					// Only a committed host may consume publisher history. An abandoned
+					// root hydration must leave its frames available for the next attempt.
+					const host = state.parentBlock.idState.renderOwner!;
+					const document = state.wrapper.ownerDocument;
+					const documentId = host.externalSnapshotDocumentId!;
+					prepareNativePublisherHydration(state, scope, documentId, state.serverPreserved, () => {
+						const bootstrapStreamedSignalHydration = nativeStreamedSignalBootstrap!;
+						const bridge = state.serverPreserved
+							? bootstrapStreamedSignalHydration({
+									buildId: authority.publisherBuildId,
+									documentId,
+									document,
+									signalOwner: state.idState.dataOwner!,
+									target:
+										parentStreamedAuthority(state.parentBlock, document)?.target ??
+										(document.defaultView as unknown as Record<string, unknown>),
+								})
+							: undefined;
+						let leaveDocumentLifecycle: (() => void) | undefined;
+						try {
+							leaveDocumentLifecycle = joinNativePublisher(
+								state,
+								JSON.stringify(['octane:external', authority.publisherBuildId, state.boundaryId]),
+								documentId,
+								bridge,
+								getNativeHotOwnerDriver()?.getComponentBuild(component, true),
+							);
+						} catch (error) {
+							bridge?.dispose();
+							throw error;
+						}
+						// Suspense and Activity disconnect layout effects while retaining the
+						// mounted boundary. Its publisher lease ends only at actual unmount.
+						return () => {
+							leaveDocumentLifecycle?.();
+							bridge?.dispose();
+						};
+					});
+				},
+				[state],
+				streamSlot,
+			);
+		},
+		COMPONENT_FLAG_BOUNDARY,
+		'ExternalSnapshotBoundary',
+	);
+}
 
 /**
  * `<Suspense fallback={…}>…</Suspense>` — the JSX component form of
@@ -21742,6 +22702,8 @@ function skipFoldedHeadPrefix(container: RootContainer, node: Node | null): Node
  * discard its methods together with the marker/mismatch/seed helper graph.
  */
 class HydrationCapability {
+	/** Native publisher values can reflect a different initial live ancestor context. */
+	reconcileValues = false;
 	/**
 	 * Parent captures changed before this dormant boundary activated, so the
 	 * server HTML predates the client's state. Any difference from it, a text or
@@ -21949,7 +22911,8 @@ class HydrationCapability {
 		const undo = this.undo;
 		this.speculative = false;
 		this.saved = this.undo = null;
-		if (undo !== null && outer?.speculative) (outer.undo ??= []).push(...undo);
+		if (undo !== null && (outer?.speculative || (this.reconcileValues && outer?.undoable)))
+			(outer.undo ??= []).push(...undo);
 		this.passSeeds(outer);
 	}
 
@@ -21985,6 +22948,36 @@ class HydrationCapability {
 		this.speculative = this.undoable = false;
 		this.saved = this.undo = null;
 		if (undo !== null) for (let i = undo.length - 1; i >= 0; i--) undo[i]();
+	}
+
+	/** Live publisher writes must restore absent attributes as well as their values. */
+	private saveAttribute(el: Element, name: string): void {
+		const ns = attrNamespace(name);
+		if (inRootHydrationAttempt()) journalAttr(el, name, ns);
+		if (!this.speculative && !this.undoable) return;
+		const server = STAGED_DOM
+			? STAGED_DOM.view(el).getAttribute(name)
+			: Element.prototype.getAttribute.call(el, name);
+		(this.undo ??= []).push(() => {
+			const target = STAGED_DOM ? STAGED_DOM.view(el) : el;
+			const methods = STAGED_DOM ? target : Element.prototype;
+			if (server === null) {
+				if (ns) methods.removeAttributeNS.call(target, ns, name.slice(name.indexOf(':') + 1));
+				else methods.removeAttribute.call(target, name);
+			} else if (ns) methods.setAttributeNS.call(target, ns, name, server);
+			else methods.setAttribute.call(target, name, server);
+		});
+	}
+
+	/** Restore the comparison record with the live props an aborted publisher wrote. */
+	saveDescriptor(el: Element): void {
+		if (!this.reconcileValues || (!this.speculative && !this.undoable)) return;
+		const previous = getDeoptDesc(el);
+		(this.undo ??= []).push(() => {
+			(STAGED_DOM ? STAGED_DOM.view(el as Element & DeoptStamped) : (el as Element & DeoptStamped))[
+				DEOPT_DESC
+			] = previous;
+		});
 	}
 
 	isActive(): boolean {
@@ -23118,6 +24111,14 @@ class HydrationCapability {
 		loc: string | undefined,
 	): boolean {
 		const equal = server === text || isTextParserNormalizedMatch(server, text);
+		if (!equal && this.reconcileValues && node?.nodeType === 3) {
+			if (inRootHydrationAttempt()) journalText(node as Text, server);
+			if (this.speculative || this.undoable)
+				(this.undo ??= []).push(() => {
+					(STAGED_DOM ? STAGED_DOM.view(node) : node).nodeValue = server;
+				});
+			return false;
+		}
 		if (!equal) {
 			if (
 				host !== null &&
@@ -23188,6 +24189,14 @@ class HydrationCapability {
 
 	parseSeeds(raw: string): unknown[] | null {
 		return parseSeedJson(raw);
+	}
+
+	// Keep transport authority lookup behind the hydration-only capability.
+	streamedBoundaryStash(state: TrySlot): Record<string, string> | undefined {
+		const document = state.start.ownerDocument;
+		const target =
+			parentStreamedAuthority(state.parentBlock, document)?.target ?? document.defaultView;
+		return (target as { $OCTS?: Record<string, string> } | null)?.$OCTS;
 	}
 
 	isRejection(error: unknown): error is HydrationRejectionException {
@@ -24135,14 +25144,21 @@ class HydrationCapability {
 	allowAttribute(el: Element, name: string, next: string | null): boolean {
 		if (el === null) this.missingElement();
 		if (this.isFresh(el)) return true;
-		if (process.env.NODE_ENV === 'production' && !this.staleServerValues) return false;
+		if (process.env.NODE_ENV === 'production' && !this.staleServerValues && !this.reconcileValues)
+			return false;
 		// Read through the prototype: a form's named control can shadow its method.
 		const ns = attrNamespace(name);
 		const server = ns
-			? (STAGED_DOM ? STAGED_DOM.view(el) : el).getAttributeNS(
-					ns,
-					name.indexOf(':') >= 0 ? name.slice(name.indexOf(':') + 1) : name,
-				)
+			? STAGED_DOM
+				? STAGED_DOM.view(el).getAttributeNS(
+						ns,
+						name.indexOf(':') >= 0 ? name.slice(name.indexOf(':') + 1) : name,
+					)
+				: Element.prototype.getAttributeNS.call(
+						el,
+						ns,
+						name.indexOf(':') >= 0 ? name.slice(name.indexOf(':') + 1) : name,
+					)
 			: STAGED_DOM
 				? STAGED_DOM.view(el).getAttribute(name)
 				: Element.prototype.getAttribute.call(el, name);
@@ -24150,8 +25166,13 @@ class HydrationCapability {
 			server !== next &&
 			domBindingClaims.get(el)?.get(name) !== server &&
 			!(next !== null && isAttributeParserNormalizedMatch(server, next))
-		)
+		) {
+			if (this.reconcileValues) {
+				this.saveAttribute(el, name);
+				return true;
+			}
 			this.unpatched(el, `attribute \`${name}\``, server, next);
+		}
 		return false;
 	}
 
@@ -24166,6 +25187,7 @@ class HydrationCapability {
 	keepsClass(el: Element, next: string | null, absentIsEmpty: boolean): boolean {
 		if (el === null) this.missingElement();
 		if (this.isFresh(el)) return false;
+		if (this.reconcileValues) return !this.allowAttribute(el, 'class', next);
 		if (process.env.NODE_ENV !== 'production' || this.staleServerValues)
 			(this.classes ??= new Map()).set(el, { next, absentIsEmpty });
 		return true;
@@ -24189,7 +25211,8 @@ class HydrationCapability {
 	): boolean {
 		if (el === null) this.missingElement();
 		if (this.isFresh(el)) return false;
-		if (process.env.NODE_ENV === 'production' && !this.staleServerValues) return true;
+		if (process.env.NODE_ENV === 'production' && !this.staleServerValues && !this.reconcileValues)
+			return true;
 		const style = (STAGED_DOM ? STAGED_DOM.view(el as HTMLElement) : (el as HTMLElement)).style;
 		const server = style.cssText;
 		const expectedStyle = domNode(
@@ -24222,6 +25245,13 @@ class HydrationCapability {
 			}
 		}
 		const expected = expectedStyle.cssText;
+		if (this.reconcileValues) {
+			if (claims?.get('style') !== server && server !== expected) {
+				this.saveAttribute(el, 'style');
+				style.cssText = expected;
+			}
+			return true;
+		}
 		if (
 			(server !== expected ||
 				(!expected && !removed && (STAGED_DOM ? STAGED_DOM.view(el) : el).hasAttribute('style'))) &&
@@ -26262,9 +27292,9 @@ function writeDirectSignalText(
 	kind: DirectSignalBindingKind,
 	previous: unknown,
 ): Text {
-	if (previous instanceof Text) {
-		setText(previous, value);
-		return previous;
+	if ((previous as Text | null | undefined)?.nodeType === 3) {
+		setText(previous as Text, value);
+		return previous as Text;
 	}
 	// The compiler owns this distinction: an empty sibling text hole can
 	// point at the next element while hydrating, not an only-child parent.
@@ -26547,7 +27577,10 @@ function bindDirectSignal(
 		}
 		if (TRANSITION_JOURNAL !== null) journalBag();
 		const scalarTarget =
-			(kind === 'text' || kind === 'textOnlyChild') && previous instanceof Text ? previous : target;
+			(kind === 'text' || kind === 'textOnlyChild') &&
+			(previous as Text | null | undefined)?.nodeType === 3
+				? (previous as Text)
+				: target;
 		return policy.write(scalarTarget, value, kind, previous, name, attributeKind);
 	}
 	if (
@@ -26593,7 +27626,10 @@ function bindDirectSignal(
 		return token;
 	}
 	const signalTarget =
-		(kind === 'text' || kind === 'textOnlyChild') && previous instanceof Text ? previous : target;
+		(kind === 'text' || kind === 'textOnlyChild') &&
+		(previous as Text | null | undefined)?.nodeType === 3
+			? (previous as Text)
+			: target;
 	const binding = createDirectSignalBinding(
 		scope,
 		signalTarget,
@@ -26603,7 +27639,8 @@ function bindDirectSignal(
 		name,
 		attributeKind,
 		kind === 'text' || kind === 'textOnlyChild'
-			? (prior?.text ?? (previous instanceof Text ? previous : undefined))
+			? (prior?.text ??
+					((previous as Text | null | undefined)?.nodeType === 3 ? (previous as Text) : undefined))
 			: undefined,
 	);
 	if (prior !== null) {
@@ -26637,12 +27674,13 @@ export function bindSignalText(
 	// signal token must still re-enter the read path even when its handle is
 	// unchanged, so pending/error recovery is not hidden by this scalar guard.
 	// A supplied previousValue may itself be undefined, so count arguments.
-	if (previous instanceof Text && !isSignalHandle(value)) {
+	// An adopted Text may belong to another document's realm.
+	if ((previous as Text | null | undefined)?.nodeType === 3 && !isSignalHandle(value)) {
 		if (arguments.length > 6 && previousValue === value) return previous;
 		// A scalar over the Text this hole already owns is bindDirectSignal's
 		// unbound scalar write without its policy dispatch. setText journals the
 		// text and this binding bag.
-		setText(previous, value);
+		setText(previous as Text, value);
 		return previous;
 	}
 	if (previous === undefined && bindingMarker !== undefined) {
@@ -26662,13 +27700,14 @@ export function bindSignalText(
 		(!hydrating || activeHydration() === null)
 	) {
 		const text = getFirstChild(position);
-		if (text instanceof Text) previous = text;
+		if (text?.nodeType === 3) previous = text;
 	}
 	const prior = previous as DirectSignalBinding | undefined;
 	return bindDirectSignal(
 		scope,
 		previous,
-		prior?.target ?? (previous instanceof Text ? previous : position),
+		prior?.target ??
+			((previous as Text | null | undefined)?.nodeType === 3 ? (previous as Text) : position),
 		value,
 		site,
 		onlyChild ? DIRECT_SIGNAL_TEXT_ONLY_POLICY : DIRECT_SIGNAL_TEXT_POLICY,
@@ -28734,7 +29773,12 @@ export function setClassName(el: Element, value: unknown, foreign?: boolean): vo
 	// compare below sees the value we actually write).
 	const cls = normalizeClass(value);
 	const hydration = hydrating ? activeHydration() : null;
-	if (hydration !== null && hydration.keepsClass(el, cls, true)) return;
+	if (hydration !== null) {
+		// Live publisher adoption preserves removal intent; ordinary hydration
+		// still compares the normalized class without changing server attributes.
+		const next = hydration.reconcileValues && (value == null || value === false) ? null : cls;
+		if (hydration.keepsClass(el, next, true)) return;
+	}
 	// Fast path on HTMLElement. For SVG/MathML hosts the compiler emits
 	// setAttribute(el, 'class', normalizeClass(...)) directly — never routes here —
 	// because SVGElement.className is a read-only SVGAnimatedString and assignment
@@ -30175,6 +31219,7 @@ function adoptServerHeadEl(head: HTMLHeadElement, key: string, tag: string): Ele
 }
 
 function rootIdentifierPrefix(block: Block): string {
+	if (block.idState.externalNamespace !== undefined) return block.idState.externalNamespace;
 	while (block.parentBlock !== null) block = block.parentBlock;
 	return block.idState.prefix;
 }
@@ -34848,6 +35893,9 @@ function scopedElementDescriptor<P>(
 	children: () => unknown,
 	invocationSite?: string,
 ): ElementDescriptor<P> {
+	if (typeof type === 'function' && isRendererContext(type)) {
+		registerClientRendererBridge(renderClientContextProvider, flushSync);
+	}
 	const src = (props ?? null) as any;
 	const hasKey = hasElementConfigKey(src);
 	const key = hasKey ? '' + src.key : null;
@@ -35455,6 +36503,9 @@ export function componentSlot(
 	if (!activity && typeof comp !== 'function' && typeof comp !== 'string') {
 		throw invalidElementTypeError(comp);
 	}
+	if (hasRendererContexts && typeof comp === 'function' && isRendererContext(comp)) {
+		registerClientRendererBridge(renderClientContextProvider, flushSync);
+	}
 	// Dynamic JSX tags can resolve to a host STRING at runtime. Keep this
 	// descriptor/de-opt capability in the generic entry point: compiler-proven
 	// void component calls can then retain the function-only core without also
@@ -35547,9 +36598,6 @@ export function componentSlotFromConfig(
 	invocationSite?: string,
 	anchor?: Node | null,
 ): void {
-	if (typeof comp === 'function' && isRendererContext(comp)) {
-		registerClientRendererBridge(renderClientContextProvider, flushSync);
-	}
 	const key = hasElementConfigKey(config) ? '' + config.key : undefined;
 	const props = copyElementConfig(config);
 	applyElementDefaultProps(comp, props);
@@ -36164,17 +37212,36 @@ function componentSlotImpl(
 			const before = state.anchor
 				? domNode(state.anchor).previousSibling
 				: (STAGED_DOM ? STAGED_DOM.view(domParent) : domParent).lastChild;
-			const b = createBlock(
-				'dynamic',
-				parentBlock,
-				domParent,
-				null,
-				state.anchor,
-				body,
-				renderProps,
-				undefined,
-				outputHandler,
-			);
+			const retained =
+				process.env.NODE_ENV !== 'production' && HMR_RETENTION_ROOTS
+					? takeRetainedHmrBlock(parentScope, slotKey, identity, nextKey)
+					: null;
+			const b =
+				retained ??
+				createBlock(
+					'dynamic',
+					parentBlock,
+					domParent,
+					null,
+					state.anchor,
+					body,
+					renderProps,
+					undefined,
+					outputHandler,
+				);
+			if (retained !== null) {
+				b.parentBlock = parentBlock;
+				if (parentBlock.memoInChain && !b.memoInChain) promoteMemoAncestry(b);
+				b.exclusiveMarkers = false;
+				b.parentNode = domParent;
+				b.startMarker = state.singleRoot ? null : state.start;
+				b.endMarker = state.singleRoot ? state.anchor : state.end;
+				b.body = body;
+				b.props = renderProps;
+				b.outputHandler = outputHandler;
+				b.$$ctxCache = null;
+				b.$$ctxCacheOwner = null;
+			}
 			if (signalInstanceKey !== undefined) stampSignalInstanceKey(b, signalInstanceKey);
 			if (
 				typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' &&
@@ -36235,17 +37302,36 @@ function componentSlotImpl(
 			else if (positionalRoot && !replaced)
 				hydration!.slotMismatch(parentScope, slotKey, 'a component range', hydrationCursor);
 		} else {
-			const b = createBlock(
-				'dynamic',
-				parentBlock,
-				domParent,
-				state.start,
-				state.end,
-				body,
-				renderProps,
-				undefined,
-				outputHandler,
-			);
+			const retained =
+				process.env.NODE_ENV !== 'production' && HMR_RETENTION_ROOTS
+					? takeRetainedHmrBlock(parentScope, slotKey, identity, nextKey)
+					: null;
+			const b =
+				retained ??
+				createBlock(
+					'dynamic',
+					parentBlock,
+					domParent,
+					state.start,
+					state.end,
+					body,
+					renderProps,
+					undefined,
+					outputHandler,
+				);
+			if (retained !== null) {
+				b.parentBlock = parentBlock;
+				if (parentBlock.memoInChain && !b.memoInChain) promoteMemoAncestry(b);
+				b.exclusiveMarkers = false;
+				b.parentNode = domParent;
+				b.startMarker = state.singleRoot ? null : state.start;
+				b.endMarker = state.singleRoot ? state.anchor : state.end;
+				b.body = body;
+				b.props = renderProps;
+				b.outputHandler = outputHandler;
+				b.$$ctxCache = null;
+				b.$$ctxCacheOwner = null;
+			}
 			if (signalInstanceKey !== undefined) stampSignalInstanceKey(b, signalInstanceKey);
 			if (
 				typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' &&
@@ -36282,7 +37368,32 @@ function componentSlotImpl(
 		if (state.block.props !== renderProps)
 			journalRootProperty(state.block, 'props', state.block.props);
 		state.block.props = renderProps;
-		renderBlock(state.block);
+		if (state.singleRoot && state.block.startMarker === null) {
+			// An initial suspension can leave the root's insertion range unfinished.
+			// Its retry must claim the inserted node before HMR or deletion uses it.
+			const before = state.anchor
+				? domNode(state.anchor).previousSibling
+				: (STAGED_DOM ? STAGED_DOM.view(domParent) : domParent).lastChild;
+			if (ROOT_RENDER_TRANSACTION !== null && !ROOT_RENDER_ROLLBACK) {
+				journalRootRange(domParent, before, state.anchor);
+				// A completed retry caches its newly inserted template. Rollback
+				// removes that DOM, so the next attempt must mount the template again.
+				journalRootProperty(state.block.slots, 0, state.block.slots[0]);
+			}
+			try {
+				renderBlock(state.block);
+			} finally {
+				const last = state.anchor
+					? domNode(state.anchor).previousSibling
+					: (STAGED_DOM ? STAGED_DOM.view(domParent) : domParent).lastChild;
+				if (last !== null && last !== before) {
+					journalRootProperty(state.block, 'startMarker', state.block.startMarker);
+					journalRootProperty(state.block, 'endMarker', state.block.endMarker);
+					state.block.startMarker = last;
+					state.block.endMarker = last;
+				}
+			}
+		} else renderBlock(state.block);
 	}
 	// Hydration: advance the cursor PAST this component's adopted range so the next
 	// sibling adopts from the right node. The body itself doesn't reliably leave the
@@ -37342,7 +38453,7 @@ function hasDeoptOwnedChild(el: Element): boolean {
 	return false;
 }
 interface DeoptStamped {
-	[DEOPT_DESC]?: ElementDescriptor;
+	[DEOPT_DESC]?: ElementDescriptor | undefined;
 }
 function getDeoptDesc(n: Node): ElementDescriptor | undefined {
 	return (STAGED_DOM ? STAGED_DOM.view(n as Node & DeoptStamped) : (n as Node & DeoptStamped))[
@@ -37401,6 +38512,7 @@ function setDeoptDesc(el: Element, d: ElementDescriptor): void {
 	if (TRANSITION_JOURNAL !== null) {
 		TRANSITION_JOURNAL.push(JOURNAL_PROP, el, DEOPT_DESC, getDeoptDesc(el));
 	}
+	if (hydrating) activeHydration()?.saveDescriptor(el);
 	(STAGED_DOM ? STAGED_DOM.view(el as Element & DeoptStamped) : (el as Element & DeoptStamped))[
 		DEOPT_DESC
 	] = record;
@@ -39707,7 +40819,11 @@ export function bindSignalChild(
 			: null;
 	const cachedText =
 		prior?.text ??
-		(previous instanceof Text ? previous : textToken ? (getFirstChild(domParent) as Text) : null);
+		((previous as Text | null | undefined)?.nodeType === 3
+			? (previous as Text)
+			: textToken
+				? (getFirstChild(domParent) as Text)
+				: null);
 	if (!isSignalHandle(value)) {
 		const type = typeof value;
 		// An ordinary marker-bounded hole keeps textHoleUpdate's fast path: its
@@ -41770,6 +42886,261 @@ export function memo<P>(
 
 export const HMR: unique symbol = Symbol.for('octane.hmr');
 
+// Retain actual component lifetimes across a parent's compiled-template reset.
+// Copying hook maps would leave setters and subscriptions bound to dead scopes.
+// This cache exists only during development refresh; ordinary renders allocate none.
+interface HmrRetainedBlock {
+	path: unknown[];
+	block: Block;
+}
+interface HmrRetention {
+	root: Block;
+	entries: HmrRetainedBlock[];
+	claimed: HmrRetainedBlock[];
+}
+let HMR_RETENTION_ROOTS: WeakMap<Block, HmrRetention> | null = null;
+let HMR_ACTIVE_RETENTIONS = 0;
+let HMR_RETAINED_BLOCKS: WeakMap<Block, HmrRetention> | null = null;
+let HMR_RESTART_PRIMARIES: WeakSet<Block> | null = null;
+const HMR_COMPONENT_IDENTITY = /* @__PURE__ */ Symbol.for('octane.hmr.identity');
+
+/** Private compiler ABI: stamp module-time identity outside authored lexical bindings. */
+export function __stampHmrComponent<P>(fn: ComponentBody<P>, identity: string): ComponentBody<P> {
+	// Earlier module code can make a hoisted declaration non-extensible.
+	if (Object.isExtensible(fn)) (fn as any)[HMR_COMPONENT_IDENTITY] = identity;
+	return fn;
+}
+
+function hmrRetentionPath(scope: Scope, root: Scope): unknown[] | null {
+	const path = signalRetryPath(scope, root);
+	if (path === null) return null;
+	return path.map((token) => {
+		if (typeof token !== 'function') return token;
+		// Canonical exported wrappers retain their actual function identity. A
+		// private helper needs the compiler's authored identity across evaluations.
+		if ((token as any)[HMR] !== undefined) return token;
+		return (token as any)[HMR_COMPONENT_IDENTITY] ?? token;
+	});
+}
+
+function retainHmrDescendants(root: Block): void {
+	const existing = HMR_RETENTION_ROOTS?.get(root);
+	const entries = existing?.entries ?? [];
+	const fresh: HmrRetainedBlock[] = [];
+	const visit = (scope: Scope): void => {
+		if (scope.block.idState !== root.idState) return;
+		// A child already refreshing owns its descendants' paths relative to
+		// itself. Keep that pool intact instead of competing for them here.
+		const nested = scope === scope.block ? HMR_RETENTION_ROOTS?.get(scope.block) : undefined;
+		if (nested !== undefined) reparkHmrClaims(scope.block);
+		let body = scope.block.body;
+		while (body && (body as any)[MEMO_OWNER] === body) body = (body as any).type;
+		if (scope === scope.block && (body as any)[HMR] !== undefined) {
+			const path = hmrRetentionPath(scope, root);
+			if (path !== null) {
+				// A second save can revisit a claimed original in a pending primary.
+				// Keep one record per lifetime so settling cannot dispose its duplicate.
+				if (entries.some((entry) => entry.block === scope.block)) return;
+				// A nested refresh becomes this descendant's only retention owner.
+				// An ancestor may already have claimed it in its pending primary.
+				for (let parent = root.parentBlock; parent !== null; parent = parent.parentBlock) {
+					const ancestor = HMR_RETENTION_ROOTS?.get(parent);
+					if (ancestor === undefined) continue;
+					const claimed = ancestor.claimed.findIndex((entry) => entry.block === scope.block);
+					if (claimed !== -1) ancestor.claimed.splice(claimed, 1);
+					const parked = ancestor.entries.findIndex((entry) => entry.block === scope.block);
+					if (parked !== -1) ancestor.entries.splice(parked, 1);
+				}
+				const claimedIndex =
+					existing?.claimed.findIndex((entry) => entry.block === scope.block) ?? -1;
+				const entry =
+					claimedIndex === -1
+						? { path, block: scope.block }
+						: existing!.claimed.splice(claimedIndex, 1)[0];
+				entry.path = path;
+				entries.push(entry);
+				fresh.push(entry);
+			}
+		}
+		if (nested === undefined) forEachSubtreeChild(scope, visit);
+	};
+	forEachSubtreeChild(root, visit);
+	if (entries.length === 0) return;
+	const retention: HmrRetention = existing ?? { root, entries, claimed: [] };
+	if (existing === undefined) HMR_ACTIVE_RETENTIONS++;
+	(HMR_RETENTION_ROOTS ??= new WeakMap()).set(root, retention);
+	HMR_RETAINED_BLOCKS ??= new WeakMap();
+	for (const entry of fresh) HMR_RETAINED_BLOCKS.set(entry.block, retention);
+	// Descendants relinquish their compiled DOM, not their lifetime. The parent
+	// removes that DOM in one sweep, including borrowed and self-marked ranges.
+	for (let i = fresh.length - 1; i >= 0; i--) resetHmrBlock(fresh[i].block, false);
+}
+
+function findHmrRetention(block: Block): HmrRetention | undefined {
+	for (let parent: Block | null = block; parent !== null; parent = parent.parentBlock) {
+		const retention = HMR_RETENTION_ROOTS!.get(parent);
+		if (retention !== undefined) return retention;
+	}
+}
+
+function takeRetainedHmrBlock(
+	parent: Scope,
+	slot: number,
+	component: ComponentBody | string,
+	key: unknown,
+): Block | null {
+	if (!HMR_RETENTION_ROOTS) return null;
+	const nearest = findHmrRetention(parent.block);
+	if (nearest === undefined) return null;
+	let ancestor: Block | null = parent.block;
+	while (ancestor !== null) {
+		const retention = findHmrRetention(ancestor);
+		if (retention === undefined) return null;
+		ancestor = retention.root.parentBlock;
+		const path = hmrRetentionPath(parent, retention.root);
+		if (path === null) continue;
+		path.push('slot', slot, 'componentSlotSlot', undefined, component, key);
+		for (let i = 0; i < retention.entries.length; i++) {
+			const entry = retention.entries[i];
+			if (entry.path.length !== path.length || !entry.path.every((token, j) => token === path[j]))
+				continue;
+			if (retention !== nearest) {
+				const claimPath = hmrRetentionPath(parent, nearest.root);
+				if (claimPath === null) return null;
+				claimPath.push('slot', slot, 'componentSlotSlot', undefined, component, key);
+				// A nested refresh owns this claimed lifetime, including a later
+				// pending-primary restart. Older ancestor undos see it transferred.
+				entry.path = claimPath;
+			}
+			retention.entries.splice(i, 1);
+			nearest.claimed.push(entry);
+			HMR_RETAINED_BLOCKS!.delete(entry.block);
+			// Offscreen replacements carry their original retry coordinates. The
+			// claiming slot now owns this lifetime under a newly compiled parent.
+			const retryLocation = SIGNAL_RETRY_LOCATIONS.get(entry.block);
+			SIGNAL_RETRY_LOCATIONS.delete(entry.block);
+			if (isRecordingTransitionJournal()) {
+				journalUndo(() => {
+					if (HMR_RETENTION_ROOTS!.get(nearest.root) !== nearest || entry.block.disposed) return;
+					// A later nested refresh can transfer this lifetime to its own pool.
+					if (!nearest.claimed.includes(entry) && !nearest.entries.includes(entry)) return;
+					if (retryLocation === undefined) SIGNAL_RETRY_LOCATIONS.delete(entry.block);
+					else SIGNAL_RETRY_LOCATIONS.set(entry.block, retryLocation);
+					// A later sibling can abandon this claim. Park the actual lifetime
+					// before older parent-slot/creation undos tear down the failed tree.
+					if (parkHmrClaim(nearest, entry)) resetHmrBlock(entry.block, false);
+				});
+			}
+			return entry.block;
+		}
+	}
+	return null;
+}
+
+function parkHmrClaim(retention: HmrRetention, entry: HmrRetainedBlock): boolean {
+	const index = retention.claimed.indexOf(entry);
+	if (index === -1) return false;
+	retention.claimed.splice(index, 1);
+	if (entry.block.disposed) return false;
+	HMR_RETAINED_BLOCKS!.set(entry.block, retention);
+	retention.entries.push(entry);
+	return true;
+}
+
+function reparkHmrClaims(primary: Block): void {
+	const retention = findHmrRetention(primary);
+	if (retention === undefined) return;
+	const parked: HmrRetainedBlock[] = [];
+	for (const entry of retention.claimed.slice()) {
+		if (entry.block === primary || blockIsAncestorOf(primary, entry.block)) {
+			const nested = HMR_RETENTION_ROOTS!.get(entry.block);
+			if (nested !== undefined && nested !== retention) reparkHmrClaims(entry.block);
+			if (parkHmrClaim(retention, entry)) parked.push(entry);
+		}
+	}
+	if (parked.length !== 0 && isRecordingTransitionJournal()) {
+		journalUndo(() => {
+			if (HMR_RETENTION_ROOTS!.get(retention.root) !== retention) return;
+			// The restored primary's output was reset, not reversibly unmounted.
+			// Retry it through a fresh primary so restored slots cannot render a
+			// parked original in place or publish its old component coordinates.
+			(HMR_RESTART_PRIMARIES ??= new WeakSet()).add(primary);
+		});
+	}
+	// The old primary can tear down at commit, after the replacement has claimed
+	// these lifetimes. Remove its ownership edges now so that teardown cannot
+	// dispose a Block that has already moved into the replacement primary.
+	const detach = (scope: Scope): void => {
+		forEachSubtreeChild(scope, detach);
+		if (scope._slots === null) return;
+		for (const slot of scope._slots) {
+			const block = slot.block as Block | undefined;
+			if (block !== undefined && block !== null && HMR_RETAINED_BLOCKS!.has(block)) {
+				if (isRecordingTransitionJournal())
+					journalUndo(() => {
+						slot.block = block;
+					});
+				slot.block = null;
+			}
+		}
+	};
+	detach(primary);
+	// Mark every original lifetime before clearing ancestor output. Speculative
+	// components from the abandoned primary still receive ordinary teardown.
+	for (let i = parked.length - 1; i >= 0; i--) resetHmrBlock(parked[i].block, false);
+}
+
+function releaseHmrRetention(retention: HmrRetention): void {
+	if (HMR_RETENTION_ROOTS!.get(retention.root) !== retention) return;
+	HMR_RETENTION_ROOTS!.delete(retention.root);
+	HMR_ACTIVE_RETENTIONS--;
+	retention.claimed.length = 0;
+	const entries = retention.entries.splice(0);
+	for (const entry of entries) HMR_RETAINED_BLOCKS!.delete(entry.block);
+	for (const entry of entries) unmountBlock(entry.block, false);
+}
+
+function hmrRetentionPending(scope: Scope): boolean {
+	if ((scope as Block).rare?.trySlot?.pendingThenable != null) return true;
+	let pending = false;
+	forEachSubtreeChild(scope, (child) => {
+		if (!pending) pending = hmrRetentionPending(child);
+	});
+	return pending;
+}
+
+function settleHmrRetentionsAfterRootCommit(root: Block): void {
+	const visit = (scope: Scope): void => {
+		if (scope.block.idState !== root.idState) return;
+		if (scope === scope.block && HMR_RETENTION_ROOTS!.has(scope.block))
+			settleHmrRetentionAfterRender(scope.block);
+		forEachSubtreeChild(scope, visit);
+	};
+	// A successful root retry can memo-bail a refreshed owner. Its removed
+	// descendants still need the same accepted-commit cleanup as rendered owners.
+	visit(root);
+}
+
+function settleHmrRetentionAfterRender(block: Block): void {
+	const retention = findHmrRetention(block);
+	if (retention === undefined) return;
+	// Use the existing commit phase: a Suspense retry publishes its branch only
+	// after renderBlock returns. Unreached children remain eligible until then.
+	// An enclosing failed attempt may discard this action, so each completed
+	// render schedules its own. The record check makes committed repeats harmless.
+	enqueueEffectEventCommitAction(() => {
+		if (HMR_RETENTION_ROOTS!.get(retention.root) !== retention) return;
+		// A local boundary may finish while a later sibling still suspends the
+		// owning root request. Its next retry can restart this initial primary.
+		if (retention.root.idState.renderOwner?.wakeable != null) return;
+		if (!hmrRetentionPending(retention.root)) releaseHmrRetention(retention);
+	});
+}
+
+interface HmrWrapper {
+	readonly [HMR]?: HmrMeta;
+}
+
 interface HmrMeta {
 	fn: ComponentBody<any>;
 	liveBlocks: Set<Block>;
@@ -41789,11 +43160,19 @@ export function hmr<P>(fn: ComponentBody<P>): ComponentBody<P> {
 				__profileComponentSource(wrapper, incoming);
 			const incomingMeta = (incoming as any)[HMR] as HmrMeta | undefined;
 			const nextFn = incomingMeta ? incomingMeta.fn : incoming;
+			if (typeof nextFn !== 'function') return false;
+			for (const block of meta.liveBlocks) if (block.disposed) meta.liveBlocks.delete(block);
+			const previousABI = (meta.fn as any).__octaneReturnedOutput;
+			const nextABI = (nextFn as any).__octaneReturnedOutput;
+			if (
+				(previousABI !== undefined && previousABI !== true) ||
+				(nextABI !== undefined && nextABI !== true)
+			)
+				return false;
 			// Direct-template shorthand bodies and returned-output shorthand bodies
 			// use different slot-0 ABIs. Let the bundler invalidate/full-reload this
 			// module instead of reusing a live scope with the incompatible layout.
-			if ((meta.fn as any).__octaneReturnedOutput !== (nextFn as any).__octaneReturnedOutput)
-				return false;
+			if (previousABI !== nextABI && meta.liveBlocks.size !== 0) return false;
 			// A hot component may live in a single-element or inherited marker-elision
 			// regime. Reject only incoherent/detached ranges; the accepted path promotes
 			// a self-marked element to an HMR-owned comment range before removing it.
@@ -41802,6 +43181,7 @@ export function hmr<P>(fn: ComponentBody<P>): ComponentBody<P> {
 					meta.liveBlocks.delete(b);
 					continue;
 				}
+				if (HMR_RETAINED_BLOCKS?.has(b)) continue;
 				if (!hasResettableHmrRange(b)) return false;
 			}
 			meta.fn = nextFn;
@@ -41822,6 +43202,8 @@ export function hmr<P>(fn: ComponentBody<P>): ComponentBody<P> {
 					continue;
 				}
 				b.body = wrapper as unknown as ComponentBody<any>;
+				if (HMR_RETAINED_BLOCKS?.has(b)) continue;
+				retainHmrDescendants(b);
 				if (typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' && __OCTANE_PROFILE_ENABLED__)
 					__profileSchedule(b, 'hmr');
 				promoteHmrBlockRange(b);
@@ -41837,6 +43219,8 @@ export function hmr<P>(fn: ComponentBody<P>): ComponentBody<P> {
 		// update() if disposed.
 		if (scope === CURRENT_SCOPE && scope !== null) {
 			meta.liveBlocks.add(scope.block);
+			if (process.env.NODE_ENV !== 'production')
+				admitNativePublisherComponent(wrapper as HmrWrapper, scope);
 			// Propagate the wrapped body's return — a return-based (folded) component
 			// hands back a renderable descriptor that renderBlock must still mount.
 			return meta.fn(props as any, scope, extra);
@@ -43237,17 +44621,33 @@ function createTryBody(state: TrySlot, start: Node, end: Node): Block {
 function restartUncommittedTry(state: TrySlot): Block | null {
 	HIDDEN_REVEAL_ACTIONS?.delete(state);
 	const old = state.tryBlock!;
+	if (process.env.NODE_ENV !== 'production') HMR_RESTART_PRIMARIES?.delete(old);
 	const refs: SuspenseRefEntry[] = [];
 	collectVisibleSubtreeRefs(old, refs);
 	showTryBlock(state);
+	if (process.env.NODE_ENV !== 'production' && HMR_RETENTION_ROOTS) reparkHmrClaims(old);
 	state.tryBlock = null;
 	// Like a retry of a discarded hydration attempt; see supersedeSignalRetryOwners.
 	if (signalDocumentEnabled || state.idState.renderOwner?.signalOwner !== undefined)
 		handOverSignalRetryScope(old, old, state);
-	supersedeSignalRetryOwners(state);
+	supersedeSignalRetryOwners(state, old);
 	// Neither these refs nor the primary's captured effects ever committed.
-	// Its hook registrations still need real teardown (e.g. transition listeners).
-	withRefDetachSuppression(refs, () => unmountBlock(old));
+	// Its hook registrations still need real teardown (e.g. transition listeners),
+	// but a later root suspension must restore this partial primary intact.
+	withRefDetachSuppression(refs, () => {
+		const transaction = ROOT_RENDER_TRANSACTION;
+		if (
+			transaction !== null &&
+			!transaction.aborted &&
+			!ROOT_RENDER_ROLLBACK &&
+			old.idState.renderOwner === transaction.owner &&
+			!isCreatedInRootRender(transaction, old)
+		) {
+			deferRootTeardown(transaction, old, old.exclusiveMarkers, true, (scope, detachDom) =>
+				unmountBlock(scope.block, detachDom),
+			);
+		} else unmountBlock(old);
+	});
 	if (state.parentBlock.disposed || state.tryBlock !== null || state.branch !== 2) return null;
 	return mountHiddenTryBody(state);
 }
@@ -43273,6 +44673,8 @@ interface InitialSuspenseHydration {
 	idStart: number;
 	seedRaw: string | null;
 	nativeRaw: string | null;
+	/** A resumed native publisher still reconciles its live ancestor values. */
+	reconcileValues: boolean;
 	/** The captures changed before a dormant boundary activated; see staleServerValues. */
 	stale?: true;
 }
@@ -43321,8 +44723,8 @@ function takeInitialSuspenseHydration(
 		const start = getNextSibling(marker);
 		if (!hydration.isOpen(start)) return null;
 		const end = hydration.close(start);
-		const stash = typeof window !== 'undefined' ? (window as any).$OCTS : undefined;
 		const owner = marker as Comment;
+		const stash = hydration.streamedBoundaryStash(state);
 		let payload = initialStreamedPayloads?.get(owner);
 		if (payload === undefined) {
 			payload = {
@@ -43342,6 +44744,8 @@ function takeInitialSuspenseHydration(
 			prefix: state.parentBlock.idState.prefix + 'b' + boundaryId + '-',
 			next: 0,
 			renderOwner: state.parentBlock.idState.renderOwner,
+			dataOwner: state.parentBlock.idState.dataOwner,
+			externalNamespace: state.parentBlock.idState.externalNamespace,
 			signalState: state.parentBlock.idState.signalState,
 		};
 		return {
@@ -43349,6 +44753,7 @@ function takeInitialSuspenseHydration(
 			start,
 			end,
 			idStart: 0,
+			reconcileValues: hydration.reconcileValues,
 			...payload,
 			consume: () => {
 				initialStreamedPayloads?.delete(owner);
@@ -43390,6 +44795,8 @@ function takeInitialSuspenseHydration(
 		limit: idStart + count,
 		overflow: rootIds,
 		renderOwner: rootIds.renderOwner,
+		dataOwner: rootIds.dataOwner,
+		externalNamespace: rootIds.externalNamespace,
 	};
 	return {
 		metadata: [marker as ChildNode, ...sidecars],
@@ -43398,6 +44805,7 @@ function takeInitialSuspenseHydration(
 		idStart,
 		seedRaw,
 		nativeRaw,
+		reconcileValues: hydration.reconcileValues,
 	};
 }
 
@@ -43509,6 +44917,7 @@ function renderInitialSuspenseHydration(
 	hydration.protectRootAnchor(initial.end);
 	const previousHydration = currentHydration;
 	// Only the activation knows; a retry runs outside it, over the restored arm.
+	hydration.reconcileValues = initial.reconcileValues;
 	if (previousHydration?.staleServerValues || initial.stale)
 		hydration.staleServerValues = initial.stale = true;
 	if (previousHydration?.retryPresentation !== undefined)
@@ -43732,7 +45141,7 @@ function mountTry(state: TrySlot, claimsRetryOwners = false): void {
 		streamedBoundaryId = (
 			STAGED_DOM ? STAGED_DOM.view(adoptCursor as Comment) : (adoptCursor as Comment)
 		).data.slice(STREAM_SEED_COMMENT.length);
-		const stash = typeof window !== 'undefined' ? (window as any).$OCTS : undefined;
+		const stash = hydration.streamedBoundaryStash(state);
 		const raw = stash !== undefined ? stash[streamedBoundaryId] : undefined;
 		if (typeof raw === 'string') scopedSeeds = hydration.parseSeeds(raw);
 		const nativeRaw = stash?.[streamedBoundaryId + '$signals'];
@@ -43753,6 +45162,8 @@ function mountTry(state: TrySlot, claimsRetryOwners = false): void {
 			prefix: state.parentBlock.idState.prefix + 'b' + streamedBoundaryId + '-',
 			next: 0,
 			renderOwner: state.parentBlock.idState.renderOwner,
+			dataOwner: state.parentBlock.idState.dataOwner,
+			externalNamespace: state.parentBlock.idState.externalNamespace,
 			signalState: state.parentBlock.idState.signalState,
 		};
 	}
@@ -43792,8 +45203,9 @@ function mountTry(state: TrySlot, claimsRetryOwners = false): void {
 	let nativeAdoption: NativeAdoptionState | undefined;
 	if (hydrating && scopedNativeRaw !== undefined && !freshBoundary) {
 		const boundaryId = streamedBoundaryId!;
+		const streamedStash = hydration!.streamedBoundaryStash;
 		nativeAdoption = ownNativeAdoption(b, scopedNativeRaw, () => {
-			const stash = typeof window !== 'undefined' ? (window as any).$OCTS : undefined;
+			const stash = streamedStash(state);
 			if (stash !== undefined) {
 				delete stash[boundaryId + '$signals'];
 				delete stash[boundaryId];
@@ -44966,8 +46378,8 @@ function attemptHiddenReveal(
  * sibling suspends the root. The journal restores the hidden display and the
  * fallback's deferred unmount, so the boundary record must return with them.
  * Otherwise it treats the re-hidden primary as visible and orphans the fallback.
- * A restart disposes an uncommitted primary for good; the restored record then
- * names a disposed primary, which the next render or retry replaces.
+ * A restart defers the old primary's teardown, so rollback can restore the same
+ * partial DOM and hook registrations with this record.
  */
 function journalRootReveal(state: TrySlot): void {
 	journalObjectOnce(state);
@@ -45021,7 +46433,10 @@ function attemptHiddenRevealInner(
 	}
 	if (ROOT_RENDER_TRANSACTION !== null && !ROOT_RENDER_ROLLBACK) journalRootReveal(state);
 	const effectDeps = snapshotSubtreeEffectDeps(tryBlock);
-	if (reason === 'parent' && !RESUME_REPLAY && !state.hasResolved) {
+	if (
+		(reason === 'parent' && !RESUME_REPLAY && !state.hasResolved) ||
+		(process.env.NODE_ENV !== 'production' && HMR_RESTART_PRIMARIES?.has(tryBlock))
+	) {
 		// A completed speculative retry still is not a mount. New props must
 		// initialize state/ref/memo/reducer hooks from the current inputs. Keep
 		// promise replays and updates from inside the primary intact: discarding
@@ -51056,6 +52471,8 @@ export interface Root {
 }
 
 export interface RootOptions {
+	/** Trusted request document identity used to admit parent-owned external snapshots. */
+	externalSnapshots?: { readonly documentId: string } | undefined;
 	/** Adopt fixed native early bindings only when their matching hydration capture commits. */
 	bindingLeases?: readonly BindingHandle[];
 	/** Offer an existing textarea value owner for accepted presentation hydration, never early disposal. */
@@ -51654,6 +53071,7 @@ function makeRoot(
 		});
 	};
 	const renderOwner: RootRenderOwner = {
+		externalSnapshotDocumentId: errorOptions?.externalSnapshots?.documentId,
 		current: rootBlock,
 		signalOwner,
 		retry: noop,
@@ -52272,7 +53690,9 @@ function hydrateRootWithOutputHandler(
 	assertValidRootContainer(container);
 	// Leases, presentations and streamed arms below outlive the adoption pass.
 	installHydrationDriver();
-	startEarlySignalHydration(installEarlyControlBridge);
+	const ownerDocument =
+		container.nodeType === 9 ? (container as Document) : container.ownerDocument!;
+	startEarlySignalHydration(ownerDocument, installEarlyControlBridge);
 	let body: ComponentBody;
 	let props: any;
 	let rootKey: any = null;
@@ -52438,6 +53858,7 @@ function hydrateRootWithOutputHandler(
 					onCaughtError: rootOptions?.onCaughtError,
 					onUncaughtError: rootOptions?.onUncaughtError,
 					onRecoverableError: rootOptions?.onRecoverableError,
+					externalSnapshots: rootOptions?.externalSnapshots,
 				},
 	);
 	const owner = idState.renderOwner!;
@@ -52630,7 +54051,16 @@ export function createIndependentHydrateActivator(
 	body: ComponentBody,
 ): IndependentHydrateActivator {
 	return (context: IndependentHydrateActivationContext) => {
-		const { captures, element, manifest, signalOwner, initialDocumentSignals } = context;
+		const { captures, element, manifest, initialDocumentSignals } = context;
+		const signalOwner =
+			context.signalOwner ?? (signalDocumentEnabled ? documentSignalOwner(element) : undefined);
+		const documentOwner =
+			(signalOwner as SignalRendererOwnerIdentity | undefined)?.documentOwner ?? signalOwner;
+		// Publisher authority comes from this actual document's live bootstrap, never island markup.
+		const authority =
+			documentOwner === undefined
+				? undefined
+				: getNativeStreamedAuthority(documentOwner, element.ownerDocument);
 		// The island appends later intent here until this replay takes it or the
 		// root unmounts. Suspended retries replace the root block, not its owner.
 		let intents: HydrationReplayIntent[] | null =
@@ -52716,6 +54146,9 @@ export function createIndependentHydrateActivator(
 			signalInstancePrefix: manifest.boundaryId,
 			...(signalOwner === undefined ? {} : { signalOwner }),
 			...(initialDocumentSignals === undefined ? {} : { initialDocumentSignals }),
+			...(authority === undefined
+				? {}
+				: { externalSnapshots: { documentId: authority.documentId } }),
 		});
 		if (notify !== null) {
 			// A root that failed during hydrateRoot owes nothing; never capture for it.

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, startTransition } from 'octane';
 import { earlySignalBootstrapScript } from '../../src/server/early-signals.js';
+import type { EarlySignalHydrationDocument } from '../../src/signals/read-protocol.js';
 import {
 	applyHydrationControlCandidate,
 	captureHydrationControlCandidate,
@@ -45,6 +46,143 @@ describe('early hydration control handoff', () => {
 		input.remove();
 	});
 
+	function earlyDocument(): Document {
+		const frame = document.createElement('iframe');
+		document.body.append(frame);
+		cleanups.push(() => frame.remove());
+		const ownerDocument = frame.contentDocument!;
+		ownerDocument.head.innerHTML = earlySignalBootstrapScript();
+		new Function(
+			'document',
+			'globalThis',
+			ownerDocument.head.querySelector('script')!.textContent!,
+		)(ownerDocument, ownerDocument.defaultView);
+		return ownerDocument;
+	}
+
+	it('consumes a delayed hydration starter before declaration activation can reenter', async () => {
+		vi.resetModules();
+		const protocol = await import('../../src/signals/read-protocol.js');
+		let starts = 0;
+		protocol.startEarlySignalHydration(earlyDocument(), () => {
+			starts++;
+			if (starts === 1) protocol.registerEarlySignalHydration();
+		});
+		expect(starts).toBe(0);
+		protocol.registerEarlySignalHydration();
+		expect(starts).toBe(1);
+		protocol.registerEarlySignalHydration();
+		expect(starts).toBe(1);
+	});
+
+	it('claims both pending documents when their declaration module activates later', async () => {
+		const firstFrame = document.createElement('iframe');
+		const nextFrame = document.createElement('iframe');
+		document.body.append(firstFrame, nextFrame);
+		cleanups.push(() => {
+			firstFrame.remove();
+			nextFrame.remove();
+		});
+		const documents = [firstFrame.contentDocument!, nextFrame.contentDocument!];
+		const controls = documents.map((ownerDocument, index) => {
+			ownerDocument.head.innerHTML = earlySignalBootstrapScript();
+			const control = ownerDocument.createElement('input');
+			control.setAttribute(
+				'data-octane-signal-control',
+				JSON.stringify([1, `pending-${index}`, [['', 'draft', 'value']]]),
+			);
+			ownerDocument.body.append(control);
+			new Function(
+				'document',
+				'globalThis',
+				ownerDocument.head.querySelector('script')!.textContent!,
+			)(ownerDocument, ownerDocument.defaultView);
+			control.value = `typed in pending document ${index}`;
+			control.dispatchEvent(new InputEvent('input', { bubbles: true }));
+			return control;
+		});
+		vi.resetModules();
+		const protocol = await import('../../src/signals/read-protocol.js');
+		const earlyValues = await import('../../src/signals/early-values.js');
+		const starts: EarlySignalHydrationDocument[] = [];
+		const start = (ownerDocument: EarlySignalHydrationDocument) => {
+			starts.push(ownerDocument);
+			if (starts.length === 1) protocol.registerEarlySignalHydration();
+			earlyValues.installEarlyControlBridge(ownerDocument);
+		};
+		for (const ownerDocument of documents) protocol.startEarlySignalHydration(ownerDocument, start);
+		expect(starts).toEqual([]);
+		const signals = await import('../../src/signals/index.js');
+		expect(starts).toEqual(documents);
+		for (let index = 0; index < documents.length; index++) {
+			const owner = { scopeKey: `pending-${index}` };
+			earlyValues.associateSignalOwnerDocument(owner, documents[index]);
+			const draft$ = signals.__signalAt('g:draft', 'server', { key: 'draft' });
+			expect(signals.runWithSignalOwner(owner, () => draft$.get())).toBe(controls[index].value);
+		}
+		protocol.registerEarlySignalHydration();
+		expect(starts).toEqual(documents);
+	});
+
+	it('does not save an immediately activated hydration starter for later declarations', async () => {
+		vi.resetModules();
+		const protocol = await import('../../src/signals/read-protocol.js');
+		protocol.registerEarlySignalHydration();
+		const start = vi.fn();
+		protocol.startEarlySignalHydration(document, start);
+		expect(start).toHaveBeenCalledOnce();
+		protocol.registerEarlySignalHydration();
+		expect(start).toHaveBeenCalledOnce();
+	});
+
+	it('starts a pending document once even when many roots register its same bridge', async () => {
+		const frame = document.createElement('iframe');
+		document.body.append(frame);
+		cleanups.push(() => frame.remove());
+		const ownerDocument = frame.contentDocument!;
+		ownerDocument.head.innerHTML = earlySignalBootstrapScript();
+		new Function(
+			'document',
+			'globalThis',
+			ownerDocument.head.querySelector('script')!.textContent!,
+		)(ownerDocument, ownerDocument.defaultView);
+		vi.resetModules();
+		const protocol = await import('../../src/signals/read-protocol.js');
+		const start = vi.fn();
+		for (let root = 0; root < 100; root++) protocol.startEarlySignalHydration(ownerDocument, start);
+		protocol.registerEarlySignalHydration();
+		expect(start).toHaveBeenCalledOnce();
+	});
+
+	it('does not queue an ordinary document without an early-control mailbox', async () => {
+		const frame = document.createElement('iframe');
+		document.body.append(frame);
+		cleanups.push(() => frame.remove());
+		vi.resetModules();
+		const protocol = await import('../../src/signals/read-protocol.js');
+		const start = vi.fn();
+		protocol.startEarlySignalHydration(frame.contentDocument!, start);
+		protocol.registerEarlySignalHydration();
+		expect(start).not.toHaveBeenCalled();
+	});
+
+	it('drains the other pending documents before rethrowing the first bridge failure', async () => {
+		const documents = [earlyDocument(), earlyDocument()];
+		vi.resetModules();
+		const protocol = await import('../../src/signals/read-protocol.js');
+		const failure = new Error('first bridge failed');
+		const starts: EarlySignalHydrationDocument[] = [];
+		const start = (ownerDocument: EarlySignalHydrationDocument) => {
+			starts.push(ownerDocument);
+			if (ownerDocument === documents[0]) throw failure;
+		};
+		for (const ownerDocument of documents) protocol.startEarlySignalHydration(ownerDocument, start);
+		expect(() => protocol.registerEarlySignalHydration()).toThrow(failure);
+		expect(starts).toEqual(documents);
+		protocol.registerEarlySignalHydration();
+		expect(starts).toEqual(documents);
+	});
+
 	it('distinguishes an early clear from untouched server state', async () => {
 		const untouched = snapshotHydrationControl(input)!;
 		expect(untouched).toMatchObject({ value: 'server', editRevision: 0 });
@@ -58,7 +196,10 @@ describe('early hydration control handoff', () => {
 
 		// Exercise the actual inline script before this document has any module
 		// capture. Returning to the SSR value remains an edit, not untouched state.
-		const earlyDocument = document.implementation.createHTMLDocument('Pre-module input');
+		const earlyFrame = document.createElement('iframe');
+		document.body.append(earlyFrame);
+		cleanups.push(() => earlyFrame.remove());
+		const earlyDocument = earlyFrame.contentDocument!;
 		earlyDocument.head.innerHTML = earlySignalBootstrapScript();
 		const earlyInput = earlyDocument.createElement('input');
 		earlyInput.setAttribute(
@@ -67,89 +208,67 @@ describe('early hydration control handoff', () => {
 		);
 		earlyInput.value = 'server';
 		earlyDocument.body.append(earlyInput);
-		const keys = [
-			'__octaneEarlySignalControls',
-			'__octanePublishSignalControl',
-			'__octaneStreamedRenderer',
-			'__octaneStreamedSignalSelections',
-		];
-		const previous = keys.map((key) => Object.getOwnPropertyDescriptor(globalThis, key));
-		try {
-			for (const key of keys) Reflect.deleteProperty(globalThis, key);
-			new Function(
-				'document',
-				'globalThis',
-				earlyDocument.head.querySelector('script')!.textContent!,
-			)(earlyDocument, globalThis);
-			earlyInput.value = 'edited';
-			earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
-			earlyInput.value = 'server';
-			earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
-			vi.resetModules();
-			const capture = await import('../../src/hydration/event-capture.js');
-			const manualAdoption = capture.snapshotHydrationControl(earlyInput)!;
-			expect(manualAdoption.editRevision).toBeGreaterThan(0);
-			expect(capture.consumeHydrationControl(earlyInput, manualAdoption.revision)).toBe(true);
-			earlyInput.value = 'edit after manual adoption';
-			earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
-			expect(capture.snapshotHydrationControl(earlyInput)?.editRevision).toBeGreaterThan(0);
-			earlyInput.value = 'server';
-			earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
-			const candidate = capture.captureHydrationControlCandidate(earlyInput)!;
-			expect(candidate.snapshot.value).toBe('server');
-			expect(candidate.snapshot.editRevision).toBeGreaterThan(0);
-			earlyInput.value = 'later edit';
-			earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
-			expect(capture.applyHydrationControlCandidate(candidate, { value: 'stored' })).toBe(false);
-			const latest = capture.snapshotHydrationControl(earlyInput)!;
-			expect(latest.editRevision).toBeGreaterThan(candidate.snapshot.editRevision);
-			expect(capture.consumeHydrationControl(earlyInput, latest.revision)).toBe(true);
-			expect(capture.snapshotHydrationControl(earlyInput)?.editRevision).toBe(0);
-			earlyInput.value = 'edited after adoption';
-			earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
-			earlyInput.value = 'server';
-			earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
-			expect(capture.snapshotHydrationControl(earlyInput)?.revision).toBeGreaterThan(
-				latest.revision,
-			);
-			expect(capture.applyHydrationControlCandidate(candidate, { value: 'obsolete' })).toBe(false);
-			const signals = await import('../../src/signals/index.js');
-			const earlyValues = await import('../../src/signals/early-values.js');
-			const owner = { scopeKey: 'early-revision-document' };
-			earlyValues.registerSignalOwnerDocument(owner, earlyDocument);
-			const lateDraft$ = signals.__signalAt('g:draft', 'default', { key: 'draft' });
-			expect(signals.runWithSignalOwner(owner, () => lateDraft$.get())).toBe('server');
-			earlyInput.setAttribute(
-				'data-octane-signal-control',
-				JSON.stringify([1, owner.scopeKey, [['', 'shared-draft', 'value']]]),
-			);
-			const sibling = earlyInput.cloneNode() as HTMLInputElement;
-			earlyDocument.body.append(sibling);
-			earlyInput.value = 'older high revision';
-			earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
-			sibling.value = 'newer first edit';
-			sibling.dispatchEvent(new InputEvent('input', { bubbles: true }));
-			const sharedDraft$ = signals.__signalAt('g:shared-draft', 'default', { key: 'shared-draft' });
-			expect(signals.runWithSignalOwner(owner, () => sharedDraft$.get())).toBe('newer first edit');
-		} finally {
-			keys.forEach((key, index) => {
-				if (previous[index] === undefined) Reflect.deleteProperty(globalThis, key);
-				else Object.defineProperty(globalThis, key, previous[index]!);
-			});
-		}
+		new Function(
+			'document',
+			'globalThis',
+			earlyDocument.head.querySelector('script')!.textContent!,
+		)(earlyDocument, earlyDocument.defaultView);
+		earlyInput.value = 'edited';
+		earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
+		earlyInput.value = 'server';
+		earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
+		vi.resetModules();
+		const capture = await import('../../src/hydration/event-capture.js');
+		const manualAdoption = capture.snapshotHydrationControl(earlyInput)!;
+		expect(manualAdoption.editRevision).toBeGreaterThan(0);
+		expect(capture.consumeHydrationControl(earlyInput, manualAdoption.revision)).toBe(true);
+		earlyInput.value = 'edit after manual adoption';
+		earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
+		expect(capture.snapshotHydrationControl(earlyInput)?.editRevision).toBeGreaterThan(0);
+		earlyInput.value = 'server';
+		earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
+		const candidate = capture.captureHydrationControlCandidate(earlyInput)!;
+		expect(candidate.snapshot.value).toBe('server');
+		expect(candidate.snapshot.editRevision).toBeGreaterThan(0);
+		earlyInput.value = 'later edit';
+		earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
+		expect(capture.applyHydrationControlCandidate(candidate, { value: 'stored' })).toBe(false);
+		const latest = capture.snapshotHydrationControl(earlyInput)!;
+		expect(latest.editRevision).toBeGreaterThan(candidate.snapshot.editRevision);
+		expect(capture.consumeHydrationControl(earlyInput, latest.revision)).toBe(true);
+		expect(capture.snapshotHydrationControl(earlyInput)?.editRevision).toBe(0);
+		earlyInput.value = 'edited after adoption';
+		earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
+		earlyInput.value = 'server';
+		earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
+		expect(capture.snapshotHydrationControl(earlyInput)?.revision).toBeGreaterThan(latest.revision);
+		expect(capture.applyHydrationControlCandidate(candidate, { value: 'obsolete' })).toBe(false);
+		const signals = await import('../../src/signals/index.js');
+		const earlyValues = await import('../../src/signals/early-values.js');
+		const owner = { scopeKey: 'early-revision-document' };
+		earlyValues.registerSignalOwnerDocument(owner, earlyDocument);
+		const lateDraft$ = signals.__signalAt('g:draft', 'default', { key: 'draft' });
+		expect(signals.runWithSignalOwner(owner, () => lateDraft$.get())).toBe('server');
+		earlyInput.setAttribute(
+			'data-octane-signal-control',
+			JSON.stringify([1, owner.scopeKey, [['', 'shared-draft', 'value']]]),
+		);
+		const sibling = earlyInput.cloneNode() as HTMLInputElement;
+		earlyDocument.body.append(sibling);
+		earlyInput.value = 'older high revision';
+		earlyInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
+		sibling.value = 'newer first edit';
+		sibling.dispatchEvent(new InputEvent('input', { bubbles: true }));
+		const sharedDraft$ = signals.__signalAt('g:shared-draft', 'default', { key: 'shared-draft' });
+		expect(signals.runWithSignalOwner(owner, () => sharedDraft$.get())).toBe('newer first edit');
 	});
 
 	it('keeps edits the inline writer queued until the document owner joins or the module captures', async () => {
-		const keys = [
-			'__octaneEarlySignalControls',
-			'__octanePublishSignalControl',
-			'__octaneStreamedRenderer',
-			'__octaneStreamedSignalSelections',
-		];
-		const previous = keys.map((key) => Object.getOwnPropertyDescriptor(globalThis, key));
 		const shell = (scopeKey: string, nodeKey: string) => {
-			for (const key of keys) Reflect.deleteProperty(globalThis, key);
-			const shellDocument = document.implementation.createHTMLDocument('Streaming shell');
+			const shellFrame = document.createElement('iframe');
+			document.body.append(shellFrame);
+			cleanups.push(() => shellFrame.remove());
+			const shellDocument = shellFrame.contentDocument!;
 			shellDocument.head.innerHTML = earlySignalBootstrapScript();
 			const control = shellDocument.createElement('input');
 			control.setAttribute(
@@ -162,46 +281,39 @@ describe('early hydration control handoff', () => {
 				'document',
 				'globalThis',
 				shellDocument.head.querySelector('script')!.textContent!,
-			)(shellDocument, globalThis);
+			)(shellDocument, shellDocument.defaultView);
 			return { shellDocument, control };
 		};
 		const edit = (control: HTMLInputElement, value: string) => {
 			control.value = value;
 			control.dispatchEvent(new InputEvent('input', { bubbles: true }));
 		};
-		try {
-			// The client module has loaded, but nothing has hydrated or claimed the
-			// queue yet. An edit now must reach the first cell created once the
-			// document's engine-free owner joins.
-			const { shellDocument, control } = shell('loaded-module-document', 'draft');
-			vi.resetModules();
-			await import('octane');
-			const signals = await import('../../src/signals/index.js');
-			const earlyValues = await import('../../src/signals/early-values.js');
-			edit(control, 'typed after module load');
-			const owner = { scopeKey: 'loaded-module-document' };
-			earlyValues.registerSignalOwnerDocument(owner, shellDocument);
-			const draft$ = signals.__signalAt('g:draft', 'server', { key: 'draft' });
-			expect(signals.runWithSignalOwner(owner, () => draft$.get())).toBe('typed after module load');
+		// The client module has loaded, but nothing has hydrated or claimed the
+		// queue yet. An edit now must reach the first cell created once the
+		// document's engine-free owner joins.
+		const { shellDocument, control } = shell('loaded-module-document', 'draft');
+		vi.resetModules();
+		await import('octane');
+		const signals = await import('../../src/signals/index.js');
+		const earlyValues = await import('../../src/signals/early-values.js');
+		edit(control, 'typed after module load');
+		const owner = { scopeKey: 'loaded-module-document' };
+		earlyValues.registerSignalOwnerDocument(owner, shellDocument);
+		const draft$ = signals.__signalAt('g:draft', 'server', { key: 'draft' });
+		expect(signals.runWithSignalOwner(owner, () => draft$.get())).toBe('typed after module load');
 
-			// The module's control capture claims the document before anything read
-			// the queue. The edit it queued still counts as an early edit.
-			const claimed = shell('claimed-document', 'note');
-			edit(claimed.control, 'typed before capture');
-			edit(claimed.control, 'server');
-			vi.resetModules();
-			const capture = await import('../../src/hydration/event-capture.js');
-			capture.initializeHydrationEventCapture(claimed.shellDocument);
-			expect(capture.snapshotHydrationControl(claimed.control)).toMatchObject({
-				value: 'server',
-			});
-			expect(capture.snapshotHydrationControl(claimed.control)!.editRevision).toBeGreaterThan(0);
-		} finally {
-			keys.forEach((key, index) => {
-				if (previous[index] === undefined) Reflect.deleteProperty(globalThis, key);
-				else Object.defineProperty(globalThis, key, previous[index]!);
-			});
-		}
+		// The module's control capture claims the document before anything read
+		// the queue. The edit it queued still counts as an early edit.
+		const claimed = shell('claimed-document', 'note');
+		edit(claimed.control, 'typed before capture');
+		edit(claimed.control, 'server');
+		vi.resetModules();
+		const capture = await import('../../src/hydration/event-capture.js');
+		capture.initializeHydrationEventCapture(claimed.shellDocument);
+		expect(capture.snapshotHydrationControl(claimed.control)).toMatchObject({
+			value: 'server',
+		});
+		expect(capture.snapshotHydrationControl(claimed.control)!.editRevision).toBeGreaterThan(0);
 	});
 
 	it('seeds the same global writable cell from an edit before its module resolves', () => {

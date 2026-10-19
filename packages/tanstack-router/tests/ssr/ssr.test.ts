@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { createRequire } from 'node:module';
+import { realpathSync } from 'node:fs';
+import { getScriptPreloadAttrs } from '@tanstack/router-core';
 import { renderToStaticMarkup } from 'octane/server';
 import { attachRouterServerSsrUtils } from '@tanstack/router-core/ssr/server';
 import { getScrollRestorationScriptForRouter } from '@tanstack/router-core/scroll-restoration-script';
@@ -155,7 +158,7 @@ describe('@octanejs/tanstack-router SSR', () => {
 	// emits one script preload per matched route's manifest `preloads`, after
 	// meta and before route links. The oracle is real react-router rendering
 	// the same routes and manifest through react-dom/server.
-	it('emits manifest modulepreload links in the head as react-router does', async () => {
+	it("emits manifest modulepreload links using each binding's public core attributes", async () => {
 		const manifest: ServerManifest = {
 			routes: {
 				__root__: {
@@ -194,12 +197,33 @@ describe('@octanejs/tanstack-router SSR', () => {
 					.replace(/crossorigin=/, 'crossOrigin='),
 			);
 
-		expect(headTags(octaneHtml)).toEqual(headTags(reactHtml));
-		expect(headTags(octaneHtml).filter((tag) => tag.includes('modulepreload'))).toEqual([
-			'<link rel="modulepreload" href="/assets/entry.js" nonce="octane-csp">',
-			'<link rel="modulepreload" href="/assets/shared.js" crossOrigin="anonymous" nonce="octane-csp">',
-			'<link rel="modulepreload" href="/assets/index.js" nonce="octane-csp">',
-		]);
+		// The separately pinned React oracle may resolve a different core version.
+		// Each binding must preserve all attributes its own public core produces.
+		const require = createRequire(import.meta.url);
+		const reactRequire = createRequire(
+			realpathSync(require.resolve('@tanstack/react-router/package.json')),
+		);
+		const reactCore = reactRequire('@tanstack/router-core');
+		const expectedTags = (preloadAttrs: typeof getScriptPreloadAttrs) => [
+			'<meta property="csp-nonce" content="octane-csp">',
+			'<title>',
+			...[
+				'/assets/entry.js',
+				{ href: '/assets/shared.js', crossOrigin: 'anonymous' as const },
+				'/assets/index.js',
+			].map((link) => {
+				const attrs = { ...preloadAttrs(manifest, link), nonce: 'octane-csp' };
+				return `<link ${Object.entries(attrs)
+					.map(([name, value]) => `${name}="${value}"`)
+					.join(' ')}>`;
+			}),
+			'<link rel="icon" href="/favicon.ico" nonce="octane-csp">',
+		];
+		expect(headTags(octaneHtml)).toEqual(expectedTags(getScriptPreloadAttrs));
+		expect(headTags(octaneHtml)).toContain(
+			'<link rel="modulepreload" href="/assets/shared.js" fetchPriority="low" crossOrigin="anonymous" nonce="octane-csp">',
+		);
+		expect(headTags(reactHtml)).toEqual(expectedTags(reactCore.getScriptPreloadAttrs));
 	});
 
 	// Per TanStack/router PR #7847 snapshot 753f919e,

@@ -183,3 +183,5 @@ export type {
 	ValidateUseParamsOptions,
 	ValidateUseSearchOptions,
 } from './typePrimitives';
+
+export * from './ssr/routerRenderSnapshot';

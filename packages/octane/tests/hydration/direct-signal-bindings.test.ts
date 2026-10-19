@@ -27,6 +27,7 @@ import {
 } from '../../src/runtime.server.js';
 import * as Signals from '../../src/signals/index.js';
 import { loadCompiledFixtureSource, loadPlainHookFixtureSource } from '../_server-fixture.js';
+import { createStreamedDocument } from '../_server-stream.js';
 import {
 	__signalAt,
 	createScope,
@@ -1082,7 +1083,7 @@ export function App(props) @{ <div><p {...props.attrs}>{props.value}</p><Tag kin
 
 	it.each(
 		[false, true].flatMap((dev) =>
-			[false, true].flatMap((hydrate) =>
+			([false, true, 'iframe'] as const).flatMap((hydrate) =>
 				[false, true].flatMap((onlyChild) =>
 					['', 'initial'].map((initial) => ({ dev, hydrate, onlyChild, initial })),
 				),
@@ -1101,8 +1102,9 @@ export function App(props) @{ <div><p {...props.attrs}>{props.value}</p><Tag kin
 			const owner = createScope({ scopeKey: id });
 			const a$ = owner.signal$('a', 'alpha');
 			const b$ = owner.signal$('b', 'beta');
-			const container = document.createElement('div');
-			document.body.append(container);
+			const response = hydrate === 'iframe' ? createStreamedDocument() : undefined;
+			const container = response?.container ?? document.createElement('div');
+			if (response === undefined) document.body.append(container);
 			if (hydrate) {
 				const server = loadCompiledFixtureSource(source, {
 					id,
@@ -1161,6 +1163,7 @@ export function App(props) @{ <div><p {...props.attrs}>{props.value}</p><Tag kin
 			root.unmount();
 			root = undefined;
 			owner.dispose();
+			response?.dispose();
 		},
 	);
 

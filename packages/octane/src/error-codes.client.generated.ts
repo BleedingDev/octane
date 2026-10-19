@@ -317,6 +317,41 @@ type ClientErrorArguments = {
 	344: [];
 	345: [];
 	346: [];
+	347: [];
+	348: [];
+	349: [];
+	354: [];
+	355: [];
+	356: [];
+	357: [];
+	358: [];
+	359: [];
+	360: [];
+	361: [];
+	362: [];
+	363: [];
+	364: [];
+	365: [];
+	366: [];
+	367: [unknown];
+	368: [];
+	369: [];
+	370: [];
+	371: [];
+	372: [];
+	373: [];
+	374: [];
+	375: [];
+	376: [];
+	377: [];
+	378: [];
+	379: [];
+	380: [];
+	381: [];
+	382: [];
+	383: [];
+	384: [];
+	385: [];
 };
 
 export function formatClientError<Code extends keyof ClientErrorArguments>(
@@ -1385,6 +1420,130 @@ export function formatClientError<Code extends keyof ClientErrorArguments>(
 					'CompiledOutlet requires a compiled component function with no returned renderable.',
 					args,
 				);
+			case 347:
+				return formatDevErrorMessage(
+					'Invalid native external snapshot payload or runtime ABI.',
+					args,
+				);
+			case 348:
+				return formatDevErrorMessage(
+					'External snapshot contexts require unique registered codecs and every required ancestor provider.',
+					args,
+				);
+			case 349:
+				return formatDevErrorMessage(
+					'External snapshot authority does not match its publisher, document, boundary, or request.',
+					args,
+				);
+			case 354:
+				return formatDevErrorMessage(
+					'External snapshots require a trusted document ID configured on the host renderer.',
+					args,
+				);
+			case 355:
+				return formatDevErrorMessage(
+					'An external snapshot boundary cannot change publisher authority during its mounted lifetime.',
+					args,
+				);
+			case 356:
+				return formatDevErrorMessage(
+					'External snapshot boundary options must specify a native component, a snapshot transport, a finite positive timeout, and unique valid context keys.',
+					args,
+				);
+			case 357:
+				return formatDevErrorMessage(
+					'External snapshot and streamed signal document identities must match.',
+					args,
+				);
+			case 358:
+				return formatDevErrorMessage(
+					'External snapshot timeout must be finite and between 0 and 2147483647 milliseconds. Boundary timeouts must be greater than 0.',
+					args,
+				);
+			case 359:
+				return formatDevErrorMessage(
+					'A historical signal owner cannot change its module generation.',
+					args,
+				);
+			case 360:
+				return formatDevErrorMessage(
+					'The hot declaration no longer belongs to its native owner.',
+					args,
+				);
+			case 361:
+				return formatDevErrorMessage(
+					'The signal module generation is stale or already being installed.',
+					args,
+				);
+			case 362:
+				return formatDevErrorMessage('The hot declaration changed its native cell identity.', args);
+			case 363:
+				return formatDevErrorMessage(
+					'The hot signal generation has no current native publisher admission.',
+					args,
+				);
+			case 364:
+				return formatDevErrorMessage(
+					'Server function options accept only a genuine AbortSignal',
+					args,
+				);
+			case 365:
+				return formatDevErrorMessage('Server function timed out', args);
+			case 366:
+				return formatDevErrorMessage(
+					'An error occurred while trying to call the Octane server function.',
+					args,
+				);
+			case 367:
+				return formatDevErrorMessage('Server function call failed with status %s', args);
+			case 368:
+				return formatDevErrorMessage(
+					'The server does not support the requested result protocol',
+					args,
+				);
+			case 369:
+				return formatDevErrorMessage(
+					'The server function endpoint returned an empty response. Is the Octane server running?',
+					args,
+				);
+			case 370:
+				return formatDevErrorMessage('Server function returned an empty response', args);
+			case 371:
+				return formatDevErrorMessage('Server function canceled', args);
+			case 372:
+				return formatDevErrorMessage('Invalid one-shot server result', args);
+			case 373:
+				return formatDevErrorMessage('Invalid server result opening frame', args);
+			case 374:
+				return formatDevErrorMessage('A server result stream supports one consumer', args);
+			case 375:
+				return formatDevErrorMessage('Invalid server result continuation', args);
+			case 376:
+				return formatDevErrorMessage('Invalid server argument protocol', args);
+			case 377:
+				return formatDevErrorMessage('Invalid server arguments', args);
+			case 378:
+				return formatDevErrorMessage('Server function outcome is uncertain', args);
+			case 379:
+				return formatDevErrorMessage(
+					'A server-call batch requires independent reads and authority/document keys',
+					args,
+				);
+			case 380:
+				return formatDevErrorMessage('Server result limits must be positive safe integers', args);
+			case 381:
+				return formatDevErrorMessage(
+					'A server result frame cannot exceed the total response budget',
+					args,
+				);
+			case 382:
+				return formatDevErrorMessage('Invalid or out-of-order server result frame', args);
+			case 383:
+				return formatDevErrorMessage('Invalid server result frame', args);
+			case 384:
+				return formatDevErrorMessage('Server result ended without a terminal frame', args);
+			case 385:
+				return formatDevErrorMessage('Server result exceeded its response budget', args);
 			default:
 				return formatUnknownDevErrorMessage(code);
 		}

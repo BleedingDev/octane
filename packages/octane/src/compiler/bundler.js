@@ -1741,6 +1741,7 @@ class OctaneBundlerCompiler {
 				kind: 'compile',
 				...(out.lang === undefined ? null : { lang: out.lang }),
 				...(out.streamedSignals === true ? { streamedSignals: true } : null),
+				...(out.hotSignalModule === undefined ? null : { hotSignalModule: out.hotSignalModule }),
 				...(out.bindingConstants === undefined ? null : { bindingConstants: out.bindingConstants }),
 				renderer,
 				...(out.universalRuntime === undefined ? null : { universalRuntime: out.universalRuntime }),

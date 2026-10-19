@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import { act, hydrateRoot } from '../../src/index.js';
 import {
@@ -660,12 +661,23 @@ describe('streamed renderer delivery', () => {
 		});
 		const stream = await renderToReadableStream(server.StreamedSignalShell, {}, { injection });
 		const html = await new Response(stream).text();
-		expect(html.indexOf('version:1,frames:q')).toBeGreaterThanOrEqual(0);
-		expect(html.indexOf('version:1,frames:q')).toBeLessThan(
-			html.indexOf('globalThis.__octaneStreamedRenderer.receive'),
-		);
 		const container = document.createElement('div');
 		container.innerHTML = html;
+		const early: {
+			document: Document;
+			TextEncoder: typeof TextEncoder;
+			__octaneStreamedRenderer?: { frames: unknown[] };
+			__octaneStreamedSignalSelections?: { identities: unknown[] };
+		} = { document: document.implementation.createHTMLDocument(), TextEncoder };
+		for (const script of container.querySelectorAll('script:not([type="application/json"])')) {
+			runInNewContext(script.textContent!, early, { timeout: 1000 });
+		}
+		expect(early.__octaneStreamedSignalSelections?.identities).toEqual([state.identity]);
+		expect(early.__octaneStreamedRenderer?.frames).toMatchObject([
+			{ identity: state.identity, sequence: 0, kind: 'open' },
+			{ identity: state.identity, sequence: 1, kind: 'value', value: ['string', 'ready'] },
+			{ identity: state.identity, sequence: 2, kind: 'complete' },
+		]);
 		document.body.append(container);
 		const paragraph = container.querySelector('p');
 		const authored = container.querySelector('#authored-data');

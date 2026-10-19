@@ -1,6 +1,60 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { collectPreciseCalls } from './precise-work.mjs';
+import { collectPreciseCalls, productionFunctionCalls } from './precise-work.mjs';
+
+test('production diagnostics preserve function identities and counts without branch double-counting', () => {
+	const coverage = {
+		result: [
+			{
+				scriptId: '7',
+				url: 'http://localhost:5177/assets/app.js',
+				functions: [
+					{ functionName: '', ranges: [{ startOffset: 0, endOffset: 40, count: 1 }] },
+					{
+						functionName: 'render',
+						ranges: [
+							{ startOffset: 40, endOffset: 100, count: 3 },
+							{ startOffset: 60, endOffset: 80, count: 2 },
+						],
+					},
+					{ functionName: 'render', ranges: [{ startOffset: 100, endOffset: 120, count: 1 }] },
+					{ functionName: 'unused', ranges: [{ startOffset: 120, endOffset: 140, count: 0 }] },
+				],
+			},
+			{
+				scriptId: '8',
+				url: 'http://localhost:5177/driver.js',
+				functions: [{ functionName: 'driver', ranges: [{ count: 100 }] }],
+			},
+		],
+	};
+	assert.deepEqual(productionFunctionCalls(coverage), [
+		{
+			script: 'http://localhost:5177/assets/app.js',
+			scriptId: '7',
+			name: '',
+			startOffset: 0,
+			endOffset: 40,
+			count: 1,
+		},
+		{
+			script: 'http://localhost:5177/assets/app.js',
+			scriptId: '7',
+			name: 'render',
+			startOffset: 40,
+			endOffset: 100,
+			count: 3,
+		},
+		{
+			script: 'http://localhost:5177/assets/app.js',
+			scriptId: '7',
+			name: 'render',
+			startOffset: 100,
+			endOffset: 120,
+			count: 1,
+		},
+	]);
+});
 
 function browserDouble({ operationCount = 3, rejectHook, browserMessage } = {}) {
 	const events = [];

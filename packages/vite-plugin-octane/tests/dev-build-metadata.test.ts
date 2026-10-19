@@ -50,6 +50,68 @@ it('accepts initial signal discovery without reloading and keeps independent sli
 	});
 });
 
+it('renders external snapshots with the dev response document authority', async () => {
+	const root = mkdtempSync(join(tmpdir(), 'octane-dev-external-snapshot-'));
+	roots.push(root);
+	writeFileSync(
+		join(root, 'index.html'),
+		'<html><head><!--ssr-head--></head><body><div id="root"><!--ssr-body--></div></body></html>',
+	);
+	const builds = createClientBuildState();
+	const authority = { publisherBuildId: 'dev-external-publisher', runtimeABI: 1 as const };
+	const documents: string[] = [];
+	const Remote = () =>
+		serverRuntime.createElement('p', { children: 'External publisher rendered in development' });
+	const Boundary = serverRuntime.externalSnapshotBoundary({
+		authority,
+		component: Remote,
+		async snapshot(request, signal) {
+			documents.push(request.documentId);
+			const prepared = await serverRuntime.prepareExternalSnapshotRequest(
+				serverRuntime.serializeExternalSnapshotRequest(request),
+				{ authority, signal },
+			);
+			try {
+				return await serverRuntime.renderExternalSnapshot(Remote, prepared);
+			} finally {
+				await serverRuntime.releasePreparedExternalSnapshotRequest(prepared);
+			}
+		},
+	});
+	const vite = {
+		config: { root },
+		async ssrLoadModule(id: string) {
+			if (id === 'octane/server') return serverRuntime;
+			return { default: () => serverRuntime.createElement(Boundary, {}) };
+		},
+		transformIndexHtml: async (_path: string, html: string) => html,
+		ssrFixStacktrace() {},
+	};
+	const responseDocuments: string[] = [];
+	for (let responseIndex = 0; responseIndex < 2; responseIndex++) {
+		const firstRequest = documents.length;
+		const request = new Request('https://example.test/');
+		const response = await handleRenderRoute(
+			new RenderRoute({ path: '/', entry: '/src/Page.tsrx' }),
+			{ request, url: new URL(request.url), params: {}, state: new Map() } as any,
+			vite as any,
+			undefined,
+			undefined,
+			() => builds.metadata(),
+		);
+		expect(response.status).toBe(200);
+		const html = await response.text();
+		expect(html).toContain('<p>External publisher rendered in development</p>');
+		const data = JSON.parse(html.match(/<script id="__octane_data"[^>]*>([\s\S]*?)<\/script>/)![1]);
+		expect(documents.length).toBeGreaterThan(firstRequest);
+		expect(documents.slice(firstRequest)).toEqual(
+			Array(documents.length - firstRequest).fill(data.streamedSignals.documentId),
+		);
+		responseDocuments.push(data.streamedSignals.documentId);
+	}
+	expect(responseDocuments[1]).not.toBe(responseDocuments[0]);
+});
+
 it.each([false, true])(
 	'serializes first-load compiler discovery without enabling absent features (%s)',
 	async (independent) => {

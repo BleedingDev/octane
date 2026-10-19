@@ -284,13 +284,13 @@ catalogs:
     '@tanstack/devtools': 0.14.2
     '@tanstack/devtools-event-bus': 0.4.2
     '@tanstack/devtools-event-client': 0.5.0
-    '@tanstack/history': 1.162.4
+    '@tanstack/history': 1.162.5
     '@tanstack/query-core': ^5.102.8
     '@tanstack/react-query': ^5.102.8
     '@tanstack/react-router': 1.170.41
     '@tanstack/react-store': ^0.11.1
     '@tanstack/react-virtual': 3.14.5
-    '@tanstack/router-core': 1.171.34
+    '@tanstack/router-core': https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz
     '@tanstack/store': ^0.9.3
     '@tanstack/virtual-core': 3.17.3
     '@wagmi/connectors': 8.2.0
@@ -636,7 +636,6 @@ minimumReleaseAgeExclude:
   - '@tanstack/react-virtual@3.14.12'
   - '@tanstack/virtual-core@3.17.10'
   - '@tanstack/react-router@1.170.41'
-  - '@tanstack/router-core@1.171.34'
   - '@tanstack/start-client-core@1.170.34'
   - '@tanstack/start-server-core@1.169.39'
   - '@tanstack/start-storage-context@1.167.36'

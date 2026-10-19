@@ -165,7 +165,7 @@ export function generateFiles(catalog) {
 // independent-hydration-protocol.ts shares its manifest message with
 // hydration/independent-island.ts, so it is covered with the hydration modules.
 const COVERED_MODULE =
-	/^(?:signals\/[^/]+|hydration\/[^/]+|dom-bindings?(?:-[a-z-]+)?|independent-hydration-protocol)\.ts$/;
+	/^(?:signals\/[^/]+|hydration\/[^/]+|dom-bindings?(?:-[a-z-]+)?|server-rpc-protocol|independent-hydration-protocol|external-snapshot-(?:protocol|budget)|server\/external-snapshot-preparation|static\/node)\.ts$/;
 // Surfaces follow static import reachability from the package entries: modules
 // reachable only from client entries are "client"; only from server entries
 // (runtime.server.ts, octane/server, octane/signals/server, ...) are "server".
@@ -179,6 +179,10 @@ const COVERED_MODULE =
 // repeats those dev-only messages. Misclassifying a module is therefore a
 // catalog-metadata error, never a runtime one, which is why unlisted covered
 // modules default to "shared".
+// These RPC transports preserve server-provided error messages. Validate
+// their catalog calls without extending the complete construction audit to
+// foreign HTTP bodies and result frames.
+const FORMATTER_ONLY_MODULES = new Set(['server-rpc-client.ts', 'server-rpc-stream-client.ts']);
 const CLIENT_ONLY_MODULES = new Set([
 	'dom-binding-claims.ts',
 	'dom-binding-classes.ts',
@@ -196,9 +200,18 @@ const CLIENT_ONLY_MODULES = new Set([
 	'signals/native-read-retry.ts',
 	'signals/transition-candidate.ts',
 ]);
-const SERVER_ONLY_MODULES = new Set(['signals/native-read-server.ts', 'signals/server.ts']);
+const SERVER_ONLY_MODULES = new Set([
+	'static/node.ts',
+	'signals/native-read-server.ts',
+	'signals/server.ts',
+	'server/external-snapshot-preparation.ts',
+]);
 
 export function frameworkErrorSurface(filename) {
+	if (FORMATTER_ONLY_MODULES.has(filename)) {
+		// The server batch handler also consumes the shared streamed-result reader.
+		return filename === 'server-rpc-client.ts' ? 'client' : 'shared';
+	}
 	if (filename === 'runtime.ts') return 'client';
 	if (filename === 'runtime.server.ts') return 'server';
 	if (!COVERED_MODULE.test(filename)) return undefined;
@@ -218,7 +231,15 @@ export function validateRuntimeUsages(catalog, sources) {
 	}
 	const errorClasses = collectErrorClasses(covered.map(([, sourceFile]) => sourceFile));
 	for (const [filename, sourceFile, surface] of covered) {
-		validateFrameworkErrorConstruction(filename, sourceFile, surface, catalog, used, errorClasses);
+		validateFrameworkErrorConstruction(
+			filename,
+			sourceFile,
+			surface,
+			catalog,
+			used,
+			errorClasses,
+			!FORMATTER_ONLY_MODULES.has(filename),
+		);
 	}
 	for (const [rawCode, entry] of Object.entries(catalog.codes)) {
 		if (entry.status !== 'active') continue;
@@ -454,6 +475,7 @@ function validateFrameworkErrorConstruction(
 	catalog,
 	used,
 	errorClasses,
+	checkConstructions,
 ) {
 	const formatterName = surface === 'server' ? 'formatServerError' : 'formatClientError';
 	const formatterRuntime = surface === 'server' ? 'server' : 'client';
@@ -525,11 +547,12 @@ function validateFrameworkErrorConstruction(
 
 	function visit(node) {
 		if (is.isCallExpression(node)) {
-			if (node.expression.kind === SyntaxKind.SuperKeyword) validateSuperCall(node);
-			else validateFormatterCall(node);
+			if (node.expression.kind === SyntaxKind.SuperKeyword) {
+				if (checkConstructions) validateSuperCall(node);
+			} else validateFormatterCall(node);
 		}
 		const isErrorCall = is.isCallExpression(node) || is.isNewExpression(node);
-		if (isErrorCall && is.isIdentifier(node.expression)) {
+		if (checkConstructions && isErrorCall && is.isIdentifier(node.expression)) {
 			const messageIndex = errorClasses.get(node.expression.text);
 			if (messageIndex !== undefined && messageIndex !== null) {
 				validateMessage(node, node.expression.text, node.arguments?.[messageIndex]);
@@ -543,7 +566,7 @@ function validateFrameworkErrorConstruction(
 
 function runtimeSources() {
 	const sourceDir = join(root, 'packages/octane/src');
-	const filenames = ['.', 'signals', 'hydration'].flatMap((directory) =>
+	const filenames = ['.', 'signals', 'hydration', 'server', 'static'].flatMap((directory) =>
 		readdirSync(join(sourceDir, directory))
 			.filter((name) => name.endsWith('.ts') && !name.endsWith('.d.ts'))
 			.map((name) => (directory === '.' ? name : `${directory}/${name}`)),

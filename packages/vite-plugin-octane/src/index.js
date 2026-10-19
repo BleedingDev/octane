@@ -768,7 +768,13 @@ export function octane(inlineOptions = {}) {
 				if (visitedChunks.has(chunk.fileName)) return;
 				visitedChunks.add(chunk.fileName);
 				for (const [id, module] of Object.entries(chunk.modules)) {
-					if (module.renderedLength !== 0 && !staticModules.has(id)) {
+					// Rolldown injects its shared interop helpers after collecting the
+					// source module graph; they do not execute a user entry.
+					if (
+						module.renderedLength !== 0 &&
+						!staticModules.has(id) &&
+						id !== '\0rolldown/runtime.js'
+					) {
 						this.error(
 							`Octane hydration chunking would execute an unrelated module early: ${id}. ` +
 								'Keep the hydration entry and its static dependencies separate from user entries.',
@@ -878,7 +884,7 @@ export function octane(inlineOptions = {}) {
 		 */
 		transform(code, id, options) {
 			if (!isBuild || options?.ssr || !is_octane_module_path(id.split('?')[0])) return null;
-			if (!code.includes('_$__serverRpc(')) return null;
+			if (!code.includes('_$__serverRpc(') && !code.includes('_$__serverRpcStream(')) return null;
 			const file = id.split('?')[0];
 			const relative = path.relative(root, file);
 			const isWithinRoot =

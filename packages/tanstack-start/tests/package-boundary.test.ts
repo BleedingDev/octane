@@ -154,6 +154,7 @@ export function hydrateStart() {
 			files: Array<string>;
 			dependencies?: Record<string, string>;
 			peerDependencies?: Record<string, string>;
+			peerDependenciesMeta?: Record<string, { optional?: boolean }>;
 			devDependencies?: Record<string, string>;
 		};
 		const dependencyNames = Object.keys({
@@ -168,7 +169,10 @@ export function hydrateStart() {
 				forbiddenPackagePrefixes.some((prefix) => name.startsWith(prefix)),
 			),
 		).toEqual([]);
-		expect(manifest.dependencies?.['@octanejs/tanstack-router']).toBe('workspace:*');
+		expect(manifest.peerDependencies?.['@octanejs/tanstack-router']).toBe('workspace:*');
+		expect(manifest.peerDependenciesMeta?.['@octanejs/tanstack-router']?.optional).not.toBe(true);
+		expect(manifest.dependencies).not.toHaveProperty('@octanejs/tanstack-router');
+		expect(manifest.devDependencies?.['@octanejs/tanstack-router']).toBe('workspace:*');
 
 		const publishedFiles = [
 			manifestPath,
