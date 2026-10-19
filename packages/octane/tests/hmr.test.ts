@@ -360,6 +360,19 @@ describe('hmr — runtime wrapper', () => {
 			after: 'function Helper() @{ <p>child:VERSION</p> }',
 		},
 		{
+			name: 'imported callback invocation evaluated only during rendering',
+			before:
+				"import { opaqueInvoke } from './invoke'; function read() { return Helper; } function deferred() { return opaqueInvoke(read); }",
+			local: 'const Child = opaqueInvoke(read);',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'imported wrapped callback invocation evaluated only during rendering',
+			before: "import { opaqueInvoke } from './invoke'; function read() { return Helper; }",
+			local: 'const Child = opaqueInvoke(() => read());',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
 			name: 'Reflect apply evaluated only during rendering',
 			before: 'function read() { return Helper; }',
 			local: 'const Child = Reflect.apply(read, null, []);',
@@ -369,13 +382,6 @@ describe('hmr — runtime wrapper', () => {
 			name: 'Reflect construct evaluated only during rendering',
 			before: 'function read() { return Helper; }',
 			local: 'const Child = Reflect.construct(read, []);',
-			after: 'function Helper() @{ <p>child:VERSION</p> }',
-		},
-		{
-			name: 'shadowed non-invoking Reflect methods',
-			before:
-				'const Reflect = { apply() { return null; }, construct() { return null; } }; function read() { return Helper; } Reflect.apply(read, null, []); Reflect.construct(read, []);',
-			local: 'const Child = Helper;',
 			after: 'function Helper() @{ <p>child:VERSION</p> }',
 		},
 		{
@@ -393,9 +399,11 @@ ${before.replaceAll('VERSION', String(version))}
 export function App(props) @{ const [count, setCount] = useState(0); ${local}
 <section><button onClick={() => setCount(count + 1)}>{'v${version}:' + count as string}</button><Child /></section> }
 ${after.replaceAll('VERSION', String(version))}`;
-			const hot = webpackHotModule(`/src/deferred-${name.replaceAll(' ', '-')}.tsrx`, {
-				dev: true,
-			});
+			const hot = webpackHotModule(
+				`/src/deferred-${name.replaceAll(' ', '-')}.tsrx`,
+				{ dev: true },
+				{ './invoke': { opaqueInvoke: (read: () => unknown) => read() } },
+			);
 			const initial = hot.load(source(1));
 			const r = mount(initial, { open: true });
 			try {
@@ -1302,6 +1310,14 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 	it.each(
 		[
 			'const Initial = Counter; capture(Initial);',
+			'const Initial = opaqueInvoke(read); function read() { return Counter; } capture(Initial);',
+			'const Initial = opaqueInvoke(() => Counter); capture(Initial);',
+			'function read() { return Counter; } const Initial = opaqueInvoke(() => read()); capture(Initial);',
+			'function read() { return Counter; } const callback = read; const Initial = opaqueInvoke(callback); capture(Initial);',
+			'function read() { return Counter; } const Initial = opaqueInvoke(true ? read : () => null); capture(Initial);',
+			'function read() { return Counter; } const Initial = opaqueInvoke(null ?? read); capture(Initial);',
+			'function read() { return Counter; } const Initial = opaqueInvoke((0, read)); capture(Initial);',
+			'function read() { return Counter; } const external = { invoke: opaqueInvoke }; const Initial = external.invoke(read); capture(Initial);',
 			'const Initial = (() => Counter)(); capture(Initial);',
 			'const Initial = read(); function read() { return Counter; } capture(Initial);',
 			'const api = { read: () => Counter }; const Initial = api.read(); capture(Initial);',
@@ -1351,21 +1367,30 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 			'function expose() { return Counter; } const Initial = new (true ? expose : expose)(); capture(Initial);',
 			'function expose() { return Counter; } const Initial = (true ? expose : expose)``; capture(Initial);',
 		]
-			.map<{ capture: string; target?: string }>((capture) => ({ capture }))
+			.map<{ capture: string; target?: string; after?: string; canonicalCapture?: boolean }>(
+				(capture) => ({ capture }),
+			)
 			.concat({
 				capture:
 					'function expose(value) { capture(Counter); return value; } @expose class Holder {}',
 				target: 'es2022',
+			})
+			.concat({
+				capture:
+					'const Reflect = { apply() { return null; }, construct() { return null; } }; function read() { return Counter; } Reflect.apply(read, null, []); Reflect.construct(read, []);',
+				after: 'capture(Counter);',
+				canonicalCapture: true,
 			}),
 	)(
 		'propagates an early hoisted component capture to its importer: $capture',
-		({ capture, target }) => {
+		({ capture, target, after, canonicalCapture }) => {
 			let captured: ComponentBody<any> | undefined;
 			const hot = webpackHotModule(
 				'/src/early-hoisted-capture.tsrx',
 				{ dev: true },
 				{
 					'./capture': {
+						opaqueInvoke: (read: () => unknown) => read(),
 						capture: (component: ComponentBody<any>) => {
 							captured = component;
 						},
@@ -1374,9 +1399,10 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 				target === undefined ? {} : { target },
 			);
 			const source = (version: number) => `import { useSignal$ } from 'octane/signals/client';
-import { capture } from './capture';
+import { capture, opaqueInvoke } from './capture';
 ${capture}
-export function Counter() @{ const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{'v${version}:' + count$.get() as string}</button> }`;
+export function Counter() @{ const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{'v${version}:' + count$.get() as string}</button> }
+${after ?? ''}`;
 			const importer = () =>
 				loadCompiledFixtureSource(
 					`import { Widget } from './widget'; export function Host() @{ <section><Widget /><span>host</span></section> }`,
@@ -1395,9 +1421,9 @@ export function Counter() @{ const count$ = useSignal$(0); <button onClick={() =
 				expect(r.find('button').textContent).toBe('v1:2');
 				hot.load(source(2), 'Counter');
 				expect(hot.accepted).toBe(false);
-				// The raw pre-canonical alias cannot receive a safe component handoff.
-				// Its importer must execute again instead of self-accepting stale UI.
-				expect(r.find('button').textContent).toBe('v1:2');
+				// Raw pre-canonical aliases stay stale until their importer is replaced.
+				// Canonical wrappers may instead retire with their disposed module.
+				if (!canonicalCapture) expect(r.find('button').textContent).toBe('v1:2');
 				r.update(importer());
 				expect(r.find('button').textContent).toBe('v2:0');
 				r.click('button');

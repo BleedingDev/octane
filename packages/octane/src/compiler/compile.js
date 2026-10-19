@@ -9921,6 +9921,32 @@ function collectHotComponentExportFlows(input) {
 				} else break;
 			}
 			const callPosition = position ?? node.start;
+			// An unresolved callee may invoke a passed callback immediately. Follow
+			// callable values, not arbitrary payload objects, without proving its body.
+			const callbacks = [...(tagged ? node.quasi.expressions : node.arguments)];
+			const seenCallbacks = new Set();
+			while (callbacks.length) {
+				const callback = unwrapTsExpr(callbacks.pop());
+				if (!callback || seenCallbacks.has(callback)) continue;
+				seenCallbacks.add(callback);
+				if (rootReference(callback)) {
+					callbacks.push(
+						bindings.get(callback.name)?.item.init ?? opaqueDeclarations.get(callback.name),
+					);
+				} else if (callback.type === 'SequenceExpression') {
+					callbacks.push(callback.expressions.at(-1));
+				} else if (callback.type === 'ConditionalExpression') {
+					callbacks.push(callback.consequent, callback.alternate);
+				} else if (callback.type === 'LogicalExpression') {
+					callbacks.push(callback.left, callback.right);
+				} else if (
+					['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(
+						callback.type,
+					) &&
+					callPosition < aggregateStart(callback)
+				)
+					return true;
+			}
 			// A selected callee can execute either reachable local closure.
 			if (
 				(callee?.type === 'ConditionalExpression' || callee?.type === 'LogicalExpression') &&
