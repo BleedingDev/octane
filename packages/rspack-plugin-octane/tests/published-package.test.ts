@@ -268,6 +268,8 @@ export async function run(container) {
 			output: {
 				path: outputPath,
 				filename,
+				// eval does not supply the executing script's URL for automatic publicPath.
+				publicPath: target === 'web' ? '/' : undefined,
 				library:
 					target === 'node'
 						? { type: 'commonjs2' }

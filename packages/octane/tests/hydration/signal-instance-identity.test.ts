@@ -344,7 +344,7 @@ export function App(props) @{
 			const { bootstrapStreamedSignalHydration } =
 				await import('../../src/hydration/streamed-signals.js');
 			const { loadCompiledFixtureSource } = await import('../_server-fixture.js');
-			const { activateStreamedMarkup, resetStreamRuntimeGlobals } =
+			const { activateStreamedMarkup, createStreamedDocument } =
 				await import('../_server-stream.js');
 			const { drainProducers } = await import('../_fixtures/signals-async-controls.js');
 			// The module never imports signals, so a returned fragment keeps its
@@ -366,8 +366,8 @@ export function App(props) @{ <main>@try { <Row show={true} query={props.query}/
 			const query = (load: () => Promise<string>) => (key: string) =>
 				signals.__queryAt('i:returned-fragment-query', () => key, load);
 			const streamedSignals = { buildId: 'returned-fragment', documentId: 'returned-fragment' };
-			const container = document.createElement('div');
-			document.body.append(container);
+			const responseDocument = createStreamedDocument();
+			const { container } = responseDocument;
 			let root: ReturnType<typeof client.hydrateRoot> | undefined;
 			let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 			try {
@@ -382,7 +382,10 @@ export function App(props) @{ <main>@try { <Row show={true} query={props.query}/
 				const result = container.querySelector('output')!;
 				expect(result.textContent).toBe('server result');
 				const errors: unknown[] = [];
-				hydration = bootstrapStreamedSignalHydration(streamedSignals);
+				hydration = bootstrapStreamedSignalHydration({
+					...streamedSignals,
+					document: responseDocument.document,
+				});
 				root = client.hydrateRoot(
 					container,
 					clientModule.App,
@@ -403,7 +406,7 @@ export function App(props) @{ <main>@try { <Row show={true} query={props.query}/
 				root?.unmount();
 				hydration?.dispose();
 				container.remove();
-				resetStreamRuntimeGlobals();
+				responseDocument.dispose();
 			}
 		},
 	);
@@ -1017,7 +1020,7 @@ export function App(props) @{ <main>@for (const item of props.items; key item) {
 			const { bootstrapStreamedSignalHydration } =
 				await import('../../src/hydration/streamed-signals.js');
 			const { loadCompiledFixtureSource } = await import('../_server-fixture.js');
-			const { activateStreamedMarkup, resetStreamRuntimeGlobals } =
+			const { activateStreamedMarkup, createStreamedDocument } =
 				await import('../_server-stream.js');
 			const { drainProducers } = await import('../_fixtures/signals-async-controls.js');
 			// Dynamic JSX values defer their whole element until they render. The
@@ -1048,8 +1051,8 @@ export function App(props) @{
 				query: (key: string) => signals.__queryAt('i:scoped-value-call-sites', () => key, load),
 			});
 			const streamedSignals = { buildId: 'scoped-value-sites', documentId: 'scoped-value-sites' };
-			const container = document.createElement('div');
-			document.body.append(container);
+			const responseDocument = createStreamedDocument();
+			const { container } = responseDocument;
 			let root: ReturnType<typeof client.hydrateRoot> | undefined;
 			let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 			try {
@@ -1063,7 +1066,10 @@ export function App(props) @{
 				expect(results.map((node) => node.textContent)).toEqual(['server left', 'server right']);
 				expect(controls.map((node) => node.value)).toEqual(['left', 'right']);
 				const errors: unknown[] = [];
-				hydration = bootstrapStreamedSignalHydration(streamedSignals);
+				hydration = bootstrapStreamedSignalHydration({
+					...streamedSignals,
+					document: responseDocument.document,
+				});
 				root = client.hydrateRoot(container, clientModule.App, props(browserLoad), {
 					signalOwner: hydration.signalOwner,
 					onRecoverableError: (error) => errors.push(error),
@@ -1083,7 +1089,7 @@ export function App(props) @{
 				root?.unmount();
 				hydration?.dispose();
 				container.remove();
-				resetStreamRuntimeGlobals();
+				responseDocument.dispose();
 			}
 		},
 	);
@@ -1153,7 +1159,7 @@ export function App(props) @{
 			const { bootstrapStreamedSignalHydration } =
 				await import('../../src/hydration/streamed-signals.js');
 			const { loadCompiledFixtureSource } = await import('../_server-fixture.js');
-			const { activateStreamedMarkup, resetStreamRuntimeGlobals } =
+			const { activateStreamedMarkup, createStreamedDocument } =
 				await import('../_server-stream.js');
 			const { drainProducers } = await import('../_fixtures/signals-async-controls.js');
 			// Importing signals compiles a returning Row as a plain function whose
@@ -1181,8 +1187,8 @@ export function App(props) @{ <main>@try { <Row show={props.show} load={props.lo
 			const serverLoad = vi.fn(async () => 'server result');
 			const browserLoad = vi.fn(async () => 'browser result');
 			const streamedSignals = { buildId: 'returned-signal', documentId: 'returned-signal' };
-			const container = document.createElement('div');
-			document.body.append(container);
+			const responseDocument = createStreamedDocument();
+			const { container } = responseDocument;
 			let root: ReturnType<typeof client.hydrateRoot> | undefined;
 			let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 			try {
@@ -1197,7 +1203,10 @@ export function App(props) @{ <main>@try { <Row show={props.show} load={props.lo
 				const result = container.querySelector('output')!;
 				expect(result.textContent).toBe('server result');
 				const errors: unknown[] = [];
-				hydration = bootstrapStreamedSignalHydration(streamedSignals);
+				hydration = bootstrapStreamedSignalHydration({
+					...streamedSignals,
+					document: responseDocument.document,
+				});
 				root = client.hydrateRoot(
 					container,
 					clientModule.App,
@@ -1218,7 +1227,7 @@ export function App(props) @{ <main>@try { <Row show={props.show} load={props.lo
 				root?.unmount();
 				hydration?.dispose();
 				container.remove();
-				resetStreamRuntimeGlobals();
+				responseDocument.dispose();
 			}
 		},
 	);
@@ -1250,7 +1259,7 @@ export function App(props) @{ <main>@try { <Row show={props.show} load={props.lo
 			const { bootstrapStreamedSignalHydration } =
 				await import('../../src/hydration/streamed-signals.js');
 			const { loadCompiledFixtureSource } = await import('../_server-fixture.js');
-			const { activateStreamedMarkup, resetStreamRuntimeGlobals } =
+			const { activateStreamedMarkup, createStreamedDocument } =
 				await import('../_server-stream.js');
 			const { drainProducers } = await import('../_fixtures/signals-async-controls.js');
 			// Every row reads the same query site and key. Only its keyed list item
@@ -1276,8 +1285,8 @@ export function App(props) @{ <main>@try { <List ids={props.ids} load={props.loa
 			const serverLoad = vi.fn(async (id: string) => `server ${id}`);
 			const browserLoad = vi.fn(async (id: string) => `browser ${id}`);
 			const streamedSignals = { buildId: 'returned-keyed', documentId: 'returned-keyed' };
-			const container = document.createElement('div');
-			document.body.append(container);
+			const responseDocument = createStreamedDocument();
+			const { container } = responseDocument;
 			const texts = () => [...container.querySelectorAll('output')].map((node) => node.textContent);
 			let root: ReturnType<typeof client.hydrateRoot> | undefined;
 			let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
@@ -1294,7 +1303,10 @@ export function App(props) @{ <main>@try { <List ids={props.ids} load={props.loa
 				const outputs = [...container.querySelectorAll('output')];
 				expect(texts()).toEqual(expected);
 				const errors: unknown[] = [];
-				hydration = bootstrapStreamedSignalHydration(streamedSignals);
+				hydration = bootstrapStreamedSignalHydration({
+					...streamedSignals,
+					document: responseDocument.document,
+				});
 				root = client.hydrateRoot(
 					container,
 					clientModule.App,
@@ -1323,7 +1335,7 @@ export function App(props) @{ <main>@try { <List ids={props.ids} load={props.loa
 				root?.unmount();
 				hydration?.dispose();
 				container.remove();
-				resetStreamRuntimeGlobals();
+				responseDocument.dispose();
 			}
 		},
 	);
@@ -1519,7 +1531,7 @@ export function App(props) { return <main><Suspense fallback={<i>waiting</i>}>{[
 			const { bootstrapStreamedSignalHydration } =
 				await import('../../src/hydration/streamed-signals.js');
 			const { loadCompiledFixtureSource } = await import('../_server-fixture.js');
-			const { activateStreamedMarkup, resetStreamRuntimeGlobals } =
+			const { activateStreamedMarkup, createStreamedDocument } =
 				await import('../_server-stream.js');
 			const { drainProducers } = await import('../_fixtures/signals-async-controls.js');
 			const app = `import { Fragment, Suspense, use, useState } from 'octane';${signalsApp ? " import 'octane/signals';" : ''}
@@ -1554,8 +1566,8 @@ ${source}`;
 			const serverLoad = vi.fn(async () => 'server result');
 			const browserLoad = vi.fn(async () => 'browser result');
 			const streamedSignals = { buildId: 'returned-jsx', documentId: 'returned-jsx' };
-			const container = document.createElement('div');
-			document.body.append(container);
+			const responseDocument = createStreamedDocument();
+			const { container } = responseDocument;
 			let root: ReturnType<typeof client.hydrateRoot> | undefined;
 			let hydration: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
 			try {
@@ -1573,7 +1585,10 @@ ${source}`;
 				const outputs = [...container.querySelectorAll('output')];
 				expect(outputs.map((node) => node.textContent)).toEqual(Array(rows).fill('server result'));
 				const errors: unknown[] = [];
-				hydration = bootstrapStreamedSignalHydration(streamedSignals);
+				hydration = bootstrapStreamedSignalHydration({
+					...streamedSignals,
+					document: responseDocument.document,
+				});
 				root = client.hydrateRoot(
 					container,
 					clientModule.App,
@@ -1603,7 +1618,7 @@ ${source}`;
 				root?.unmount();
 				hydration?.dispose();
 				container.remove();
-				resetStreamRuntimeGlobals();
+				responseDocument.dispose();
 			}
 		},
 	);
