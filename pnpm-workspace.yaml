@@ -290,7 +290,7 @@ catalogs:
     '@tanstack/react-router': 1.170.41
     '@tanstack/react-store': ^0.11.1
     '@tanstack/react-virtual': 3.14.5
-    '@tanstack/router-core': https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz
+    '@tanstack/router-core': https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz
     '@tanstack/store': ^0.9.3
     '@tanstack/virtual-core': 3.17.3
     '@wagmi/connectors': 8.2.0

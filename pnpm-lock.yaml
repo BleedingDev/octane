@@ -523,8 +523,8 @@ catalogs:
       specifier: 1.170.41
       version: 1.170.41
     '@tanstack/router-core':
-      specifier: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz
-      version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz
+      specifier: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz
+      version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz
     '@tanstack/store':
       specifier: ^0.9.3
       version: 0.9.3
@@ -3739,7 +3739,7 @@ importers:
         version: 0.21.1
       '@tanstack/router-core':
         specifier: catalog:default
-        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz
+        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz
       '@tanstack/start-client-core':
         specifier: 1.170.38
         version: 1.170.38
@@ -4083,7 +4083,7 @@ importers:
         version: link:../../../packages/tanstack-start
       '@tanstack/router-core':
         specifier: catalog:default
-        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz
+        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz
       '@tanstack/start-client-core':
         specifier: 1.170.38
         version: 1.170.38
@@ -9291,7 +9291,7 @@ importers:
         version: 1.170.41(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@tanstack/router-core':
         specifier: catalog:default
-        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz
+        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz
       '@tsrx/react':
         specifier: catalog:default
         version: 0.4.5(react@19.2.7)
@@ -9318,7 +9318,7 @@ importers:
         version: 5.102.8
       '@tanstack/router-ssr-query-core':
         specifier: 1.169.3
-        version: 1.169.3(@tanstack/query-core@5.102.8)(@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz)
+        version: 1.169.3(@tanstack/query-core@5.102.8)(@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz)
     devDependencies:
       '@octanejs/tanstack-query':
         specifier: workspace:*
@@ -9334,10 +9334,10 @@ importers:
         version: 1.170.41(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@tanstack/react-router-ssr-query':
         specifier: 1.167.3
-        version: 1.167.3(@tanstack/query-core@5.102.8)(@tanstack/react-query@5.102.8(react@19.2.7))(@tanstack/react-router@1.170.41(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+        version: 1.167.3(@tanstack/query-core@5.102.8)(@tanstack/react-query@5.102.8(react@19.2.7))(@tanstack/react-router@1.170.41(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@tanstack/router-core':
         specifier: catalog:default
-        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz
+        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz
       '@tanstack/router-core-pristine':
         specifier: npm:@tanstack/router-core@1.171.34
         version: '@tanstack/router-core@1.171.34'
@@ -9467,7 +9467,7 @@ importers:
         version: 2.1.6(core-js@3.49.0)
       '@tanstack/router-core':
         specifier: catalog:default
-        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz
+        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz
       '@tanstack/start-client-core':
         specifier: 1.170.38
         version: 1.170.38
@@ -10966,7 +10966,7 @@ importers:
         version: link:../packages/three
       '@tanstack/router-core':
         specifier: catalog:default
-        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz
+        version: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz
       '@tanstack/start-client-core':
         specifier: 1.170.38
         version: 1.170.38
@@ -20259,8 +20259,8 @@ packages:
     resolution: {integrity: sha512-XRZVxiO6BIexICmEo3XfPmpoyyLhbjgaMJsONz4gIf5oYys0UiaG1BJGRyj9x8QZPDZcBhvAMuTYN70wSxV0gA==}
     engines: {node: '>=20.19'}
 
-  '@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz':
-    resolution: {integrity: sha512-hEAwa1CtQ5uKPfDF55OMGWq+7klE1RqJiPLtzSofC0szsMGWnTWENHOzmS9BC71VHXRHuXx2blG6ZerQ8Bd5tQ==, tarball: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz}
+  '@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz':
+    resolution: {integrity: sha512-d/aGvcyEVwDh2Cn9MuZM1n1dqTIqkFYi7AHY2Na/6x/a0jVSDVTNVVVY7QEsuKFXktaJF9zjVwetaRm/0MALZg==, tarball: https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz}
     version: 1.171.38
     engines: {node: '>=20.19'}
 
@@ -46996,12 +46996,12 @@ snapshots:
     transitivePeerDependencies:
       - '@tanstack/router-core'
 
-  '@tanstack/react-router-ssr-query@1.167.3(@tanstack/query-core@5.102.8)(@tanstack/react-query@5.102.8(react@19.2.7))(@tanstack/react-router@1.170.41(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
+  '@tanstack/react-router-ssr-query@1.167.3(@tanstack/query-core@5.102.8)(@tanstack/react-query@5.102.8(react@19.2.7))(@tanstack/react-router@1.170.41(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
     dependencies:
       '@tanstack/query-core': 5.102.8
       '@tanstack/react-query': 5.102.8(react@19.2.7)
       '@tanstack/react-router': 1.170.41(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      '@tanstack/router-ssr-query-core': 1.169.3(@tanstack/query-core@5.102.8)(@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz)
+      '@tanstack/router-ssr-query-core': 1.169.3(@tanstack/query-core@5.102.8)(@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz)
       react: 19.2.7
       react-dom: 19.2.7(react@19.2.7)
     transitivePeerDependencies:
@@ -47302,7 +47302,7 @@ snapshots:
       seroval: 1.6.8
       seroval-plugins: 1.6.8(seroval@1.6.8)
 
-  '@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz':
+  '@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz':
     dependencies:
       '@tanstack/history': 1.162.5
       cookie-es: 3.1.1
@@ -47417,10 +47417,10 @@ snapshots:
       '@tanstack/query-core': 5.102.8
       '@tanstack/router-core': 1.171.38
 
-  '@tanstack/router-ssr-query-core@1.169.3(@tanstack/query-core@5.102.8)(@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz)':
+  '@tanstack/router-ssr-query-core@1.169.3(@tanstack/query-core@5.102.8)(@tanstack/router-core@https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz)':
     dependencies:
       '@tanstack/query-core': 5.102.8
-      '@tanstack/router-core': https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-0a4eed5ea37d/tanstack-router-core-1.171.38.tgz
+      '@tanstack/router-core': https://github.com/BleedingDev/router/releases/download/ultramodern-router-core-585d3233f7f5/tanstack-router-core-1.171.38.tgz
 
   '@tanstack/router-utils@1.162.2(supports-color@10.2.2)':
     dependencies:
