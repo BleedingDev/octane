@@ -9921,9 +9921,22 @@ function collectHotComponentExportFlows(input) {
 				} else break;
 			}
 			const callPosition = position ?? node.start;
-			// An unresolved callee may invoke a passed callback immediately. Follow
-			// callable values, not arbitrary payload objects, without proving its body.
-			const callbacks = [...(tagged ? node.quasi.expressions : node.arguments)];
+			const reflect = unwrapTsExpr(callee?.object);
+			const reflectMethod =
+				(node.type === 'CallExpression' || node.type === 'OptionalCallExpression') &&
+				(callee?.type === 'MemberExpression' || callee?.type === 'OptionalMemberExpression') &&
+				reflect?.type === 'Identifier' &&
+				reflect.name === 'Reflect' &&
+				lexical.resolveBinding(lexical.nodeScopes.get(reflect) ?? lexical.rootScope, 'Reflect') ===
+					null
+					? staticMemberName(callee)
+					: null;
+			// An unresolved callee may synchronously invoke callbacks in local
+			// containers. Descriptor inspection does not execute target values,
+			// but its key can run authored coercion code.
+			const callbacks = tagged
+				? [...node.quasi.expressions]
+				: node.arguments.slice(reflectMethod === 'getOwnPropertyDescriptor' ? 1 : 0);
 			const seenCallbacks = new Set();
 			while (callbacks.length) {
 				const callback = unwrapTsExpr(callbacks.pop());
@@ -9940,9 +9953,16 @@ function collectHotComponentExportFlows(input) {
 				} else if (callback.type === 'LogicalExpression') {
 					callbacks.push(callback.left, callback.right);
 				} else if (
-					['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(
-						callback.type,
-					) &&
+					[
+						'FunctionDeclaration',
+						'FunctionExpression',
+						'ArrowFunctionExpression',
+						'ObjectExpression',
+						'ArrayExpression',
+						'ClassDeclaration',
+						'ClassExpression',
+						'TSModuleDeclaration',
+					].includes(callback.type) &&
 					callPosition < aggregateStart(callback)
 				)
 					return true;
@@ -9955,15 +9975,8 @@ function collectHotComponentExportFlows(input) {
 				return true;
 			// Reflect invokes its target argument, which ordinary member traversal
 			// does not enter. Only the unshadowed intrinsic has this call contract.
-			const reflect = unwrapTsExpr(callee?.object);
 			if (
-				(node.type === 'CallExpression' || node.type === 'OptionalCallExpression') &&
-				(callee?.type === 'MemberExpression' || callee?.type === 'OptionalMemberExpression') &&
-				reflect?.type === 'Identifier' &&
-				reflect.name === 'Reflect' &&
-				lexical.resolveBinding(lexical.nodeScopes.get(reflect) ?? lexical.rootScope, 'Reflect') ===
-					null &&
-				(staticMemberName(callee) === 'apply' || staticMemberName(callee) === 'construct') &&
+				(reflectMethod === 'apply' || reflectMethod === 'construct') &&
 				earlyCapture(node.arguments, callPosition, new Set(), node, 'arguments', true)
 			)
 				return true;

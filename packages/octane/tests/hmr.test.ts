@@ -373,6 +373,32 @@ describe('hmr — runtime wrapper', () => {
 			after: 'function Helper() @{ <p>child:VERSION</p> }',
 		},
 		{
+			name: 'imported object callback invocation evaluated only during rendering',
+			before: "import { opaqueObjectInvoke } from './invoke'; function read() { return Helper; }",
+			local: 'const Child = opaqueObjectInvoke({ read });',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'imported static class callback invocation evaluated only during rendering',
+			before:
+				"import { opaqueObjectInvoke } from './invoke'; class Registry { static read() { return Helper; } }",
+			local: 'const Child = opaqueObjectInvoke(Registry);',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'imported array callback invocation evaluated only during rendering',
+			before: "import { opaqueArrayInvoke } from './invoke'; function read() { return Helper; }",
+			local: 'const Child = opaqueArrayInvoke([read]);',
+			after: 'function Helper() @{ <p>child:VERSION</p> }',
+		},
+		{
+			name: 'ordinary data passed to an imported helper',
+			before:
+				"import { opaqueData } from './invoke'; const label = opaqueData({ label: 'child', values: [1, 2] });",
+			local: 'const Child = Helper;',
+			after: 'function Helper() @{ <p>{label + ":VERSION" as string}</p> }',
+		},
+		{
 			name: 'Reflect apply evaluated only during rendering',
 			before: 'function read() { return Helper; }',
 			local: 'const Child = Reflect.apply(read, null, []);',
@@ -402,7 +428,14 @@ ${after.replaceAll('VERSION', String(version))}`;
 			const hot = webpackHotModule(
 				`/src/deferred-${name.replaceAll(' ', '-')}.tsrx`,
 				{ dev: true },
-				{ './invoke': { opaqueInvoke: (read: () => unknown) => read() } },
+				{
+					'./invoke': {
+						opaqueInvoke: (read: () => unknown) => read(),
+						opaqueObjectInvoke: (value: { read: () => unknown }) => value.read(),
+						opaqueArrayInvoke: (value: readonly [() => unknown]) => value[0](),
+						opaqueData: (value: { label: string }) => value.label,
+					},
+				},
 			);
 			const initial = hot.load(source(1));
 			const r = mount(initial, { open: true });
@@ -1312,6 +1345,11 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 			'const Initial = Counter; capture(Initial);',
 			'const Initial = opaqueInvoke(read); function read() { return Counter; } capture(Initial);',
 			'const Initial = opaqueInvoke(() => Counter); capture(Initial);',
+			'function read() { return Counter; } const Initial = opaqueObjectInvoke({ read }); capture(Initial);',
+			'class Registry { static read() { return Counter; } } const Initial = opaqueObjectInvoke(Registry); capture(Initial);',
+			'namespace Registry { export function read() { return Counter; } } const Initial = opaqueObjectInvoke(Registry); capture(Initial);',
+			'const Initial = opaqueObjectInvoke(class { static read() { return Counter; } }); capture(Initial);',
+			'function read() { return Counter; } const Initial = opaqueArrayInvoke([read]); capture(Initial);',
 			'function read() { return Counter; } const Initial = opaqueInvoke(() => read()); capture(Initial);',
 			'function read() { return Counter; } const callback = read; const Initial = opaqueInvoke(callback); capture(Initial);',
 			'function read() { return Counter; } const Initial = opaqueInvoke(true ? read : () => null); capture(Initial);',
@@ -1358,6 +1396,7 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 			'function expose() { return Counter; } const Initial = (0, expose)(); capture(Initial);',
 			'function read() { return Counter; } const Initial = Reflect.apply(read, null, []); capture(Initial);',
 			'function read() { return Counter; } const Initial = Reflect.construct(read, []); capture(Initial);',
+			"Reflect.getOwnPropertyDescriptor({}, { toString() { capture(Counter); return 'x'; } });",
 			'function expose() { return Counter; } const Initial = (true ? expose : () => null)(); capture(Initial);',
 			'function expose() { return Counter; } const Initial = (false ? () => null : expose)(); capture(Initial);',
 			'function expose() { return Counter; } const Initial = (false || expose)(); capture(Initial);',
@@ -1391,6 +1430,8 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 				{
 					'./capture': {
 						opaqueInvoke: (read: () => unknown) => read(),
+						opaqueObjectInvoke: (value: { read: () => unknown }) => value.read(),
+						opaqueArrayInvoke: (value: readonly [() => unknown]) => value[0](),
 						capture: (component: ComponentBody<any>) => {
 							captured = component;
 						},
@@ -1399,7 +1440,7 @@ export function App() @{ const [count, setCount] = useState(0); <button onClick=
 				target === undefined ? {} : { target },
 			);
 			const source = (version: number) => `import { useSignal$ } from 'octane/signals/client';
-import { capture, opaqueInvoke } from './capture';
+import { capture, opaqueInvoke, opaqueObjectInvoke, opaqueArrayInvoke } from './capture';
 ${capture}
 export function Counter() @{ const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{'v${version}:' + count$.get() as string}</button> }
 ${after ?? ''}`;
