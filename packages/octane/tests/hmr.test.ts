@@ -1409,6 +1409,76 @@ export function App(props) @{ <section>@if (props.visible) { <Slot component={pr
 		}
 	});
 
+	it.each(
+		[
+			'const wait = { then(done) { capture(App); done(); } }; await wait;',
+			'const wait = { get then() { capture(App); return (done) => done(); } }; await wait;',
+			'const wait = { then(done) { capture(App); done(); } }; const alias = wait; await alias;',
+		].flatMap((wait) => [true, false].map((early) => ({ wait, early }))),
+	)(
+		'propagates early awaited captures and preserves late ones: early=$early, $wait',
+		async ({ wait, early }) => {
+			let captured: ComponentBody<any> | undefined;
+			let dispose: ((data: Record<string, unknown>) => void) | undefined;
+			let accepted = false;
+			const hot: TestHotContext = {
+				data: {},
+				dispose(callback) {
+					dispose = callback;
+				},
+				accept() {
+					accepted = true;
+				},
+				invalidate() {
+					throw new Error('A compatible late capture should stay hot');
+				},
+			};
+			const load = async (version: number) => {
+				dispose?.(hot.data!);
+				dispose = undefined;
+				accepted = false;
+				await loadCompiledFixtureSource(
+					`import { useState } from 'octane'; import { capture } from './capture';
+${early ? wait : ''}
+export function App() @{ const [count, setCount] = useState(0); <button onClick={() => setCount(count + 1)}>{'v${version}:' + count as string}</button> }
+${early ? '' : wait}`,
+					{
+						id: `/src/awaited-capture-${early}-${wait.length}.tsrx`,
+						mode: 'client',
+						async: true,
+						compileOptions: { dev: true, hmr: 'webpack' },
+						importMeta: { webpackHot: hot },
+						runtimeModules: {
+							'octane/signals': Signals,
+							'./capture': {
+								capture: (component: ComponentBody<any>) => {
+									captured = component;
+								},
+							},
+						},
+					},
+				);
+			};
+			await load(1);
+			expect(accepted).toBe(!early);
+			const r = mount(captured!);
+			try {
+				r.click('button');
+				expect(r.find('button').textContent).toBe('v1:1');
+				await load(2);
+				flushSync(() => {});
+				expect(accepted).toBe(!early);
+				expect(r.find('button').textContent).toBe(early ? 'v1:1' : 'v2:1');
+				if (early) r.update(captured!);
+				expect(r.find('button').textContent).toBe(early ? 'v2:0' : 'v2:1');
+				r.click('button');
+				expect(r.find('button').textContent).toBe(early ? 'v2:1' : 'v2:2');
+			} finally {
+				r.unmount();
+			}
+		},
+	);
+
 	it('self-accepts direct eval after every component is initialized', () => {
 		let captured: ComponentBody<any> | undefined;
 		const hot = webpackHotModule(
