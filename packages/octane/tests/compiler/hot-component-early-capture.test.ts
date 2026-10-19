@@ -56,6 +56,104 @@ export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as s
 		).toBeUndefined();
 	});
 
+	it.each([
+		'+key',
+		'-key',
+		'~key',
+		'key + 0',
+		'0 + key',
+		'key - 0',
+		'key * 1',
+		'key / 1',
+		'key % 2',
+		'key ** 1',
+		'key << 1',
+		'key >> 1',
+		'key >>> 1',
+		'key & 1',
+		'key | 1',
+		'key ^ 1',
+		'key < 1',
+		'key <= 1',
+		'key > 1',
+		'key >= 1',
+		'key == 0',
+		'key != 0',
+		'`${key}`',
+		'key in {}',
+		'key++',
+		'--key',
+		'key += 1',
+		'key -= 1',
+		'key *= 1',
+		'key /= 1',
+		'key %= 2',
+		'key **= 1',
+		'key <<= 1',
+		'key >>= 1',
+		'key >>>= 1',
+		'key &= 1',
+		'key |= 1',
+		'key ^= 1',
+	])('fences component capture during implicit coercion: %s', (expression) => {
+		const source = `import { useSignal$ } from 'octane/signals/client';
+import { capture } from './capture';
+let key = { [Symbol.toPrimitive]() { capture(Counter); return 0; } };
+${expression};
+export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as string}</p> }`;
+		expect(
+			compile(source, '/src/Counter.tsrx', { hmr: 'webpack', dev: true }).hotSignalModule,
+		).toBeUndefined();
+	});
+
+	it.each([
+		'typeof key',
+		'void key',
+		'!key',
+		'key === 0',
+		'key !== 0',
+		'key && 0',
+		'key || 0',
+		'key ?? 0',
+		'key ? 0 : 1',
+		'key &&= 0',
+		'key ||= 0',
+		'key ??= 0',
+	])('admits object values used without implicit coercion: %s', (expression) => {
+		const source = `import { useSignal$ } from 'octane/signals/client';
+import { capture } from './capture';
+let key = { [Symbol.toPrimitive]() { capture(Counter); return 0; } };
+${expression};
+export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as string}</p> }`;
+		expect(
+			compile(source, '/src/Counter.tsrx', { hmr: 'webpack', dev: true }).hotSignalModule,
+		).toBeDefined();
+	});
+
+	it.each([
+		"'x' in (() => { capture(Counter); return {}; })()",
+		'(() => { capture(Counter); return {}; })() instanceof Object',
+	])('fences captures while evaluating a noncoerced operator operand: %s', (expression) => {
+		const source = `import { useSignal$ } from 'octane/signals/client';
+import { capture } from './capture';
+${expression};
+export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as string}</p> }`;
+		expect(
+			compile(source, '/src/Counter.tsrx', { hmr: 'webpack', dev: true }).hotSignalModule,
+		).toBeUndefined();
+	});
+
+	it('fences component capture by an instanceof predicate', () => {
+		const source = `import { useSignal$ } from 'octane/signals/client';
+import { capture } from './capture';
+const predicate = { [Symbol.hasInstance]() { capture(Counter); return true; } };
+({}) instanceof predicate;
+export function Counter() @{ const count$ = useSignal$(0); <p>{count$.get() as string}</p> }`;
+		expect(
+			compile(source, '/src/Counter.tsrx', { hmr: 'webpack', dev: true }).hotSignalModule,
+		).toBeUndefined();
+	});
+
 	it('admits later component references evaluated only when a component renders', () => {
 		const source = `import { useSignal$ } from 'octane/signals/client';
 export function App() @{ <Slot component={Counter} /> }

@@ -9855,6 +9855,46 @@ function collectHotComponentExportFlows(input) {
 			const value = bindings.get(node.name)?.item.init ?? opaqueDeclarations.get(node.name);
 			if (value) return (position ?? node.start) < aggregateStart(value);
 		}
+		// Operators can synchronously invoke authored conversion or @@hasInstance
+		// callbacks. Boolean tests and strict identity do not coerce object values.
+		if (!aggregate) {
+			const coercion =
+				(node.type === 'UnaryExpression' &&
+					(node.operator === '+' || node.operator === '-' || node.operator === '~')) ||
+				node.type === 'UpdateExpression'
+					? node.argument
+					: node.type === 'BinaryExpression' && node.operator === 'in'
+						? node.left
+						: node.type === 'BinaryExpression' && node.operator === 'instanceof'
+							? node.right
+							: node.type === 'TemplateLiteral' && parent?.type !== 'TaggedTemplateExpression'
+								? node.expressions
+								: null;
+			const coercesBoth =
+				(node.type === 'BinaryExpression' &&
+					node.operator !== '===' &&
+					node.operator !== '!==' &&
+					node.operator !== 'in' &&
+					node.operator !== 'instanceof') ||
+				(node.type === 'AssignmentExpression' &&
+					node.operator !== '=' &&
+					node.operator !== '&&=' &&
+					node.operator !== '||=' &&
+					node.operator !== '??=');
+			if (coercesBoth)
+				return (
+					(position ?? node.start) < aggregateStart(node.left) ||
+					(position ?? node.start) < aggregateStart(node.right)
+				);
+			if (coercion) {
+				if ((position ?? node.start) < aggregateStart(coercion)) return true;
+				// Reachability already covered the coerced operand. The other
+				// operand of in/instanceof still executes without being coerced.
+				if (node.type !== 'BinaryExpression') return false;
+				const other = node.operator === 'in' ? 'right' : 'left';
+				return earlyCapture(node[other], position, active, node, other);
+			}
+		}
 		// Computed property names can execute authored ToPropertyKey coercion.
 		if (
 			!aggregate &&
