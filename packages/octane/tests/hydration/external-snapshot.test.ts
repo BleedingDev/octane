@@ -396,6 +396,76 @@ function registerTheme() {
 	);
 }
 
+describe('scoped children from another runtime copy', () => {
+	it.each(['element', 'value'] as const)(
+		'keeps a suspended %s read inside its nearest boundary',
+		async (kind) => {
+			vi.resetModules();
+			const Foreign = await import('../../src/runtime.js');
+			const initial = deferred<void>();
+			const replacement = deferred<void>();
+			const Content = (props: { children: unknown }) => props.children;
+			const Editor = () => {
+				Client.use(initial.promise);
+				return Client.createElement('input', { defaultValue: 'ready' });
+			};
+			const App = (props: { revised: boolean }) => {
+				const children = () => {
+					if (props.revised) Client.use(replacement.promise);
+					return Client.createElement(Editor);
+				};
+				const child =
+					kind === 'element'
+						? Foreign.createScopedElement(Content, null, children)
+						: Foreign.createScopedValue(() =>
+								Client.createElement(Content, { children: children() }),
+							);
+				return Client.createElement(Client.Suspense, {
+					fallback: Client.createElement('p', { id: 'outer-pending', children: 'outer' }),
+					children: Client.createElement('section', {
+						children: Client.createElement(Client.Suspense, {
+							fallback: Client.createElement('p', { id: 'inner-pending', children: 'inner' }),
+							children: child,
+						}),
+					}),
+				});
+			};
+			const container = document.createElement('div');
+			container.innerHTML = Server.renderToString(() =>
+				Server.createElement(Server.Suspense, {
+					fallback: undefined,
+					children: Server.createElement('section', {
+						children: Server.createElement(Server.Suspense, {
+							fallback: undefined,
+							children: Server.createElement('input', { defaultValue: 'ready' }),
+						}),
+					}),
+				}),
+			).html;
+			document.body.append(container);
+			let root: ReturnType<typeof Client.hydrateRoot> | undefined;
+			try {
+				await Client.act(() => {
+					root = Client.hydrateRoot(container, App, { revised: false });
+				});
+				await Client.act(() => root!.render(App, { revised: true }));
+				expect(container.querySelector('#outer-pending')).toBeNull();
+				expect(container.querySelector('#inner-pending')?.textContent).toBe('inner');
+				await Client.act(() => {
+					initial.resolve();
+					replacement.resolve();
+				});
+				expect(container.querySelector('input')?.value).toBe('ready');
+			} finally {
+				initial.resolve();
+				replacement.resolve();
+				root?.unmount();
+				container.remove();
+			}
+		},
+	);
+});
+
 describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 	it.each([false, true])(
 		'adopts a lazy nested publisher and handles a host update=%s',

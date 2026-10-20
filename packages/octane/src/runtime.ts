@@ -17044,16 +17044,15 @@ const scopedChildrenTryBody: ComponentBody = (_props, scope, env) => {
 	childrenAsBody((env as [{ children: unknown }])[0].children)(undefined, scope, undefined);
 };
 
-// A retry can recreate a descriptor with unchanged inputs. Only inspect plain
-// descriptors here: scoped values must resolve inside their owning boundary.
+// A retry can recreate a descriptor with unchanged inputs. Scoped descriptors
+// expose children through an accessor even across runtime copies; their fields
+// must resolve inside the owning boundary.
 function sameHydrationElement(previous: unknown, next: unknown): boolean {
 	return (
 		isElementDescriptor(previous) &&
 		isElementDescriptor(next) &&
-		!(SCOPED_VALUE_RECORD in previous) &&
-		!(SCOPED_VALUE_RECORD in next) &&
-		!SCOPED_ELEMENT_PROPS.has(previous.props) &&
-		!SCOPED_ELEMENT_PROPS.has(next.props) &&
+		Object.getOwnPropertyDescriptor(previous, 'children')?.get === undefined &&
+		Object.getOwnPropertyDescriptor(next, 'children')?.get === undefined &&
 		previous.type === next.type &&
 		previous.key === next.key &&
 		elementKeyWasProvided(previous) === elementKeyWasProvided(next) &&
