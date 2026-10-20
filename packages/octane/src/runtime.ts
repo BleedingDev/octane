@@ -17452,10 +17452,72 @@ function reconcilePublisherMemberships(lease: NativePublisherHydration): void {
 	}
 }
 
+function admitNativeRootComponent(component: HmrWrapper, scope: Scope): void {
+	const block = scope.block;
+	const ids = block.idState;
+	const root = ids.renderOwner;
+	const owner = root?.signalOwner;
+	const driver = getNativeHotOwnerDriver();
+	if (
+		ids.dataOwner !== undefined ||
+		owner === undefined ||
+		driver === undefined ||
+		scope.hooks?.has(HMR)
+	)
+		return;
+	const buildId = driver.getComponentBuild(component);
+	if (buildId === undefined) return;
+	const document =
+		block.parentNode.nodeType === 9
+			? (block.parentNode as Document)
+			: block.parentNode.ownerDocument!;
+	const authority = getNativeStreamedAuthority(owner, document);
+	const currentOwner = () =>
+		root!.disposed ||
+		block.disposed ||
+		root!.current === null ||
+		root!.signalOwner !== owner ||
+		ids.dataOwner !== undefined ||
+		!blockIsAncestor(root!.current, block) ||
+		!component[HMR]!.liveBlocks.has(block) ||
+		(authority !== undefined && getNativeStreamedAuthority(owner, document) !== authority)
+			? undefined
+			: owner;
+	const proof = driver.createProof({
+		publisherKey: `root:${ids.prefix}`,
+		documentId: authority?.documentId ?? root!.externalSnapshotDocumentId ?? owner.scopeKey,
+		ownerKey: owner.scopeKey,
+		buildId,
+		currentOwner,
+		acceptsComponent: (candidate) => candidate === component && currentOwner() !== undefined,
+		// A document ingress is shared by its roots. Its generation cannot rotate
+		// through one component's update, unlike an isolated publisher ingress.
+		suspendIngress: () => {
+			if (getNativeStreamedAuthority(owner, document) !== undefined)
+				throw new TypeError(formatClientError(349));
+		},
+		rotateIngress: noop,
+		// Ordinary roots may share their data owner. Incompatible signal edits
+		// must reload rather than retire another root's live document cells.
+		remount: () => {
+			throw new TypeError(formatClientError(349));
+		},
+	});
+	const release = driver.admit(component, proof);
+	ensureHooks(scope).set(HMR, true);
+	registerHookCleanup(scope, () => {
+		release();
+		scope.hooks?.delete(HMR);
+	});
+}
+
 function admitNativePublisherComponent(component: HmrWrapper, scope: Scope): void {
 	const owner = scope.block.idState.dataOwner;
-	if (owner === undefined || nativePublisherHydrations === undefined) return;
-	const lease = nativePublisherHydrations.get(owner);
+	if (owner === undefined) {
+		admitNativeRootComponent(component, scope);
+		return;
+	}
+	const lease = nativePublisherHydrations?.get(owner);
 	const driver = getNativeHotOwnerDriver();
 	if (lease === undefined || driver === undefined || !publisherContainsComponent(lease, component))
 		return;

@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { renderToString } from 'octane/server';
+import { renderToString, earlySignalBootstrapScript } from 'octane/server';
 import * as Signals from 'octane/signals';
 import * as ClientSignals from 'octane/signals/client';
+import * as ServerSignals from 'octane/signals/server';
+import { bootstrapStreamedSignalHydration } from 'octane/hydration/streamed-signals';
 import {
 	hmr,
 	HMR,
@@ -16,6 +18,7 @@ import {
 import { mount } from './_helpers';
 import { loadCompiledFixtureSource, loadPlainHookFixtureSource } from './_server-fixture';
 import { drainProducers } from './_fixtures/signals-async-controls';
+import { activateStreamedMarkup, resetStreamRuntimeGlobals } from './_server-stream';
 import {
 	admitHotSignalPublisher,
 	createNativeHotSignalOwnerProof,
@@ -1975,6 +1978,130 @@ export function App(props) @{ <main><Suspense fallback={<p>pending</p>}><section
 				expect(r.find('button').textContent).toBe('v2:2');
 			} finally {
 				r.unmount();
+			}
+		},
+	);
+
+	it.each([false, true])(
+		'admits ordinary document signal roots without resetting siblings (hydrate: %s)',
+		async (hydrate) => {
+			const { compile } = await import('octane/compiler');
+			const filename = `/src/document-counter-${hydrate}.tsrx`;
+			const counterSource = `import { useSignal$ } from 'octane/signals/client';
+export function Counter() @{ const count$ = useSignal$(0); <button onClick={() => count$.set(count$.get() + 1)}>{count$.get() as string}</button> }`;
+			const messageSource = (version: number) =>
+				`export function Message() @{ <p>message ${version}</p> }`;
+			const hostSource = `import { Counter } from './counter'; import { Message } from './message';
+export function App() @{ <main><Counter /><Message /></main> }`;
+			const counterHot = webpackHotModule(filename, { dev: true });
+			const messageHot = webpackHotModule(`/src/document-message-${hydrate}.tsrx`, { dev: true });
+			const manifest = compile(counterSource, filename, {
+				hmr: 'webpack',
+				dev: true,
+			}).hotSignalModule!;
+			const runtime: HotSignalRuntime = {
+				modules: new Map([['counter', [manifest]]]),
+				features: new Set(['counter']),
+				executed: new Set(['counter']),
+				buildId: 'document-build:1',
+				generationChanged: false,
+			};
+			const globals = globalThis as Record<symbol, any>;
+			const executionKey = Symbol.for('octane.hot-signals.execution');
+			const bridgeKey = Symbol.for('octane.hot-signals.bridge');
+			const previous = globals[executionKey];
+			const owner = Signals.createScope({ scopeKey: `ordinary-document-${hydrate}` });
+			const container = document.createElement('div');
+			document.body.appendChild(container);
+			let root: ReturnType<typeof createRoot> | undefined;
+			let ingress: ReturnType<typeof bootstrapStreamedSignalHydration> | undefined;
+			try {
+				const frame: HotSignalExecutionFrame = {
+					runtime,
+					executableId: 'counter',
+					buildId: runtime.buildId,
+					manifests: [manifest],
+					hot: false,
+					requiresAdmission: true,
+				};
+				globals[executionKey] = frame;
+				const Counter = counterHot.load(counterSource, 'Counter');
+				globals[bridgeKey].afterFactory(frame);
+				delete globals[executionKey];
+				const Message = messageHot.load(messageSource(1), 'Message');
+				const { App } = loadCompiledFixtureSource(hostSource, {
+					id: `/src/document-host-${hydrate}.tsrx`,
+					mode: 'client',
+					runtimeModules: { './counter': { Counter }, './message': { Message } },
+				});
+				if (hydrate) {
+					const serverCounter = loadCompiledFixtureSource(counterSource, {
+						id: filename,
+						mode: 'server',
+						runtimeModules: { 'octane/signals/server': ServerSignals, 'octane/signals': Signals },
+					});
+					const serverMessage = loadCompiledFixtureSource(messageSource(1), {
+						id: `/src/document-message-${hydrate}.tsrx`,
+						mode: 'server',
+					});
+					const serverHost = loadCompiledFixtureSource(hostSource, {
+						id: `/src/document-host-${hydrate}.tsrx`,
+						mode: 'server',
+						runtimeModules: { './counter': serverCounter, './message': serverMessage },
+					});
+					container.innerHTML =
+						earlySignalBootstrapScript() +
+						renderToString(
+							serverHost['App'],
+							{},
+							{
+								signalOwner: owner,
+								streamedSignals: {
+									buildId: runtime.buildId,
+									documentId: `ordinary-document-${hydrate}`,
+								},
+							},
+						).html;
+					activateStreamedMarkup(container);
+					ingress = bootstrapStreamedSignalHydration({
+						buildId: runtime.buildId,
+						documentId: `ordinary-document-${hydrate}`,
+						document,
+						signalOwner: owner,
+					});
+					flushSync(() => {
+						root = hydrateRoot(container, App, undefined, { signalOwner: owner });
+					});
+				} else {
+					root = createRoot(container, { signalOwner: owner });
+					flushSync(() => root!.render(App));
+				}
+				flushSync(() => container.querySelector('button')!.click());
+				expect(container.querySelector('button')!.textContent).toBe('1');
+				const button = container.querySelector('button');
+				expect(globals[bridgeKey].allowStatus(runtime, 'check')).toBe(true);
+				flushSync(() => messageHot.load(messageSource(2), 'Message'));
+				expect(messageHot.invalidated).toBe(false);
+				expect(container.querySelector('p')!.textContent).toBe('message 2');
+				expect(container.querySelector('button')).toBe(button);
+				expect(button!.textContent).toBe('1');
+				root!.unmount();
+				root = undefined;
+				// Retired cells must not leave a stale root proof that fences cold modules.
+				expect(globals[bridgeKey].allowStatus(runtime, 'check')).toBe(true);
+				// Removing presentation ownership must not retire shared document data.
+				Signals.runWithSignalOwner(owner, () => {
+					const alive$ = Signals.signal$(7, { key: 'still-alive' });
+					expect(alive$.get()).toBe(7);
+				});
+			} finally {
+				root?.unmount();
+				ingress?.dispose();
+				container.remove();
+				owner.dispose();
+				if (hydrate) resetStreamRuntimeGlobals();
+				if (previous === undefined) delete globals[executionKey];
+				else globals[executionKey] = previous;
 			}
 		},
 	);
