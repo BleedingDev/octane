@@ -856,8 +856,8 @@ catalogs:
       specifier: ^2.5.1
       version: 2.5.1
     devalue:
-      specifier: ^5.8.2
-      version: 5.8.2
+      specifier: ^6.0.3
+      version: 6.0.3
     dexie:
       specifier: 4.4.4
       version: 4.4.4
@@ -1416,7 +1416,7 @@ overrides:
 packageExtensionsChecksum: sha256-XN5zp/IiFh7oL3uoVIj9kQwS10aRIZS77YifBp5DLNo=
 
 patchedDependencies:
-  '@tsrx/core@0.5.5': ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07
+  '@tsrx/core@0.5.5': b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50
   '@vitest/browser-playwright@4.1.10': 1957634122dfa6f4790b66e73a42343637af36d3fb182eb25e07fa261dbc27dd
   '@vitest/browser@4.1.10': d32609637593fc211ed808df6fbea6cb1da80adb049c0b0752bda8e1586d0ae0
   '@vitest/mocker@4.1.10': 538740e541a5a8ef50611b521995775cac3031548f696745eb4b90a7bd659ca4
@@ -3065,13 +3065,13 @@ importers:
     dependencies:
       '@tsrx/core':
         specifier: catalog:default
-        version: 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+        version: 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       alien-signals:
         specifier: catalog:default
         version: 3.2.1
       devalue:
         specifier: catalog:default
-        version: 5.8.2
+        version: 6.0.3
       esbuild:
         specifier: catalog:default
         version: 0.28.1
@@ -3354,7 +3354,7 @@ importers:
     dependencies:
       '@tsrx/core':
         specifier: catalog:default
-        version: 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+        version: 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       miniflare:
         specifier: catalog:default
         version: 4.20260714.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
@@ -5350,7 +5350,7 @@ importers:
     dependencies:
       devalue:
         specifier: catalog:default
-        version: 5.8.2
+        version: 6.0.3
       picomatch:
         specifier: ^4.0.3
         version: 4.0.5
@@ -7361,7 +7361,7 @@ importers:
     dependencies:
       '@tsrx/core':
         specifier: catalog:default
-        version: 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+        version: 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@types/react':
         specifier: catalog:default
         version: 19.2.18
@@ -7376,7 +7376,7 @@ importers:
         version: 3.2.3
       devalue:
         specifier: catalog:default
-        version: 5.8.2
+        version: 6.0.3
       es-module-lexer:
         specifier: catalog:default
         version: 1.7.0
@@ -7434,7 +7434,7 @@ importers:
     devDependencies:
       '@tsrx/core':
         specifier: catalog:default
-        version: 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+        version: 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@types/node':
         specifier: catalog:default
         version: 24.13.3
@@ -11004,7 +11004,7 @@ importers:
         version: 3.23.0
       '@tsrx/core':
         specifier: catalog:default
-        version: 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+        version: 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@tsrx/prettier-plugin':
         specifier: catalog:default
         version: 0.6.3(prettier@3.9.9)
@@ -25100,6 +25100,10 @@ packages:
 
   devalue@5.9.2:
     resolution: {integrity: sha512-po4PAY5c53tw5XMocSnf8A/5OHhbbUftpr93aEN6BBoAdntUmK7vu7wOATqvt7cXO7m1Cl4gMVn6p7n6n4mj0w==}
+
+  devalue@6.0.3:
+    resolution: {integrity: sha512-3woMEITftG1wKeO/4d/QXH1DVKctTSZg3jNGPpjp9hNr5Hos8MCFF5McTML5ZtgKDObm2R591B0spRp2IVernA==}
+    engines: {node: '>=18'}
 
   devlop@1.1.0:
     resolution: {integrity: sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA==}
@@ -48766,7 +48770,7 @@ snapshots:
     transitivePeerDependencies:
       - '@typescript-eslint/types'
 
-  '@tsrx/core@0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)':
+  '@tsrx/core@0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)':
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
       '@noble/hashes': 2.2.0
@@ -48829,7 +48833,7 @@ snapshots:
 
   '@tsrx/prettier-plugin@0.6.3(prettier@3.9.9)':
     dependencies:
-      '@tsrx/core': 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+      '@tsrx/core': 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       prettier: 3.9.9
     transitivePeerDependencies:
       - '@typescript-eslint/types'
@@ -48867,7 +48871,7 @@ snapshots:
 
   '@tsrx/react@0.4.5(react@18.2.0)':
     dependencies:
-      '@tsrx/core': 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+      '@tsrx/core': 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@tsrx/react-runtime': 0.1.12(react@18.2.0)
       esrap: 2.3.2
       react: 18.2.0
@@ -48877,7 +48881,7 @@ snapshots:
 
   '@tsrx/react@0.4.5(react@19.0.0)':
     dependencies:
-      '@tsrx/core': 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+      '@tsrx/core': 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@tsrx/react-runtime': 0.1.12(react@19.0.0)
       esrap: 2.3.2
       react: 19.0.0
@@ -48887,7 +48891,7 @@ snapshots:
 
   '@tsrx/react@0.4.5(react@19.2.3)':
     dependencies:
-      '@tsrx/core': 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+      '@tsrx/core': 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@tsrx/react-runtime': 0.1.12(react@19.2.3)
       esrap: 2.3.2
       react: 19.2.3
@@ -48897,7 +48901,7 @@ snapshots:
 
   '@tsrx/react@0.4.5(react@19.2.7)':
     dependencies:
-      '@tsrx/core': 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+      '@tsrx/core': 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@tsrx/react-runtime': 0.1.12(react@19.2.7)
       esrap: 2.3.2
       react: 19.2.7
@@ -48907,7 +48911,7 @@ snapshots:
 
   '@tsrx/react@0.4.5(react@19.2.8)':
     dependencies:
-      '@tsrx/core': 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+      '@tsrx/core': 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@tsrx/react-runtime': 0.1.12(react@19.2.8)
       esrap: 2.3.2
       react: 19.2.8
@@ -48917,7 +48921,7 @@ snapshots:
 
   '@tsrx/react@0.4.5(react@19.3.0)':
     dependencies:
-      '@tsrx/core': 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+      '@tsrx/core': 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@tsrx/react-runtime': 0.1.12(react@19.3.0)
       esrap: 2.3.2
       react: 19.3.0
@@ -48958,7 +48962,7 @@ snapshots:
   '@tsrx/solid@0.3.5(@solidjs/web@2.0.0-rc.14(solid-js@2.0.0-rc.14))(solid-js@2.0.0-rc.14)':
     dependencies:
       '@solidjs/web': 2.0.0-rc.14(solid-js@2.0.0-rc.14)
-      '@tsrx/core': 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+      '@tsrx/core': 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@tsrx/solid-runtime': 0.1.12(@solidjs/web@2.0.0-rc.14(solid-js@2.0.0-rc.14))(solid-js@2.0.0-rc.14)
       esrap: 2.3.2
       solid-js: 2.0.0-rc.14
@@ -48969,7 +48973,7 @@ snapshots:
   '@tsrx/solid@0.3.5(@solidjs/web@2.0.0-rc.3(solid-js@2.0.0-rc.3))(solid-js@2.0.0-rc.3)':
     dependencies:
       '@solidjs/web': 2.0.0-rc.3(solid-js@2.0.0-rc.3)
-      '@tsrx/core': 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+      '@tsrx/core': 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@tsrx/solid-runtime': 0.1.12(@solidjs/web@2.0.0-rc.3(solid-js@2.0.0-rc.3))(solid-js@2.0.0-rc.3)
       esrap: 2.3.2
       solid-js: 2.0.0-rc.3
@@ -48994,7 +48998,7 @@ snapshots:
 
   '@tsrx/vite-plugin-react@0.0.120(react@19.2.7)(vite@8.1.5(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.49.0)(tsx@4.23.1)(yaml@2.9.0))':
     dependencies:
-      '@tsrx/core': 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+      '@tsrx/core': 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@tsrx/react': 0.4.5(react@19.2.7)
       vite: 8.1.5(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.49.0)(tsx@4.23.1)(yaml@2.9.0)
     transitivePeerDependencies:
@@ -49003,7 +49007,7 @@ snapshots:
 
   '@tsrx/vite-plugin-solid@0.0.117(@solidjs/web@2.0.0-rc.14(solid-js@2.0.0-rc.14))(solid-js@2.0.0-rc.14)(vite@8.1.5(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.49.0)(tsx@4.23.1)(yaml@2.9.0))':
     dependencies:
-      '@tsrx/core': 0.5.5(patch_hash=ded7f85ce6e75409681e6374df7398569aff266b83d1bd63cfdf757c52366b07)
+      '@tsrx/core': 0.5.5(patch_hash=b9b1f2568e7fe143ba6e6fef41c3891e3d032e88af72d8f6ae1c745eb5dd8f50)
       '@tsrx/solid': 0.3.5(@solidjs/web@2.0.0-rc.14(solid-js@2.0.0-rc.14))(solid-js@2.0.0-rc.14)
       vite: 8.1.5(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.49.0)(tsx@4.23.1)(yaml@2.9.0)
     transitivePeerDependencies:
@@ -54417,6 +54421,8 @@ snapshots:
   devalue@5.8.2: {}
 
   devalue@5.9.2: {}
+
+  devalue@6.0.3: {}
 
   devlop@1.1.0:
     dependencies:
