@@ -37,9 +37,18 @@ it('accepts iframe cancellation signals and rejects signal lookalikes before dis
 			await route.fulfill({ contentType: 'application/json', body: '[{"value":1},42]' });
 		});
 		await page.goto(baseUrl);
+		// A page-side import() inside evaluate() would be rewritten by Vitest's SSR transform.
+		await page.addScriptTag({
+			type: 'module',
+			content:
+				"import { __serverRpc } from '/packages/octane/src/server-rpc-client.ts';" +
+				'globalThis.__serverRpc = __serverRpc;',
+		});
+		await page.waitForFunction(() => '__serverRpc' in globalThis);
 		const result = await page.evaluate(async () => {
-			const moduleUrl = '/packages/octane/src/server-rpc-client.ts';
-			const { __serverRpc } = await import(/* @vite-ignore */ moduleUrl);
+			const { __serverRpc } = globalThis as unknown as {
+				__serverRpc: typeof import('../../src/server-rpc-client.js').__serverRpc;
+			};
 			const iframe = document.createElement('iframe');
 			document.body.append(iframe);
 			try {
