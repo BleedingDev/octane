@@ -56,11 +56,12 @@ function transport(
 	) => any
 		? C
 		: never,
+	publisher = authority,
 ) {
 	return async (request: Server.ExternalSnapshotRequest, signal?: AbortSignal) => {
 		const prepared = await Server.prepareExternalSnapshotRequest(
 			Server.serializeExternalSnapshotRequest(request),
-			{ authority, ...(signal === undefined ? {} : { signal }) },
+			{ authority: publisher, ...(signal === undefined ? {} : { signal }) },
 		);
 		try {
 			return Server.decodeExternalSnapshot(
@@ -396,6 +397,118 @@ function registerTheme() {
 }
 
 describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
+	it.each([false, true])(
+		'adopts a lazy nested publisher and handles a host update=%s',
+		async (update) => {
+			type Props = { label: string };
+			const child = pair(
+				`import {useState} from 'octane';export function Child(props){const [count,setCount]=useState(0);return <article><input defaultValue="server"/><button onClick={()=>setCount(count+1)}>{props.label+':'+count}</button></article>;}`,
+				'/remote/NestedChild.tsx',
+				dev,
+			);
+			const nestedAuthority = { publisherBuildId: 'nested-build', runtimeABI: 1 as const };
+			const childReady = deferred<void>();
+			const remote = (
+				serverComponent: (props: Props) => unknown,
+				clientComponent: Client.ComponentBody<Props>,
+				publisher: typeof authority,
+				ready = Promise.resolve(),
+			) => {
+				const snapshot = transport(serverComponent, publisher);
+				const serverBoundary = Server.externalSnapshotBoundary({
+					authority: publisher,
+					component: serverComponent,
+					snapshot,
+				});
+				const browser = Client.lazy(async () => {
+					await ready;
+					const Forwarded: Client.ComponentBody<Props> = (props, scope, extra) =>
+						clientComponent(props, scope, extra);
+					return { default: Forwarded };
+				});
+				const clientBoundary = Client.externalSnapshotBoundary({
+					authority: publisher,
+					component: browser,
+					snapshot,
+				});
+				const serverLoaded = Server.lazy(async () => ({
+					default: (props: Props) => Server.createElement(serverBoundary, props),
+				}));
+				const clientLoaded = Client.lazy(async () => ({
+					default: (props: Props) => Client.createElement(clientBoundary, props),
+				}));
+				return {
+					server: (props: Props) =>
+						Server.createElement(Server.Suspense, {
+							fallback: undefined,
+							children: Server.createElement(serverLoaded, props),
+						}),
+					client: (props: Props) =>
+						Client.createElement(Client.Suspense, {
+							fallback: undefined,
+							children: Client.createElement(clientLoaded, props),
+						}),
+				};
+			};
+			const childRemote = remote(
+				child.server['Child'],
+				child.client['Child'],
+				nestedAuthority,
+				childReady.promise,
+			);
+			const parentSource = `import {Child} from './child';export function Parent(props){return <section><h2>Outer publisher</h2><Child label={props.label}/></section>;}`;
+			const parentServer = pair(parentSource, '/remote/NestedParent.tsx', dev, {
+				'./child': { Child: childRemote.server },
+			}).server['Parent'];
+			const parentClient = pair(parentSource, '/remote/NestedParent.tsx', dev, {
+				'./child': { Child: childRemote.client },
+			}).client['Parent'];
+			const parent = remote(parentServer, parentClient, authority);
+			const options = { externalSnapshots: { documentId: responseDocumentId('nested-publisher') } };
+			const container = document.createElement('div');
+			container.innerHTML = (await prerender(parent.server, { label: 'server' }, options)).html;
+			activateStreamedMarkup(container);
+			document.body.append(container);
+			const input = container.querySelector('input')!;
+			const button = container.querySelector('button')!;
+			input.value = 'typed before nested hydration';
+			const errors: unknown[] = [];
+			let root: ReturnType<typeof Client.hydrateRoot> | undefined;
+			try {
+				await Client.act(() => {
+					root = Client.hydrateRoot(
+						container,
+						parent.client,
+						{ label: 'server' },
+						{
+							...options,
+							onRecoverableError: (error) => errors.push(error),
+							onUncaughtError: (error) => errors.push(error),
+						},
+					);
+				});
+				expect(container.querySelector('input')).toBe(input);
+				if (update) await Client.act(() => root!.render(parent.client, { label: 'client' }));
+				await Client.act(() => childReady.resolve());
+				expect(errors).toEqual([]);
+				const liveButton = container.querySelector('button')!;
+				if (update) {
+					expect(liveButton.textContent).toBe('client:0');
+				} else {
+					expect(container.querySelector('input')).toBe(input);
+					expect(input.value).toBe('typed before nested hydration');
+					expect(liveButton).toBe(button);
+				}
+				await Client.act(() => liveButton.click());
+				expect(liveButton.textContent).toBe(update ? 'client:1' : 'server:1');
+			} finally {
+				childReady.resolve();
+				root?.unmount();
+				container.remove();
+			}
+		},
+	);
+
 	it.each([false, true])(
 		'retries a suspended host without losing publisher adoption or stream history, host lease=%s',
 		async (hostLease) => {

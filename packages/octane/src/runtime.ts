@@ -17044,6 +17044,25 @@ const scopedChildrenTryBody: ComponentBody = (_props, scope, env) => {
 	childrenAsBody((env as [{ children: unknown }])[0].children)(undefined, scope, undefined);
 };
 
+// A retry can recreate a descriptor with unchanged inputs. Only inspect plain
+// descriptors here: scoped values must resolve inside their owning boundary.
+function sameHydrationElement(previous: unknown, next: unknown): boolean {
+	return (
+		isElementDescriptor(previous) &&
+		isElementDescriptor(next) &&
+		!(SCOPED_VALUE_RECORD in previous) &&
+		!(SCOPED_VALUE_RECORD in next) &&
+		!SCOPED_ELEMENT_PROPS.has(previous.props) &&
+		!SCOPED_ELEMENT_PROPS.has(next.props) &&
+		previous.type === next.type &&
+		previous.key === next.key &&
+		elementKeyWasProvided(previous) === elementKeyWasProvided(next) &&
+		previous.__octaneInvocationSite === next.__octaneInvocationSite &&
+		previous.ref === next.ref &&
+		shallowEqualProps(previous.props, next.props)
+	);
+}
+
 function childrenTryBlock(
 	scope: Scope,
 	props: { children: unknown },
@@ -44445,7 +44464,14 @@ export function tryBlock(
 		const retains = state.branch === 2 || state.retrySignalOwners !== undefined;
 		const changed =
 			(retains || initial !== undefined) &&
-			(state.tryBody !== tryBody || (state.env !== env && depsChanged(state.env, env)));
+			(state.tryBody !== tryBody ||
+				(state.env !== env &&
+					depsChanged(state.env, env) &&
+					!(
+						initial !== undefined &&
+						tryBody === descriptorChildrenTryBody &&
+						sameHydrationElement(state.env?.[0], env?.[0])
+					)));
 		supersedesInputs = retains && changed;
 		// New inputs, not the retry its wakeable scheduled, reached a boundary
 		// whose hydration is suspended: as React does, it renders on the client.
