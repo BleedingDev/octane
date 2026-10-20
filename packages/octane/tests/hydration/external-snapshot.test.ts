@@ -466,6 +466,65 @@ describe('scoped children from another runtime copy', () => {
 	);
 });
 
+describe('element keys from another runtime copy', () => {
+	it.each([
+		{ before: false, after: true },
+		{ before: true, after: false },
+		{ before: false, after: false },
+		{ before: true, after: true },
+	])('preserves hydration key presence from $before to $after', async ({ before, after }) => {
+		vi.resetModules();
+		const Foreign = await import('../../src/runtime.js');
+		const ready = deferred<void>();
+		const Editor = () => {
+			Client.use(ready.promise);
+			return Client.createElement('input', { defaultValue: 'ready' });
+		};
+		const App = (props: { keyed: boolean }) =>
+			Client.createElement(Client.Suspense, {
+				fallback: Client.createElement('p', { children: 'loading' }),
+				children: Foreign.createElement(Editor, props.keyed ? { key: undefined } : {}),
+			});
+		const container = document.createElement('div');
+		container.innerHTML = Server.renderToString(() =>
+			Server.createElement(Server.Suspense, {
+				fallback: undefined,
+				children: Server.createElement('input', { defaultValue: 'ready' }),
+			}),
+		).html;
+		document.body.append(container);
+		const input = container.querySelector('input')!;
+		input.value = 'typed before hydration';
+		let root: ReturnType<typeof Client.hydrateRoot> | undefined;
+		try {
+			await Client.act(() => {
+				root = Client.hydrateRoot(container, App, { keyed: before });
+			});
+			expect(container.querySelector('input')).toBe(input);
+			await Client.act(() => root!.render(App, { keyed: after }));
+			if (before !== after) {
+				expect(container.querySelector('p')?.textContent).toBe('loading');
+			} else {
+				expect(container.querySelector('p')).toBeNull();
+				expect(container.querySelector('input')).toBe(input);
+			}
+			await Client.act(() => ready.resolve());
+			const hydrated = container.querySelector('input')!;
+			if (before !== after) {
+				expect(hydrated).not.toBe(input);
+				expect(hydrated.value).toBe('ready');
+			} else {
+				expect(hydrated).toBe(input);
+				expect(hydrated.value).toBe('typed before hydration');
+			}
+		} finally {
+			ready.resolve();
+			root?.unmount();
+			container.remove();
+		}
+	});
+});
+
 describe.each([false, true])('native external snapshots, dev=%s', (dev) => {
 	it.each([false, true])(
 		'adopts a lazy nested publisher and handles a host update=%s',

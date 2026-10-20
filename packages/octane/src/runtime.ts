@@ -35557,8 +35557,11 @@ export function createPortal(
 //
 // A non-null `key` already proves presence, so only the AMBIGUOUS nullish-key
 // case is recorded here — every `key={id}` element in a list would otherwise pay
-// a WeakSet insert per render. Read presence through `elementKeyWasProvided`.
-const KEYED_ELEMENT_DESCRIPTORS = new WeakSet<object>();
+// a WeakSet insert per render. Like the descriptor tag, presence must survive
+// runtime copies. Read it through `elementKeyWasProvided`.
+const KEYED_ELEMENT_DESCRIPTORS: WeakSet<object> = ((globalThis as any)[
+	Symbol.for('octane.keyedElementDescriptors')
+] ??= new WeakSet<object>());
 function elementKeyWasProvided(descriptor: ElementDescriptor): boolean {
 	return descriptor.key !== null || KEYED_ELEMENT_DESCRIPTORS.has(descriptor);
 }
