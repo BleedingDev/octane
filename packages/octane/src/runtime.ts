@@ -743,6 +743,9 @@ let FORM_SUBMIT_DRIVER: typeof handleFormSubmit | null = null;
 // recorder installs the row refresh and applications that never read context
 // omit the refresh graph from their lists.
 let SKIPPED_ROW_REFRESH: typeof refreshSkippedRows | null = null;
+// Only JSX descriptor children need this retry comparison. Compiled try bodies
+// must not retain the generic child renderer through a function identity check.
+let DESCRIPTOR_CHILDREN_TRY_BODY: ComponentBody | null = null;
 // Record actual committed ref identities only when an Activity is in use. A
 // hidden render may already have replaced its manifest's ref before cleanup;
 // the committed identity is the one that must be disconnected exactly once.
@@ -17078,7 +17081,7 @@ function childrenTryBlock(
 	} else if (typeof props.children === 'function') {
 		body = props.children as ComponentBody;
 	} else {
-		body = descriptorChildrenTryBody;
+		body = DESCRIPTOR_CHILDREN_TRY_BODY ??= descriptorChildrenTryBody;
 		env = [props.children];
 	}
 	return tryBlock(
@@ -44471,7 +44474,8 @@ export function tryBlock(
 					depsChanged(state.env, env) &&
 					!(
 						initial !== undefined &&
-						tryBody === descriptorChildrenTryBody &&
+						DESCRIPTOR_CHILDREN_TRY_BODY &&
+						tryBody === DESCRIPTOR_CHILDREN_TRY_BODY &&
 						sameHydrationElement(state.env?.[0], env?.[0])
 					)));
 		supersedesInputs = retains && changed;
