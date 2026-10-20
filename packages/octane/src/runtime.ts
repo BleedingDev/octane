@@ -743,6 +743,9 @@ let FORM_SUBMIT_DRIVER: typeof handleFormSubmit | null = null;
 // recorder installs the row refresh and applications that never read context
 // omit the refresh graph from their lists.
 let SKIPPED_ROW_REFRESH: typeof refreshSkippedRows | null = null;
+// Only JSX descriptor children need this retry comparison. Compiled try bodies
+// must not retain the generic child renderer through a function identity check.
+let DESCRIPTOR_CHILDREN_TRY_BODY: ComponentBody | null = null;
 // Record actual committed ref identities only when an Activity is in use. A
 // hidden render may already have replaced its manifest's ref before cleanup;
 // the committed identity is the one that must be disconnected exactly once.
@@ -17044,6 +17047,24 @@ const scopedChildrenTryBody: ComponentBody = (_props, scope, env) => {
 	childrenAsBody((env as [{ children: unknown }])[0].children)(undefined, scope, undefined);
 };
 
+// A retry can recreate a descriptor with unchanged inputs. Scoped descriptors
+// expose children through an accessor even across runtime copies; their fields
+// must resolve inside the owning boundary.
+function sameHydrationElement(previous: unknown, next: unknown): boolean {
+	return (
+		isElementDescriptor(previous) &&
+		isElementDescriptor(next) &&
+		Object.getOwnPropertyDescriptor(previous, 'children')?.get === undefined &&
+		Object.getOwnPropertyDescriptor(next, 'children')?.get === undefined &&
+		previous.type === next.type &&
+		previous.key === next.key &&
+		elementKeyWasProvided(previous) === elementKeyWasProvided(next) &&
+		previous.__octaneInvocationSite === next.__octaneInvocationSite &&
+		previous.ref === next.ref &&
+		shallowEqualProps(previous.props, next.props)
+	);
+}
+
 function childrenTryBlock(
 	scope: Scope,
 	props: { children: unknown },
@@ -17060,7 +17081,7 @@ function childrenTryBlock(
 	} else if (typeof props.children === 'function') {
 		body = props.children as ComponentBody;
 	} else {
-		body = descriptorChildrenTryBody;
+		body = DESCRIPTOR_CHILDREN_TRY_BODY ??= descriptorChildrenTryBody;
 		env = [props.children];
 	}
 	return tryBlock(
@@ -35539,8 +35560,11 @@ export function createPortal(
 //
 // A non-null `key` already proves presence, so only the AMBIGUOUS nullish-key
 // case is recorded here — every `key={id}` element in a list would otherwise pay
-// a WeakSet insert per render. Read presence through `elementKeyWasProvided`.
-const KEYED_ELEMENT_DESCRIPTORS = new WeakSet<object>();
+// a WeakSet insert per render. Like the descriptor tag, presence must survive
+// runtime copies. Read it through `elementKeyWasProvided`.
+const KEYED_ELEMENT_DESCRIPTORS: WeakSet<object> = ((globalThis as any)[
+	Symbol.for('octane.keyedElementDescriptors')
+] ??= new WeakSet<object>());
 function elementKeyWasProvided(descriptor: ElementDescriptor): boolean {
 	return descriptor.key !== null || KEYED_ELEMENT_DESCRIPTORS.has(descriptor);
 }
@@ -44445,7 +44469,15 @@ export function tryBlock(
 		const retains = state.branch === 2 || state.retrySignalOwners !== undefined;
 		const changed =
 			(retains || initial !== undefined) &&
-			(state.tryBody !== tryBody || (state.env !== env && depsChanged(state.env, env)));
+			(state.tryBody !== tryBody ||
+				(state.env !== env &&
+					depsChanged(state.env, env) &&
+					!(
+						initial !== undefined &&
+						DESCRIPTOR_CHILDREN_TRY_BODY &&
+						tryBody === DESCRIPTOR_CHILDREN_TRY_BODY &&
+						sameHydrationElement(state.env?.[0], env?.[0])
+					)));
 		supersedesInputs = retains && changed;
 		// New inputs, not the retry its wakeable scheduled, reached a boundary
 		// whose hydration is suspended: as React does, it renders on the client.
